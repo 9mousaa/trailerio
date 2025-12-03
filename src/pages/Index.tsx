@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
@@ -264,14 +265,9 @@ const Index = () => {
         {/* Footer */}
         <footer className="text-sm text-muted-foreground border-t border-border pt-8 flex justify-between items-center">
           <span>Powered by TMDB and iTunes</span>
-          <a
-            href={`${ADDON_URL}/stats`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hover:text-foreground transition-colors"
-          >
+          <Link to="/coverage" className="hover:text-foreground transition-colors">
             Coverage Stats
-          </a>
+          </Link>
         </footer>
       </div>
     </div>
