@@ -14,7 +14,33 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      itunes_mappings: {
+        Row: {
+          country: string | null
+          id: number
+          imdb_id: string
+          last_checked: string
+          preview_url: string | null
+          track_id: number | null
+        }
+        Insert: {
+          country?: string | null
+          id?: number
+          imdb_id: string
+          last_checked?: string
+          preview_url?: string | null
+          track_id?: number | null
+        }
+        Update: {
+          country?: string | null
+          id?: number
+          imdb_id?: string
+          last_checked?: string
+          preview_url?: string | null
+          track_id?: number | null
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
