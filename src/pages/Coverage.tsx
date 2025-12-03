@@ -5,13 +5,20 @@ import { ArrowLeft, Database, Target, TrendingUp, XCircle } from "lucide-react";
 const ADDON_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/stremio-addon`;
 
 interface Stats {
-  totalCached: number;
-  hits: number;
-  misses: number;
-  hitRate: string;
+  cache: {
+    totalEntries: number;
+    hits: number;
+    misses: number;
+    hitRate: string;
+  };
   recentMisses: Array<{
-    imdb_id: string;
-    last_checked: string;
+    imdbId: string;
+    lastChecked: string;
+  }>;
+  recentHits: Array<{
+    imdbId: string;
+    lastChecked: string;
+    country: string;
   }>;
 }
 
@@ -80,7 +87,7 @@ const Coverage = () => {
                 <Database className="w-5 h-5 text-muted-foreground" />
                 <span className="text-sm text-muted-foreground uppercase tracking-wide">Cached</span>
               </div>
-              <div className="text-4xl font-semibold">{stats?.totalCached || 0}</div>
+              <div className="text-4xl font-semibold">{stats?.cache?.totalEntries || 0}</div>
             </div>
 
             <div className="border border-border rounded-lg p-6">
@@ -88,7 +95,7 @@ const Coverage = () => {
                 <TrendingUp className="w-5 h-5 text-muted-foreground" />
                 <span className="text-sm text-muted-foreground uppercase tracking-wide">Hit Rate</span>
               </div>
-              <div className="text-4xl font-semibold">{stats?.hitRate || "0%"}</div>
+              <div className="text-4xl font-semibold">{stats?.cache?.hitRate || "0%"}</div>
             </div>
 
             <div className="border border-border rounded-lg p-6">
@@ -96,7 +103,7 @@ const Coverage = () => {
                 <Target className="w-5 h-5 text-muted-foreground" />
                 <span className="text-sm text-muted-foreground uppercase tracking-wide">Hits</span>
               </div>
-              <div className="text-4xl font-semibold">{stats?.hits || 0}</div>
+              <div className="text-4xl font-semibold">{stats?.cache?.hits || 0}</div>
             </div>
 
             <div className="border border-border rounded-lg p-6">
@@ -104,7 +111,7 @@ const Coverage = () => {
                 <XCircle className="w-5 h-5 text-muted-foreground" />
                 <span className="text-sm text-muted-foreground uppercase tracking-wide">Misses</span>
               </div>
-              <div className="text-4xl font-semibold">{stats?.misses || 0}</div>
+              <div className="text-4xl font-semibold">{stats?.cache?.misses || 0}</div>
             </div>
           </div>
         </section>
@@ -118,9 +125,9 @@ const Coverage = () => {
             <div className="border border-border rounded-lg divide-y divide-border">
               {stats.recentMisses.map((miss, index) => (
                 <div key={index} className="px-4 py-3 flex justify-between items-center">
-                  <code className="text-sm font-mono">{miss.imdb_id}</code>
+                  <code className="text-sm font-mono">{miss.imdbId}</code>
                   <span className="text-sm text-muted-foreground">
-                    {new Date(miss.last_checked).toLocaleDateString()}
+                    {new Date(miss.lastChecked).toLocaleDateString()}
                   </span>
                 </div>
               ))}
