@@ -102,18 +102,17 @@ async function getTMDBMetadata(imdbId: string, type: string) {
   };
 }
 
-// Search iTunes
-async function searchITunes(title: string, year: string | null, type: string) {
-  const searchTerm = year ? `${title} ${year}` : title;
+// Search iTunes - search by title only, use year for matching
+async function searchITunes(title: string, type: string) {
   const media = type === 'series' || type === 'tv' ? 'tvShow' : 'movie';
   const entity = type === 'series' || type === 'tv' ? 'tvSeason' : 'movie';
   
   const params = new URLSearchParams({
-    term: searchTerm,
+    term: title,
     media,
     entity,
     country: ITUNES_COUNTRY,
-    limit: '15'
+    limit: '25'
   });
   
   const url = `https://itunes.apple.com/search?${params}`;
@@ -218,20 +217,12 @@ async function resolvePreview(imdbId: string, type: string, supabase: any) {
   }
   
   // Step B: Search iTunes
-  const itunesResults = await searchITunes(
-    tmdbData.mainTitle,
-    tmdbData.year,
-    type
-  );
+  const itunesResults = await searchITunes(tmdbData.mainTitle, type);
   
   // Also try with original title if different
   let allResults = [...itunesResults];
   if (tmdbData.originalTitle && tmdbData.originalTitle !== tmdbData.mainTitle) {
-    const origResults = await searchITunes(
-      tmdbData.originalTitle,
-      tmdbData.year,
-      type
-    );
+    const origResults = await searchITunes(tmdbData.originalTitle, type);
     allResults = [...allResults, ...origResults];
   }
   
