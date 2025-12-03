@@ -178,7 +178,7 @@ const Coverage = () => {
             Coverage Stats
           </h1>
           <p className="text-muted-foreground">
-            Cache performance and iTunes preview availability.
+            Cache performance and preview availability.
           </p>
         </header>
 

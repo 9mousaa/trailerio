@@ -175,10 +175,10 @@ const Index = () => {
         {/* Header */}
         <header className="mb-16">
           <h1 className="text-3xl font-semibold tracking-tight mb-3">
-            iTunes Trailer Preview
+            Trailer Preview
           </h1>
           <p className="text-muted-foreground">
-            Stremio add-on for watching iTunes trailers and previews.
+            Stremio add-on for watching trailers and previews.
           </p>
         </header>
 
@@ -285,7 +285,7 @@ const Index = () => {
 
         {/* Footer */}
         <footer className="text-sm text-muted-foreground border-t border-border pt-8 flex justify-between items-center">
-          <span>Powered by TMDB and iTunes</span>
+          <span>Powered by TMDB</span>
           <Link to="/coverage" className="hover:text-foreground transition-colors">
             Coverage Stats
           </Link>

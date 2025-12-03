@@ -15,11 +15,11 @@ const MIN_SCORE_THRESHOLD = 0.6;
 const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
 
 const MANIFEST = {
-  id: "com.trailer.preview.itunes",
-  name: "iTunes Trailer Preview",
+  id: "com.trailer.preview",
+  name: "Trailer Preview",
   version: "2.0.0",
-  description: "Watch iTunes trailers and previews for movies and TV shows",
-  logo: "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/08/53/db/0853db7e-52e6-7f3e-c41e-f62f6a1c8a04/AppIcon-0-0-1x_U007emarketing-0-7-0-85-220.png/200x200bb.png",
+  description: "Watch trailers and previews for movies and TV shows",
+  logo: "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/Film_reel.svg/200px-Film_reel.svg.png",
   resources: [
     { name: "stream", types: ["movie", "series"], idPrefixes: ["tt"] }
   ],
