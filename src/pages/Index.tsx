@@ -9,7 +9,7 @@ const ADDON_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/stremio-add
 const MANIFEST_URL = `${ADDON_URL}/manifest.json`;
 
 const Index = () => {
-  const [testImdbId, setTestImdbId] = useState("tt0111161");
+  const [testImdbId, setTestImdbId] = useState("tt9362722"); // Spider-Man: Across the Spider-Verse
   const [testType, setTestType] = useState<"movie" | "series">("movie");
   const [testResult, setTestResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
@@ -147,7 +147,7 @@ const Index = () => {
                       IMDB ID
                     </label>
                     <Input
-                      placeholder="tt0111161"
+                      placeholder="tt9362722"
                       value={testImdbId}
                       onChange={(e) => setTestImdbId(e.target.value)}
                       className="font-mono"
