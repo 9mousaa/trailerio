@@ -9,14 +9,15 @@ const corsHeaders = {
 
 const TMDB_API_KEY = Deno.env.get('TMDB_API_KEY');
 const CACHE_DAYS = 30;
+const MIN_SCORE_THRESHOLD = 0.6;
 
-// Storefronts to try in order for maximum coverage
-const STOREFRONTS = ['us', 'gb', 'ca', 'au', 'de', 'fr'];
+// Country storefronts to try (Pass 3)
+const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
 
 const MANIFEST = {
   id: "com.trailer.preview.itunes",
   name: "iTunes Trailer Preview",
-  version: "1.1.0",
+  version: "2.0.0",
   description: "Watch iTunes trailers and previews for movies and TV shows",
   logo: "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/08/53/db/0853db7e-52e6-7f3e-c41e-f62f6a1c8a04/AppIcon-0-0-1x_U007emarketing-0-7-0-85-220.png/200x200bb.png",
   resources: [
@@ -27,39 +28,78 @@ const MANIFEST = {
   catalogs: []
 };
 
-// Normalize string for comparison
-function normalizeString(str: string): string {
-  return str.toLowerCase()
-    .replace(/[^\w\s]/g, '')
+// ============ TITLE NORMALIZATION ============
+
+function normalizeTitle(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // Remove accents
+    .replace(/[^\w\s]/g, '') // Remove punctuation
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-// Calculate similarity between two strings
-function calculateSimilarity(str1: string, str2: string): number {
-  const norm1 = normalizeString(str1);
-  const norm2 = normalizeString(str2);
+function fuzzyMatch(str1: string, str2: string): number {
+  const norm1 = normalizeTitle(str1);
+  const norm2 = normalizeTitle(str2);
   
-  if (norm1 === norm2) return 1;
+  if (norm1 === norm2) return 1.0;
   if (norm1.includes(norm2) || norm2.includes(norm1)) return 0.85;
   
-  const words1 = norm1.split(' ');
-  const words2 = norm2.split(' ');
-  const matchingWords = words1.filter(w => words2.includes(w)).length;
+  // Levenshtein-based similarity
+  const longer = norm1.length > norm2.length ? norm1 : norm2;
+  const shorter = norm1.length > norm2.length ? norm2 : norm1;
   
-  return matchingWords / Math.max(words1.length, words2.length);
+  if (longer.length === 0) return 1.0;
+  
+  const editDistance = levenshteinDistance(longer, shorter);
+  return (longer.length - editDistance) / longer.length;
 }
 
-// Get TMDB metadata
-async function getTMDBMetadata(imdbId: string, type: string) {
+function levenshteinDistance(s1: string, s2: string): number {
+  const costs: number[] = [];
+  for (let i = 0; i <= s1.length; i++) {
+    let lastValue = i;
+    for (let j = 0; j <= s2.length; j++) {
+      if (i === 0) {
+        costs[j] = j;
+      } else if (j > 0) {
+        let newValue = costs[j - 1];
+        if (s1.charAt(i - 1) !== s2.charAt(j - 1)) {
+          newValue = Math.min(Math.min(newValue, lastValue), costs[j]) + 1;
+        }
+        costs[j - 1] = lastValue;
+        lastValue = newValue;
+      }
+    }
+    if (i > 0) costs[s2.length] = lastValue;
+  }
+  return costs[s2.length];
+}
+
+// ============ TMDB METADATA ============
+
+interface TMDBMetadata {
+  tmdbId: number;
+  mediaType: 'movie' | 'tv';
+  title: string;
+  originalTitle: string;
+  year: number | null;
+  runtime: number | null; // in minutes
+  altTitles: string[];
+}
+
+async function getTMDBMetadata(imdbId: string, type: string): Promise<TMDBMetadata | null> {
   console.log(`Fetching TMDB metadata for ${imdbId}, type: ${type}`);
   
+  // Step 1: Find by IMDB ID
   const findUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
   const findResponse = await fetch(findUrl);
   const findData = await findResponse.json();
   
   let result = null;
-  let mediaType = type;
+  let mediaType: 'movie' | 'tv' = type === 'movie' ? 'movie' : 'tv';
   
   if (type === 'movie' && findData.movie_results?.length > 0) {
     result = findData.movie_results[0];
@@ -81,224 +121,314 @@ async function getTMDBMetadata(imdbId: string, type: string) {
   }
   
   const tmdbId = result.id;
+  
+  // Step 2: Get full details
   const detailUrl = `https://api.themoviedb.org/3/${mediaType}/${tmdbId}?api_key=${TMDB_API_KEY}`;
   const detailResponse = await fetch(detailUrl);
   const detail = await detailResponse.json();
   
+  // Step 3: Get alternative titles
+  const altTitlesUrl = `https://api.themoviedb.org/3/${mediaType}/${tmdbId}/alternative_titles?api_key=${TMDB_API_KEY}`;
+  const altTitlesResponse = await fetch(altTitlesUrl);
+  const altTitlesData = await altTitlesResponse.json();
+  
   const mainTitle = mediaType === 'movie' ? detail.title : detail.name;
   const originalTitle = mediaType === 'movie' ? detail.original_title : detail.original_name;
   const releaseDate = mediaType === 'movie' ? detail.release_date : detail.first_air_date;
-  const year = releaseDate ? releaseDate.substring(0, 4) : null;
+  const year = releaseDate ? parseInt(releaseDate.substring(0, 4)) : null;
+  const runtime = detail.runtime || null;
   
-  console.log(`TMDB: "${mainTitle}" (${year}), type: ${mediaType}`);
+  // Extract English alt titles (US, GB, CA, AU)
+  const altTitlesArray: string[] = [];
+  const englishCountries = ['US', 'GB', 'CA', 'AU'];
+  const titles = mediaType === 'movie' ? altTitlesData.titles : altTitlesData.results;
+  
+  if (titles) {
+    for (const t of titles) {
+      const country = t.iso_3166_1;
+      const titleText = t.title;
+      if (englishCountries.includes(country) && titleText && !altTitlesArray.includes(titleText)) {
+        altTitlesArray.push(titleText);
+      }
+    }
+  }
+  
+  console.log(`TMDB: "${mainTitle}" (${year}), original: "${originalTitle}", altTitles: ${altTitlesArray.length}`);
   
   return {
     tmdbId,
     mediaType,
-    mainTitle,
-    originalTitle,
+    title: mainTitle,
+    originalTitle: originalTitle || mainTitle,
     year,
-    runtime: detail.runtime
+    runtime,
+    altTitles: altTitlesArray
   };
 }
 
-// Search iTunes in a specific storefront
-async function searchITunesStorefront(title: string, country: string): Promise<any[]> {
-  const params = new URLSearchParams({
-    term: title,
-    country,
-    limit: '100'
-  });
-  
-  const url = `https://itunes.apple.com/search?${params}`;
-  
-  try {
-    const response = await fetch(url);
-    const data = await response.json();
-    return data.results || [];
-  } catch (error) {
-    console.error(`iTunes search error for ${country}:`, error);
-    return [];
-  }
+// ============ ITUNES SEARCH ============
+
+interface ITunesSearchParams {
+  term: string;
+  country: string;
+  type: 'movie' | 'tv';
 }
 
-// Filter results by type
-function filterByType(results: any[], type: string): any[] {
-  return results.filter((r: any) => {
-    if (type === 'movie') {
-      return r.kind === 'feature-movie';
-    } else if (type === 'series' || type === 'tv') {
-      return r.kind === 'tv-episode';
-    }
-    return false;
-  });
-}
-
-// Find best matching iTunes result for movies
-function findBestMovieMatch(
-  results: any[],
-  mainTitle: string,
-  originalTitle: string | null,
-  year: string | null
-): any | null {
-  if (!results || results.length === 0) return null;
+async function searchITunes(params: ITunesSearchParams): Promise<any[]> {
+  const { term, country, type } = params;
   
-  let bestMatch = null;
-  let bestScore = 0;
+  // Strategy: Try specific params first, fall back to general search
+  // Apple's entity=movie often returns 0 results, so we need fallbacks
   
-  for (const result of results) {
-    const itunesTitle = result.trackName || '';
-    const itunesYear = result.releaseDate ? result.releaseDate.substring(0, 4) : null;
+  const trySearch = async (extraParams: Record<string, string>, filterKind: string | null): Promise<any[]> => {
+    const queryParams = new URLSearchParams({
+      term,
+      country,
+      limit: '50',
+      ...extraParams
+    });
     
-    // Calculate title similarity
-    const mainSim = calculateSimilarity(itunesTitle, mainTitle);
-    const origSim = originalTitle ? calculateSimilarity(itunesTitle, originalTitle) : 0;
-    const titleScore = Math.max(mainSim, origSim);
+    const url = `https://itunes.apple.com/search?${queryParams}`;
+    console.log(`iTunes search: ${url}`);
     
-    // Year matching
-    let yearScore = 0.5;
-    let rejectDueToYear = false;
-    if (year && itunesYear) {
-      const yearDiff = Math.abs(parseInt(year) - parseInt(itunesYear));
-      if (yearDiff === 0) yearScore = 1;
-      else if (yearDiff === 1) yearScore = 0.9;
-      else if (yearDiff <= 2) yearScore = 0.7;
-      else if (yearDiff <= 5) yearScore = 0.4;
-      else {
-        yearScore = 0;
-        rejectDueToYear = true;
-      }
-    }
-    
-    const hasPreview = result.previewUrl ? 1 : 0;
-    const score = (titleScore * 0.5) + (yearScore * 0.3) + (hasPreview * 0.2);
-    
-    if (hasPreview && !rejectDueToYear && score > bestScore && score >= 0.5) {
-      bestScore = score;
-      bestMatch = result;
-      console.log(`Movie match: "${itunesTitle}" (${itunesYear}) score=${score.toFixed(2)}`);
-    }
-  }
-  
-  return bestMatch;
-}
-
-// Find best matching TV show episode
-function findBestTVMatch(
-  results: any[],
-  mainTitle: string,
-  originalTitle: string | null,
-  year: string | null
-): any | null {
-  if (!results || results.length === 0) return null;
-  
-  // Group episodes by show (artistName)
-  const showGroups: Map<string, any[]> = new Map();
-  
-  for (const result of results) {
-    const showName = result.artistName || '';
-    if (!showGroups.has(showName)) {
-      showGroups.set(showName, []);
-    }
-    showGroups.get(showName)!.push(result);
-  }
-  
-  let bestMatch = null;
-  let bestScore = 0;
-  
-  for (const [showName, episodes] of showGroups) {
-    // Match against show name (artistName), not episode title
-    const mainSim = calculateSimilarity(showName, mainTitle);
-    const origSim = originalTitle ? calculateSimilarity(showName, originalTitle) : 0;
-    const titleScore = Math.max(mainSim, origSim);
-    
-    // For TV shows, year matching is more lenient (shows run for years)
-    // Use the earliest episode's year for matching
-    const earliestEpisode = episodes.reduce((earliest, ep) => {
-      const epDate = ep.releaseDate ? new Date(ep.releaseDate) : new Date();
-      const earliestDate = earliest.releaseDate ? new Date(earliest.releaseDate) : new Date();
-      return epDate < earliestDate ? ep : earliest;
-    }, episodes[0]);
-    
-    const showYear = earliestEpisode.releaseDate ? earliestEpisode.releaseDate.substring(0, 4) : null;
-    
-    let yearScore = 0.6;
-    if (year && showYear) {
-      const yearDiff = Math.abs(parseInt(year) - parseInt(showYear));
-      if (yearDiff === 0) yearScore = 1;
-      else if (yearDiff <= 2) yearScore = 0.9;
-      else if (yearDiff <= 5) yearScore = 0.7;
-      else if (yearDiff <= 10) yearScore = 0.5;
-      else yearScore = 0.3; // Don't reject TV shows based on year - they can run long
-    }
-    
-    // Find episode with preview
-    const episodeWithPreview = episodes.find(ep => ep.previewUrl);
-    const hasPreview = episodeWithPreview ? 1 : 0;
-    
-    const score = (titleScore * 0.5) + (yearScore * 0.3) + (hasPreview * 0.2);
-    
-    if (hasPreview && score > bestScore && titleScore >= 0.6) {
-      bestScore = score;
-      bestMatch = episodeWithPreview;
-      console.log(`TV match: "${showName}" (${showYear}) score=${score.toFixed(2)}`);
-    }
-  }
-  
-  return bestMatch;
-}
-
-// Search across multiple storefronts
-async function searchMultipleStorefronts(
-  title: string,
-  originalTitle: string | null,
-  year: string | null,
-  type: string
-): Promise<{ result: any | null; country: string }> {
-  
-  for (const country of STOREFRONTS) {
-    console.log(`Searching iTunes ${country.toUpperCase()} for "${title}"`);
-    
-    // Search with main title
-    let rawResults = await searchITunesStorefront(title, country);
-    let filtered = filterByType(rawResults, type);
-    
-    // If no results, try original title
-    if (filtered.length === 0 && originalTitle && originalTitle !== title) {
-      console.log(`Trying original title: "${originalTitle}"`);
-      rawResults = await searchITunesStorefront(originalTitle, country);
-      filtered = filterByType(rawResults, type);
-    }
-    
-    // If still no results, try simplified title (first few words)
-    if (filtered.length === 0) {
-      const simplifiedTitle = title.split(/[:\-–]/)[0].trim();
-      if (simplifiedTitle !== title && simplifiedTitle.length >= 3) {
-        console.log(`Trying simplified title: "${simplifiedTitle}"`);
-        rawResults = await searchITunesStorefront(simplifiedTitle, country);
-        filtered = filterByType(rawResults, type);
-      }
-    }
-    
-    console.log(`${country.toUpperCase()}: ${filtered.length} ${type} results`);
-    
-    if (filtered.length > 0) {
-      const match = type === 'movie' 
-        ? findBestMovieMatch(filtered, title, originalTitle, year)
-        : findBestTVMatch(filtered, title, originalTitle, year);
+    try {
+      const response = await fetch(url);
+      const data = await response.json();
+      let results = data.results || [];
       
-      if (match) {
-        return { result: match, country };
+      if (filterKind) {
+        results = results.filter((r: any) => r.kind === filterKind);
+      }
+      
+      return results;
+    } catch (error) {
+      console.error(`iTunes search error:`, error);
+      return [];
+    }
+  };
+  
+  if (type === 'movie') {
+    // Strategy 1: Specific movie search (per docs)
+    let results = await trySearch({ media: 'movie', entity: 'movie', attribute: 'movieTerm' }, null);
+    if (results.length > 0) {
+      console.log(`Found ${results.length} movie results using specific search`);
+      return results;
+    }
+    
+    // Strategy 2: General search, filter by kind
+    results = await trySearch({}, 'feature-movie');
+    if (results.length > 0) {
+      console.log(`Found ${results.length} movie results using general search`);
+      return results;
+    }
+  } else {
+    // Strategy 1: Search for TV episodes (they have previewUrls, seasons don't)
+    let results = await trySearch({ media: 'tvShow', entity: 'tvEpisode', attribute: 'showTerm' }, null);
+    if (results.length > 0) {
+      console.log(`Found ${results.length} TV episode results using specific search`);
+      return results;
+    }
+    
+    // Strategy 2: General TV search filtered to episodes
+    results = await trySearch({ media: 'tvShow' }, 'tv-episode');
+    if (results.length > 0) {
+      console.log(`Found ${results.length} TV results using general search`);
+      return results;
+    }
+  }
+  
+  return [];
+}
+
+// ============ SCORING LOGIC ============
+
+interface ScoreResult {
+  score: number;
+  item: any;
+}
+
+function scoreItem(tmdbMeta: TMDBMetadata, item: any): number {
+  let score = 0;
+  
+  // For TV episodes, match against artistName (show name), not trackName (episode name)
+  // For movies, match against trackName
+  const nameToMatch = tmdbMeta.mediaType === 'tv' 
+    ? (item.artistName || item.collectionName || '') 
+    : (item.trackName || item.collectionName || '');
+  
+  const normNameToMatch = normalizeTitle(nameToMatch);
+  const normTitle = normalizeTitle(tmdbMeta.title);
+  const normOriginal = normalizeTitle(tmdbMeta.originalTitle);
+  const normAltTitles = tmdbMeta.altTitles.map(t => normalizeTitle(t));
+  
+  // Title match scoring
+  if (normNameToMatch === normTitle) {
+    score += 0.5;
+  } else if (normNameToMatch === normOriginal) {
+    score += 0.4;
+  } else if (normAltTitles.includes(normNameToMatch)) {
+    score += 0.4;
+  } else {
+    const fuzzyScore = Math.max(
+      fuzzyMatch(nameToMatch, tmdbMeta.title),
+      fuzzyMatch(nameToMatch, tmdbMeta.originalTitle)
+    );
+    if (fuzzyScore > 0.8) {
+      score += 0.3;
+    } else if (fuzzyScore > 0.6) {
+      score += 0.15;
+    }
+  }
+  
+  // Year difference scoring
+  const itunesYear = item.releaseDate ? parseInt(item.releaseDate.substring(0, 4)) : null;
+  if (tmdbMeta.year && itunesYear) {
+    const diff = Math.abs(itunesYear - tmdbMeta.year);
+    if (tmdbMeta.mediaType === 'tv') {
+      // TV shows are more lenient - they run for years
+      if (diff === 0) {
+        score += 0.35;
+      } else if (diff <= 2) {
+        score += 0.25;
+      } else if (diff <= 5) {
+        score += 0.15;
+      } else if (diff <= 10) {
+        score += 0.05;
+      }
+      // Don't penalize TV shows for year differences
+    } else {
+      // Movies: stricter year matching
+      if (diff === 0) {
+        score += 0.35;
+      } else if (diff === 1) {
+        score += 0.2;
+      } else if (diff > 2) {
+        score -= 0.5;
       }
     }
   }
   
-  return { result: null, country: 'us' };
+  // Runtime check for movies only
+  if (tmdbMeta.mediaType === 'movie' && tmdbMeta.runtime && item.trackTimeMillis) {
+    const itunesMinutes = Math.round(item.trackTimeMillis / 60000);
+    const runtimeDiff = Math.abs(itunesMinutes - tmdbMeta.runtime);
+    if (runtimeDiff <= 5) {
+      score += 0.15;
+    } else if (runtimeDiff > 15) {
+      score -= 0.2;
+    }
+  }
+  
+  // Must have previewUrl
+  if (!item.previewUrl) {
+    score -= 1.0;
+  }
+  
+  return score;
 }
 
-// Main resolver function
-async function resolvePreview(imdbId: string, type: string, supabase: any) {
-  console.log(`Resolving preview for ${imdbId}, type: ${type}`);
+function findBestMatch(results: any[], tmdbMeta: TMDBMetadata): ScoreResult | null {
+  let bestScore = -Infinity;
+  let bestItem = null;
+  
+  for (const item of results) {
+    const score = scoreItem(tmdbMeta, item);
+    const trackName = item.trackName || item.collectionName || 'Unknown';
+    const itunesYear = item.releaseDate ? item.releaseDate.substring(0, 4) : 'N/A';
+    
+    console.log(`  Score ${score.toFixed(2)}: "${trackName}" (${itunesYear})`);
+    
+    if (score > bestScore) {
+      bestScore = score;
+      bestItem = item;
+    }
+  }
+  
+  if (bestScore >= MIN_SCORE_THRESHOLD && bestItem) {
+    console.log(`✓ Best match score: ${bestScore.toFixed(2)}`);
+    return { score: bestScore, item: bestItem };
+  }
+  
+  return null;
+}
+
+// ============ MULTI-PASS SEARCH ============
+
+interface SearchResult {
+  found: boolean;
+  previewUrl?: string;
+  trackId?: number;
+  country?: string;
+}
+
+async function multiPassSearch(tmdbMeta: TMDBMetadata): Promise<SearchResult> {
+  const searchType = tmdbMeta.mediaType === 'movie' ? 'movie' : 'tv';
+  
+  // Collect all titles to try
+  const titlesToTry: string[] = [tmdbMeta.title];
+  
+  if (tmdbMeta.originalTitle && tmdbMeta.originalTitle !== tmdbMeta.title) {
+    titlesToTry.push(tmdbMeta.originalTitle);
+  }
+  
+  for (const altTitle of tmdbMeta.altTitles) {
+    if (!titlesToTry.includes(altTitle)) {
+      titlesToTry.push(altTitle);
+    }
+  }
+  
+  console.log(`Titles to try: ${titlesToTry.join(', ')}`);
+  
+  // Pass 1 & 2: Try all titles in US first
+  for (const title of titlesToTry) {
+    console.log(`\nPass 1/2: Searching US for "${title}"`);
+    const results = await searchITunes({ term: title, country: 'us', type: searchType });
+    
+    if (results.length > 0) {
+      console.log(`Found ${results.length} results in US`);
+      const match = findBestMatch(results, tmdbMeta);
+      if (match) {
+        return {
+          found: true,
+          previewUrl: match.item.previewUrl,
+          trackId: match.item.trackId || match.item.collectionId,
+          country: 'us'
+        };
+      }
+    }
+  }
+  
+  // Pass 3: Try main title in other country variants
+  for (const country of COUNTRY_VARIANTS) {
+    if (country === 'us') continue; // Already tried
+    
+    for (const title of titlesToTry.slice(0, 2)) { // Only main + original title
+      console.log(`\nPass 3: Searching ${country.toUpperCase()} for "${title}"`);
+      const results = await searchITunes({ term: title, country, type: searchType });
+      
+      if (results.length > 0) {
+        console.log(`Found ${results.length} results in ${country.toUpperCase()}`);
+        const match = findBestMatch(results, tmdbMeta);
+        if (match) {
+          return {
+            found: true,
+            previewUrl: match.item.previewUrl,
+            trackId: match.item.trackId || match.item.collectionId,
+            country
+          };
+        }
+      }
+    }
+  }
+  
+  console.log('No match found across all passes');
+  return { found: false };
+}
+
+// ============ MAIN RESOLVER ============
+
+async function resolvePreview(imdbId: string, type: string, supabase: any): Promise<SearchResult> {
+  console.log(`\n========== Resolving ${imdbId} (${type}) ==========`);
   
   // Check cache first
   const { data: cached, error: cacheError } = await supabase
@@ -315,72 +445,51 @@ async function resolvePreview(imdbId: string, type: string, supabase: any) {
     const lastChecked = new Date(cached.last_checked);
     const daysSinceCheck = (Date.now() - lastChecked.getTime()) / (1000 * 60 * 60 * 24);
     
-    if (daysSinceCheck < CACHE_DAYS && cached.preview_url) {
-      console.log('Using cached result');
-      return {
-        found: true,
-        previewUrl: cached.preview_url,
-        trackId: cached.track_id,
-        country: cached.country
-      };
+    if (daysSinceCheck < CACHE_DAYS) {
+      if (cached.preview_url) {
+        console.log('Cache hit: returning cached preview');
+        return {
+          found: true,
+          previewUrl: cached.preview_url,
+          trackId: cached.track_id,
+          country: cached.country
+        };
+      } else {
+        console.log('Cache hit: negative cache (no preview found previously)');
+        return { found: false };
+      }
     }
     console.log('Cache expired, refreshing...');
   }
   
   // Get TMDB metadata
-  const tmdbData = await getTMDBMetadata(imdbId, type);
-  if (!tmdbData) {
+  const tmdbMeta = await getTMDBMetadata(imdbId, type);
+  if (!tmdbMeta) {
     return { found: false };
   }
   
-  // Search across storefronts
-  const { result: bestMatch, country } = await searchMultipleStorefronts(
-    tmdbData.mainTitle,
-    tmdbData.originalTitle,
-    tmdbData.year,
-    type
-  );
+  // Run multi-pass search
+  const result = await multiPassSearch(tmdbMeta);
   
-  if (!bestMatch || !bestMatch.previewUrl) {
-    console.log('No suitable iTunes match found across all storefronts');
-    
-    // Cache negative result
-    await supabase
-      .from('itunes_mappings')
-      .upsert({
-        imdb_id: imdbId,
-        track_id: null,
-        preview_url: null,
-        country: 'us',
-        last_checked: new Date().toISOString()
-      }, { onConflict: 'imdb_id' });
-    
-    return { found: false };
-  }
-  
-  const previewUrl = bestMatch.previewUrl;
-  const trackId = bestMatch.trackId || bestMatch.collectionId;
-  
-  console.log(`Found preview in ${country.toUpperCase()}: ${previewUrl}`);
-  
-  // Cache the result
+  // Cache the result (positive or negative)
   await supabase
     .from('itunes_mappings')
     .upsert({
       imdb_id: imdbId,
-      track_id: trackId,
-      preview_url: previewUrl,
-      country: country,
+      track_id: result.found ? result.trackId : null,
+      preview_url: result.found ? result.previewUrl : null,
+      country: result.country || 'us',
       last_checked: new Date().toISOString()
     }, { onConflict: 'imdb_id' });
   
-  return {
-    found: true,
-    previewUrl,
-    trackId,
-    country
-  };
+  if (result.found) {
+    console.log(`✓ Found preview: ${result.previewUrl}`);
+  }
+  
+  return result;
 }
+
+// ============ HTTP SERVER ============
 
 serve(async (req) => {
   const url = new URL(req.url);
@@ -400,7 +509,7 @@ serve(async (req) => {
   try {
     if (path === '/health' || path === '/health.json') {
       return new Response(
-        JSON.stringify({ status: 'ok', storefronts: STOREFRONTS }),
+        JSON.stringify({ status: 'ok', version: '2.0.0' }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
