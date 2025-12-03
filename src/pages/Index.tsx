@@ -262,8 +262,16 @@ const Index = () => {
         </section>
 
         {/* Footer */}
-        <footer className="text-sm text-muted-foreground border-t border-border pt-8">
-          Powered by TMDB and iTunes
+        <footer className="text-sm text-muted-foreground border-t border-border pt-8 flex justify-between items-center">
+          <span>Powered by TMDB and iTunes</span>
+          <a
+            href={`${ADDON_URL}/stats`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hover:text-foreground transition-colors"
+          >
+            Coverage Stats
+          </a>
         </footer>
       </div>
     </div>
