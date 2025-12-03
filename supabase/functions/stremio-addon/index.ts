@@ -576,6 +576,65 @@ serve(async (req) => {
       );
     }
     
+    if (path === '/stats' || path === '/stats.json') {
+      // Get all cache entries
+      const { data: allEntries, error: allError } = await supabase
+        .from('itunes_mappings')
+        .select('imdb_id, preview_url, country, last_checked')
+        .order('last_checked', { ascending: false });
+      
+      if (allError) {
+        return new Response(
+          JSON.stringify({ error: 'Failed to fetch stats' }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+      
+      const entries = allEntries || [];
+      const totalEntries = entries.length;
+      const hits = entries.filter(e => e.preview_url !== null);
+      const misses = entries.filter(e => e.preview_url === null);
+      const hitRate = totalEntries > 0 ? ((hits.length / totalEntries) * 100).toFixed(1) : '0.0';
+      
+      // Count by country
+      const countryStats: Record<string, number> = {};
+      for (const hit of hits) {
+        const country = hit.country || 'us';
+        countryStats[country] = (countryStats[country] || 0) + 1;
+      }
+      
+      // Recent misses (titles not found)
+      const recentMisses = misses.slice(0, 20).map(m => ({
+        imdbId: m.imdb_id,
+        lastChecked: m.last_checked
+      }));
+      
+      // Recent hits
+      const recentHits = hits.slice(0, 10).map(h => ({
+        imdbId: h.imdb_id,
+        country: h.country,
+        lastChecked: h.last_checked
+      }));
+      
+      const stats = {
+        cache: {
+          totalEntries,
+          hits: hits.length,
+          misses: misses.length,
+          hitRate: `${hitRate}%`
+        },
+        byCountry: countryStats,
+        recentHits,
+        recentMisses,
+        generatedAt: new Date().toISOString()
+      };
+      
+      return new Response(
+        JSON.stringify(stats, null, 2),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    
     return new Response(
       JSON.stringify({ error: 'Not found' }),
       { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
