@@ -102,17 +102,14 @@ async function getTMDBMetadata(imdbId: string, type: string) {
   };
 }
 
-// Search iTunes - search by title only, use year for matching
+// Search iTunes - search without media filter, then filter by kind
 async function searchITunes(title: string, type: string) {
-  const media = type === 'series' || type === 'tv' ? 'tvShow' : 'movie';
-  const entity = type === 'series' || type === 'tv' ? 'tvSeason' : 'movie';
-  
+  // Don't use media filter - it returns 0 results
+  // Instead filter by 'kind' in results
   const params = new URLSearchParams({
     term: title,
-    media,
-    entity,
     country: ITUNES_COUNTRY,
-    limit: '25'
+    limit: '50'
   });
   
   const url = `https://itunes.apple.com/search?${params}`;
@@ -121,8 +118,21 @@ async function searchITunes(title: string, type: string) {
   const response = await fetch(url);
   const data = await response.json();
   
-  console.log(`iTunes returned ${data.resultCount} results`);
-  return data.results || [];
+  console.log(`iTunes returned ${data.resultCount} raw results`);
+  
+  // Filter by kind based on type
+  const results = data.results || [];
+  const filtered = results.filter((r: any) => {
+    if (type === 'movie') {
+      return r.kind === 'feature-movie';
+    } else if (type === 'series' || type === 'tv') {
+      return r.kind === 'tv-episode' || r.wrapperType === 'collection';
+    }
+    return false;
+  });
+  
+  console.log(`Filtered to ${filtered.length} ${type} results`);
+  return filtered;
 }
 
 // Find best matching iTunes result
@@ -146,34 +156,33 @@ function findBestMatch(
     const origSim = originalTitle ? calculateSimilarity(itunesTitle, originalTitle) : 0;
     const titleScore = Math.max(mainSim, origSim);
     
-    // Year matching
-    let yearScore = 0.5; // default if no year available
+    // Year matching - stricter penalties
+    let yearScore = 0.3; // default if no year available
     if (year && itunesYear) {
       const yearDiff = Math.abs(parseInt(year) - parseInt(itunesYear));
       if (yearDiff === 0) yearScore = 1;
-      else if (yearDiff === 1) yearScore = 0.7;
-      else if (yearDiff <= 2) yearScore = 0.3;
-      else yearScore = 0;
+      else if (yearDiff === 1) yearScore = 0.8;
+      else if (yearDiff <= 3) yearScore = 0.4;
+      else yearScore = 0; // Reject if >3 years difference
     }
     
     // Has preview bonus
     const hasPreview = result.previewUrl ? 1 : 0;
     
-    // Combined score
-    const score = (titleScore * 0.5) + (yearScore * 0.3) + (hasPreview * 0.2);
+    // Combined score - year is more important
+    const score = (titleScore * 0.4) + (yearScore * 0.4) + (hasPreview * 0.2);
     
-    console.log(`iTunes candidate: "${itunesTitle}" (${itunesYear}) - score: ${score.toFixed(2)}, hasPreview: ${hasPreview}`);
+    console.log(`iTunes candidate: "${itunesTitle}" (${itunesYear}) - titleScore: ${titleScore.toFixed(2)}, yearScore: ${yearScore.toFixed(2)}, total: ${score.toFixed(2)}, hasPreview: ${hasPreview}`);
     
-    if (score > bestScore && hasPreview) {
+    // Only consider if has preview and meets minimum score
+    if (hasPreview && score > bestScore && score >= 0.5) {
       bestScore = score;
       bestMatch = result;
     }
   }
   
-  // Require minimum score
-  if (bestScore < 0.4) {
-    console.log('No match met minimum score threshold');
-    return null;
+  if (!bestMatch) {
+    console.log('No match met minimum score threshold (0.5)');
   }
   
   return bestMatch;
