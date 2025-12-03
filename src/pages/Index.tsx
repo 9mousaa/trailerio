@@ -8,111 +8,124 @@ import { Play, Copy, Check, Film, Tv } from "lucide-react";
 const ADDON_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/stremio-addon`;
 const MANIFEST_URL = `${ADDON_URL}/manifest.json`;
 
+// Title lookup map
+const TITLE_MAP: Record<string, string> = {
+  "tt9362722": "Spider-Man: Across the Spider-Verse",
+  "tt15398776": "Oppenheimer",
+  "tt1517268": "Barbie",
+  "tt6791350": "Guardians of the Galaxy Vol. 3",
+  "tt10366206": "John Wick: Chapter 4",
+  "tt14998742": "Wonka",
+  "tt5537002": "Killers of the Flower Moon",
+  "tt6718170": "The Super Mario Bros. Movie",
+  "tt1630029": "Avatar: The Way of Water",
+  "tt4154796": "Avengers: Endgame",
+  "tt4154756": "Avengers: Infinity War",
+  "tt6264654": "Free Guy",
+  "tt8041270": "Jurassic World Dominion",
+  "tt1745960": "Top Gun: Maverick",
+  "tt7286456": "Joker",
+  "tt2382320": "No Time to Die",
+  "tt10872600": "Spider-Man: No Way Home",
+  "tt9032400": "Eternals",
+  "tt10648342": "Thor: Love and Thunder",
+  "tt14539740": "Smile",
+  "tt0111161": "The Shawshank Redemption",
+  "tt0068646": "The Godfather",
+  "tt0468569": "The Dark Knight",
+  "tt0071562": "The Godfather Part II",
+  "tt0050083": "12 Angry Men",
+  "tt0108052": "Schindler's List",
+  "tt0167260": "The Lord of the Rings: The Return of the King",
+  "tt0110912": "Pulp Fiction",
+  "tt0060196": "The Good, the Bad and the Ugly",
+  "tt0120737": "The Lord of the Rings: The Fellowship of the Ring",
+  "tt0109830": "Forrest Gump",
+  "tt0137523": "Fight Club",
+  "tt0133093": "The Matrix",
+  "tt0099685": "Goodfellas",
+  "tt0073486": "One Flew Over the Cuckoo's Nest",
+  "tt0114369": "Se7en",
+  "tt0038650": "It's a Wonderful Life",
+  "tt0102926": "The Silence of the Lambs",
+  "tt0120815": "Saving Private Ryan",
+  "tt0816692": "Interstellar",
+  "tt1375666": "Inception",
+  "tt0482571": "The Prestige",
+  "tt0407887": "The Departed",
+  "tt0172495": "Gladiator",
+  "tt0120689": "The Green Mile",
+  "tt0253474": "The Pianist",
+  "tt0047478": "Seven Samurai",
+  "tt0078788": "Apocalypse Now",
+  "tt0078748": "Alien",
+  "tt0082971": "Raiders of the Lost Ark",
+  "tt0209144": "Memento",
+  "tt0245429": "Spirited Away",
+  "tt0317248": "City of God",
+  "tt0119698": "Princess Mononoke",
+  "tt0180093": "Requiem for a Dream",
+  "tt0095327": "Grave of the Fireflies",
+  "tt0118799": "Life Is Beautiful",
+  "tt0057012": "Dr. Strangelove",
+  "tt0361748": "Inglourious Basterds",
+  "tt0364569": "Oldboy",
+  "tt0986264": "Taare Zameen Par",
+  "tt1853728": "Django Unchained",
+  "tt2380307": "Coco",
+  "tt7131622": "Once Upon a Time in Hollywood",
+  "tt0944947": "Game of Thrones",
+  "tt0903747": "Breaking Bad",
+  "tt0386676": "The Office",
+  "tt4574334": "Stranger Things",
+  "tt0460649": "How I Met Your Mother",
+  "tt0898266": "The Big Bang Theory",
+  "tt2861424": "Rick and Morty",
+  "tt5491994": "Planet Earth II",
+  "tt0475784": "Westworld",
+  "tt1520211": "The Walking Dead",
+  "tt0413573": "Grey's Anatomy",
+  "tt2356777": "True Detective",
+  "tt0411008": "Lost",
+  "tt0773262": "Dexter",
+  "tt1475582": "Sherlock",
+  "tt0804503": "Mad Men",
+  "tt1856010": "House of Cards",
+  "tt3032476": "Better Call Saul",
+  "tt0141842": "The Sopranos",
+  "tt0121955": "South Park",
+  "tt0108778": "Friends",
+  "tt0472954": "It's Always Sunny in Philadelphia",
+  "tt1442437": "Modern Family",
+  "tt1190634": "The Boys",
+  "tt0306414": "The Wire",
+  "tt0149460": "Futurama",
+  "tt0185906": "Band of Brothers",
+  "tt8111088": "The Mandalorian",
+  "tt7660850": "Succession",
+  "tt9288030": "Reacher",
+  "tt13443470": "Wednesday",
+  "tt11280740": "Severance",
+  "tt11198330": "House of the Dragon",
+  "tt9140554": "Loki",
+  "tt10986410": "Ted Lasso",
+};
+
 // Large list of popular movies and TV shows
-const TEST_TITLES = [
-  // Movies - Recent
-  { id: "tt9362722", type: "movie" as const },
-  { id: "tt15398776", type: "movie" as const },
-  { id: "tt1517268", type: "movie" as const },
-  { id: "tt6791350", type: "movie" as const },
-  { id: "tt10366206", type: "movie" as const },
-  { id: "tt14998742", type: "movie" as const },
-  { id: "tt5537002", type: "movie" as const },
-  { id: "tt6718170", type: "movie" as const },
-  { id: "tt1630029", type: "movie" as const },
-  { id: "tt4154796", type: "movie" as const },
-  { id: "tt4154756", type: "movie" as const },
-  { id: "tt6264654", type: "movie" as const },
-  { id: "tt8041270", type: "movie" as const },
-  { id: "tt1745960", type: "movie" as const },
-  { id: "tt7286456", type: "movie" as const },
-  { id: "tt2382320", type: "movie" as const },
-  { id: "tt10872600", type: "movie" as const },
-  { id: "tt9032400", type: "movie" as const },
-  { id: "tt10648342", type: "movie" as const },
-  { id: "tt14539740", type: "movie" as const },
-  // Movies - Classics
-  { id: "tt0111161", type: "movie" as const },
-  { id: "tt0068646", type: "movie" as const },
-  { id: "tt0468569", type: "movie" as const },
-  { id: "tt0071562", type: "movie" as const },
-  { id: "tt0050083", type: "movie" as const },
-  { id: "tt0108052", type: "movie" as const },
-  { id: "tt0167260", type: "movie" as const },
-  { id: "tt0110912", type: "movie" as const },
-  { id: "tt0060196", type: "movie" as const },
-  { id: "tt0120737", type: "movie" as const },
-  { id: "tt0109830", type: "movie" as const },
-  { id: "tt0137523", type: "movie" as const },
-  { id: "tt0133093", type: "movie" as const },
-  { id: "tt0099685", type: "movie" as const },
-  { id: "tt0073486", type: "movie" as const },
-  { id: "tt0114369", type: "movie" as const },
-  { id: "tt0038650", type: "movie" as const },
-  { id: "tt0102926", type: "movie" as const },
-  { id: "tt0120815", type: "movie" as const },
-  { id: "tt0816692", type: "movie" as const },
-  { id: "tt1375666", type: "movie" as const },
-  { id: "tt0482571", type: "movie" as const },
-  { id: "tt0407887", type: "movie" as const },
-  { id: "tt0172495", type: "movie" as const },
-  { id: "tt0120689", type: "movie" as const },
-  { id: "tt0253474", type: "movie" as const },
-  { id: "tt0047478", type: "movie" as const },
-  { id: "tt0078788", type: "movie" as const },
-  { id: "tt0078748", type: "movie" as const },
-  { id: "tt0082971", type: "movie" as const },
-  { id: "tt0209144", type: "movie" as const },
-  { id: "tt0245429", type: "movie" as const },
-  { id: "tt0317248", type: "movie" as const },
-  { id: "tt0119698", type: "movie" as const },
-  { id: "tt0180093", type: "movie" as const },
-  { id: "tt0095327", type: "movie" as const },
-  { id: "tt0118799", type: "movie" as const },
-  { id: "tt0057012", type: "movie" as const },
-  { id: "tt0361748", type: "movie" as const },
-  { id: "tt0364569", type: "movie" as const },
-  { id: "tt0986264", type: "movie" as const },
-  { id: "tt1853728", type: "movie" as const },
-  { id: "tt2380307", type: "movie" as const },
-  { id: "tt7131622", type: "movie" as const },
-  // TV Series
-  { id: "tt0944947", type: "series" as const },
-  { id: "tt0903747", type: "series" as const },
-  { id: "tt0386676", type: "series" as const },
-  { id: "tt4574334", type: "series" as const },
-  { id: "tt0460649", type: "series" as const },
-  { id: "tt0898266", type: "series" as const },
-  { id: "tt2861424", type: "series" as const },
-  { id: "tt5491994", type: "series" as const },
-  { id: "tt0475784", type: "series" as const },
-  { id: "tt1520211", type: "series" as const },
-  { id: "tt0413573", type: "series" as const },
-  { id: "tt2356777", type: "series" as const },
-  { id: "tt0411008", type: "series" as const },
-  { id: "tt0773262", type: "series" as const },
-  { id: "tt1475582", type: "series" as const },
-  { id: "tt0804503", type: "series" as const },
-  { id: "tt1856010", type: "series" as const },
-  { id: "tt3032476", type: "series" as const },
-  { id: "tt0141842", type: "series" as const },
-  { id: "tt0121955", type: "series" as const },
-  { id: "tt0108778", type: "series" as const },
-  { id: "tt0472954", type: "series" as const },
-  { id: "tt1442437", type: "series" as const },
-  { id: "tt1190634", type: "series" as const },
-  { id: "tt0306414", type: "series" as const },
-  { id: "tt0149460", type: "series" as const },
-  { id: "tt0185906", type: "series" as const },
-  { id: "tt8111088", type: "series" as const },
-  { id: "tt7660850", type: "series" as const },
-  { id: "tt9288030", type: "series" as const },
-  { id: "tt13443470", type: "series" as const },
-  { id: "tt11280740", type: "series" as const },
-  { id: "tt11198330", type: "series" as const },
-  { id: "tt9140554", type: "series" as const },
-  { id: "tt10986410", type: "series" as const },
-];
+// TV series IDs
+const TV_IDS = new Set([
+  "tt0944947", "tt0903747", "tt0386676", "tt4574334", "tt0460649", "tt0898266",
+  "tt2861424", "tt5491994", "tt0475784", "tt1520211", "tt0413573", "tt2356777",
+  "tt0411008", "tt0773262", "tt1475582", "tt0804503", "tt1856010", "tt3032476",
+  "tt0141842", "tt0121955", "tt0108778", "tt0472954", "tt1442437", "tt1190634",
+  "tt0306414", "tt0149460", "tt0185906", "tt8111088", "tt7660850", "tt9288030",
+  "tt13443470", "tt11280740", "tt11198330", "tt9140554", "tt10986410"
+]);
+
+const TEST_TITLES = Object.keys(TITLE_MAP).map(id => ({
+  id,
+  type: TV_IDS.has(id) ? "series" as const : "movie" as const
+}));
 
 const Index = () => {
   const [testImdbId, setTestImdbId] = useState("");
@@ -190,6 +203,12 @@ const Index = () => {
             Test
           </h2>
           <div className="space-y-4">
+            {/* Show current title */}
+            {TITLE_MAP[testImdbId] && (
+              <div className="text-lg font-medium">
+                {TITLE_MAP[testImdbId]}
+              </div>
+            )}
             <div className="flex gap-3">
               <Input
                 placeholder="tt0111161"
@@ -230,20 +249,22 @@ const Index = () => {
             </Button>
 
             {testResult && (
-              <div className="p-4 rounded-lg bg-muted font-mono text-sm">
-                <pre className="overflow-x-auto whitespace-pre-wrap">
-                  {JSON.stringify(testResult, null, 2)}
-                </pre>
-                {testResult.streams?.[0]?.url && (
-                  <a
-                    href={testResult.streams[0].url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-2 mt-4 text-foreground hover:underline"
-                  >
-                    <Play className="w-4 h-4" />
-                    Play Preview
-                  </a>
+              <div className="p-4 rounded-lg bg-muted">
+                {testResult.streams?.[0]?.url ? (
+                  <div className="space-y-3">
+                    <div className="text-sm text-muted-foreground">Preview found</div>
+                    <a
+                      href={testResult.streams[0].url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-2 text-foreground hover:underline"
+                    >
+                      <Play className="w-4 h-4" />
+                      Play Preview
+                    </a>
+                  </div>
+                ) : (
+                  <div className="text-sm text-muted-foreground">No preview available</div>
                 )}
               </div>
             )}
