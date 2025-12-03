@@ -156,33 +156,38 @@ function findBestMatch(
     const origSim = originalTitle ? calculateSimilarity(itunesTitle, originalTitle) : 0;
     const titleScore = Math.max(mainSim, origSim);
     
-    // Year matching - stricter penalties
-    let yearScore = 0.3; // default if no year available
+    // Year matching - strict rejection for large differences
+    let yearScore = 0.5; // default if no year available on either side
+    let rejectDueToYear = false;
     if (year && itunesYear) {
       const yearDiff = Math.abs(parseInt(year) - parseInt(itunesYear));
       if (yearDiff === 0) yearScore = 1;
-      else if (yearDiff === 1) yearScore = 0.8;
-      else if (yearDiff <= 3) yearScore = 0.4;
-      else yearScore = 0; // Reject if >3 years difference
+      else if (yearDiff === 1) yearScore = 0.9;
+      else if (yearDiff <= 2) yearScore = 0.6;
+      else if (yearDiff <= 5) yearScore = 0.3;
+      else {
+        yearScore = 0;
+        rejectDueToYear = true; // Hard reject if >5 years difference
+      }
     }
     
     // Has preview bonus
     const hasPreview = result.previewUrl ? 1 : 0;
     
-    // Combined score - year is more important
-    const score = (titleScore * 0.4) + (yearScore * 0.4) + (hasPreview * 0.2);
+    // Combined score
+    const score = (titleScore * 0.5) + (yearScore * 0.3) + (hasPreview * 0.2);
     
-    console.log(`iTunes candidate: "${itunesTitle}" (${itunesYear}) - titleScore: ${titleScore.toFixed(2)}, yearScore: ${yearScore.toFixed(2)}, total: ${score.toFixed(2)}, hasPreview: ${hasPreview}`);
+    console.log(`iTunes candidate: "${itunesTitle}" (${itunesYear}) - titleScore: ${titleScore.toFixed(2)}, yearScore: ${yearScore.toFixed(2)}, total: ${score.toFixed(2)}, hasPreview: ${hasPreview}, rejected: ${rejectDueToYear}`);
     
-    // Only consider if has preview and meets minimum score
-    if (hasPreview && score > bestScore && score >= 0.5) {
+    // Only consider if has preview, not rejected, and meets minimum score
+    if (hasPreview && !rejectDueToYear && score > bestScore && score >= 0.5) {
       bestScore = score;
       bestMatch = result;
     }
   }
   
   if (!bestMatch) {
-    console.log('No match met minimum score threshold (0.5)');
+    console.log('No match found (either rejected due to year or below threshold)');
   }
   
   return bestMatch;
