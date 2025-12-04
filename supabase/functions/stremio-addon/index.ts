@@ -385,9 +385,15 @@ function findBestMatch(results: any[], tmdbMeta: TMDBMetadata): ScoreResult | nu
 // ============ YOUTUBE EXTRACTORS (DIRECT URL) ============
 
 const YOUTUBE_EXTRACTORS = [
-  { name: 'Piped', baseUrl: 'https://pipedapi.kavin.rocks' },
-  { name: 'Invidious-1', baseUrl: 'https://inv.nadeko.net' },
-  { name: 'Invidious-2', baseUrl: 'https://invidious.nerdvpn.de' },
+  // Piped instances (try multiple)
+  { name: 'Piped-1', type: 'piped', baseUrl: 'https://pipedapi.adminforge.de' },
+  { name: 'Piped-2', type: 'piped', baseUrl: 'https://api.piped.privacydev.net' },
+  { name: 'Piped-3', type: 'piped', baseUrl: 'https://pipedapi.smnz.de' },
+  { name: 'Piped-4', type: 'piped', baseUrl: 'https://pipedapi.simpleprivacy.fr' },
+  { name: 'Piped-5', type: 'piped', baseUrl: 'https://pipedapi-libre.kavin.rocks' },
+  // Invidious instances
+  { name: 'Invidious-1', type: 'invidious', baseUrl: 'https://yewtu.be' },
+  { name: 'Invidious-2', type: 'invidious', baseUrl: 'https://invidious.f5.si' },
 ];
 
 async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | null> {
@@ -395,50 +401,75 @@ async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | nul
   
   for (const extractor of YOUTUBE_EXTRACTORS) {
     try {
-      console.log(`Trying ${extractor.name}...`);
+      console.log(`Trying ${extractor.name} (${extractor.baseUrl})...`);
       
-      if (extractor.name === 'Piped') {
+      if (extractor.type === 'piped') {
         // Piped API format
         const response = await fetch(`${extractor.baseUrl}/streams/${youtubeKey}`, {
           headers: { 'Accept': 'application/json' }
         });
         
+        console.log(`${extractor.name} response status: ${response.status}`);
+        
         if (response.ok) {
           const data = await response.json();
-          // Get best video stream (preferring 720p or 480p)
+          // Get best video stream (preferring 720p or 480p with audio)
           const videoStreams = data.videoStreams || [];
-          const preferredStream = videoStreams.find((s: any) => 
+          console.log(`${extractor.name}: found ${videoStreams.length} video streams`);
+          
+          // First try combined streams (video + audio)
+          const combinedStream = videoStreams.find((s: any) => 
             s.quality === '720p' && s.videoOnly === false
           ) || videoStreams.find((s: any) => 
             s.quality === '480p' && s.videoOnly === false
+          ) || videoStreams.find((s: any) => 
+            s.quality === '360p' && s.videoOnly === false
           ) || videoStreams.find((s: any) => !s.videoOnly);
           
-          if (preferredStream?.url) {
-            console.log(`✓ ${extractor.name} returned direct URL (${preferredStream.quality})`);
-            return preferredStream.url;
+          if (combinedStream?.url) {
+            console.log(`✓ ${extractor.name} returned direct URL (${combinedStream.quality})`);
+            return combinedStream.url;
           }
+          
+          // If no combined, try HLS stream
+          if (data.hls) {
+            console.log(`✓ ${extractor.name} returned HLS URL`);
+            return data.hls;
+          }
+        } else {
+          const errorText = await response.text().catch(() => 'unknown error');
+          console.log(`${extractor.name} error: ${errorText.substring(0, 100)}`);
         }
-      } else {
+      } else if (extractor.type === 'invidious') {
         // Invidious API format
         const response = await fetch(`${extractor.baseUrl}/api/v1/videos/${youtubeKey}`, {
           headers: { 'Accept': 'application/json' }
         });
         
+        console.log(`${extractor.name} response status: ${response.status}`);
+        
         if (response.ok) {
           const data = await response.json();
-          // Get adaptive formats (direct URLs)
-          const formats = data.adaptiveFormats || data.formatStreams || [];
-          // Prefer 720p or 480p with audio
+          // Get format streams (direct URLs with audio)
+          const formats = data.formatStreams || [];
+          console.log(`${extractor.name}: found ${formats.length} format streams`);
+          
+          // Prefer 720p or 480p or 360p
           const preferredFormat = formats.find((f: any) => 
-            f.qualityLabel === '720p' && f.type?.includes('video')
+            f.qualityLabel === '720p'
           ) || formats.find((f: any) => 
-            f.qualityLabel === '480p' && f.type?.includes('video')
-          ) || formats.find((f: any) => f.type?.includes('video'));
+            f.qualityLabel === '480p'
+          ) || formats.find((f: any) => 
+            f.qualityLabel === '360p'
+          ) || formats[0];
           
           if (preferredFormat?.url) {
             console.log(`✓ ${extractor.name} returned direct URL (${preferredFormat.qualityLabel})`);
             return preferredFormat.url;
           }
+        } else {
+          const errorText = await response.text().catch(() => 'unknown error');
+          console.log(`${extractor.name} error: ${errorText.substring(0, 100)}`);
         }
       }
     } catch (error) {
