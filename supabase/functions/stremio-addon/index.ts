@@ -11,14 +11,13 @@ const TMDB_API_KEY = Deno.env.get('TMDB_API_KEY');
 const CACHE_DAYS = 30;
 const MIN_SCORE_THRESHOLD = 0.6;
 
-// Country storefronts to try - maximum coverage (all major iTunes markets)
-const COUNTRY_VARIANTS = [
-  'us', 'gb', 'ca', 'au', 'de', 'fr', 'it', 'es', 'nl', 'be', 'at', 'ch',  // Primary Western markets
-  'jp', 'kr', 'cn', 'hk', 'tw', 'sg', 'my', 'th', 'ph', 'id', 'vn', 'in',  // Asia Pacific
-  'mx', 'br', 'ar', 'cl', 'co', 'pe',                                       // Latin America
-  'se', 'no', 'dk', 'fi', 'pl', 'cz', 'hu', 'ro', 'bg', 'gr', 'pt', 'ie',  // Europe
-  'ru', 'tr', 'il', 'ae', 'sa', 'za', 'eg', 'ng', 'ke',                     // EMEA
-  'nz'                                                                       // Oceania
+// Country storefronts - tiered for speed (primary first, then expand)
+const TIER1_COUNTRIES = ['us', 'gb', 'de', 'au', 'ca', 'fr']; // Most content
+const TIER2_COUNTRIES = [
+  'it', 'es', 'nl', 'be', 'at', 'ch', 'jp', 'kr', 'cn', 'hk', 'tw', 'sg', 
+  'my', 'th', 'ph', 'id', 'vn', 'in', 'mx', 'br', 'ar', 'cl', 'co', 'pe',
+  'se', 'no', 'dk', 'fi', 'pl', 'cz', 'hu', 'ro', 'bg', 'gr', 'pt', 'ie',
+  'ru', 'tr', 'il', 'ae', 'sa', 'za', 'eg', 'ng', 'ke', 'nz'
 ];
 
 const MANIFEST = {
@@ -228,7 +227,7 @@ async function searchITunes(params: ITunesSearchParams): Promise<any[]> {
   
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout
+    const timeout = setTimeout(() => controller.abort(), 3000); // 3s timeout for speed
     
     const response = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
@@ -408,7 +407,7 @@ async function extractViaInvidious(youtubeKey: string): Promise<ExtractionResult
   
   const tryInstance = async (instance: string): Promise<ExtractionResult | null> => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 6000);
+    const timeout = setTimeout(() => controller.abort(), 4000); // 4s timeout
     
     try {
       const response = await fetch(`${instance}/api/v1/videos/${youtubeKey}`, {
@@ -588,20 +587,15 @@ interface SearchResult {
 async function multiPassSearch(tmdbMeta: TMDBMetadata): Promise<SearchResult> {
   const searchType = tmdbMeta.mediaType === 'movie' ? 'movie' : 'tv';
   
-  // Collect all titles to try (limit to 3 for speed)
+  // Collect titles to try (limit to 2 for speed)
   const titlesToTry: string[] = [tmdbMeta.title];
-  
   if (tmdbMeta.originalTitle && tmdbMeta.originalTitle !== tmdbMeta.title) {
     titlesToTry.push(tmdbMeta.originalTitle);
   }
   
-  // Add only first alt title if different
-  const firstAlt = tmdbMeta.altTitles.find(t => !titlesToTry.includes(t));
-  if (firstAlt) titlesToTry.push(firstAlt);
-  
   console.log(`Titles to try: ${titlesToTry.join(', ')}`);
   
-  // Search helper with timeout
+  // Search helper
   const searchWithCountry = async (title: string, country: string): Promise<{ results: any[]; country: string } | null> => {
     try {
       const results = await searchITunes({ term: title, country, type: searchType });
@@ -611,28 +605,45 @@ async function multiPassSearch(tmdbMeta: TMDBMetadata): Promise<SearchResult> {
     }
   };
   
-  // For each title, search ALL countries in parallel
-  for (const title of titlesToTry) {
-    console.log(`\nSearching all countries in parallel for "${title}"`);
-    
-    // Launch all country searches simultaneously
-    const countrySearches = COUNTRY_VARIANTS.map(country => 
-      searchWithCountry(title, country)
-    );
-    
-    const allResults = await Promise.all(countrySearches);
-    
-    // Find best match across all countries
+  // Helper to find best match from results
+  const findBestFromResults = (allResults: Array<{ results: any[]; country: string } | null>): { score: number; item: any; country: string } | null => {
     let bestOverall: { score: number; item: any; country: string } | null = null;
-    
     for (const result of allResults) {
       if (!result) continue;
-      
       const match = findBestMatch(result.results, tmdbMeta);
       if (match && (!bestOverall || match.score > bestOverall.score)) {
         bestOverall = { ...match, country: result.country };
       }
     }
+    return bestOverall;
+  };
+  
+  // For each title, try TIER1 first, then TIER2 if needed
+  for (const title of titlesToTry) {
+    // TIER 1: Primary markets (fast)
+    console.log(`\nSearching Tier 1 (${TIER1_COUNTRIES.length} countries) for "${title}"`);
+    const tier1Searches = TIER1_COUNTRIES.map(country => searchWithCountry(title, country));
+    const tier1Results = await Promise.all(tier1Searches);
+    
+    const tier1Best = findBestFromResults(tier1Results);
+    if (tier1Best && tier1Best.score >= 0.7) {
+      console.log(`✓ Tier 1 match from ${tier1Best.country.toUpperCase()}, score: ${tier1Best.score.toFixed(2)}`);
+      return {
+        found: true,
+        previewUrl: tier1Best.item.previewUrl,
+        trackId: tier1Best.item.trackId || tier1Best.item.collectionId,
+        country: tier1Best.country
+      };
+    }
+    
+    // TIER 2: Extended markets (only if tier 1 didn't find good match)
+    console.log(`Searching Tier 2 (${TIER2_COUNTRIES.length} countries) for "${title}"`);
+    const tier2Searches = TIER2_COUNTRIES.map(country => searchWithCountry(title, country));
+    const tier2Results = await Promise.all(tier2Searches);
+    
+    // Combine tier1 partial results with tier2
+    const allResults = [...tier1Results, ...tier2Results];
+    const bestOverall = findBestFromResults(allResults);
     
     if (bestOverall) {
       console.log(`✓ Best match from ${bestOverall.country.toUpperCase()}, score: ${bestOverall.score.toFixed(2)}`);
