@@ -411,22 +411,13 @@ const COBALT_INSTANCES = [
   'https://nuko-c.meowing.de',
 ];
 
-// ============ EXTRACTION RESULT ============
-
-interface ExtractionResult {
-  url: string;
-  quality: string;  // e.g., "1080p", "720p", "4K"
-  source: 'inv' | 'pip' | 'cob';  // Shorthand: inv=Invidious, pip=Piped, cob=Cobalt
-  hdr: boolean;
-}
-
 // ============ INVIDIOUS EXTRACTOR ============
 // Returns formatStreams with direct googlevideo.com URLs (if API enabled)
 
-async function extractViaInvidious(youtubeKey: string): Promise<ExtractionResult | null> {
+async function extractViaInvidious(youtubeKey: string): Promise<string | null> {
   console.log(`Trying Invidious instances for ${youtubeKey}`);
   
-  const tryInstance = async (instance: string): Promise<ExtractionResult | null> => {
+  const tryInstance = async (instance: string): Promise<string | null> => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 6000);
     
@@ -461,54 +452,48 @@ async function extractViaInvidious(youtubeKey: string): Promise<ExtractionResult
                s.colorInfo?.primaries === 'bt2020';
       };
       
-      // Collect ALL available streams from both sources
-      const allStreams: Array<{url: string, quality: string, hdr: boolean, rank: number}> = [];
-      
-      // formatStreams has combined video+audio
+      // formatStreams has combined video+audio (preferred)
       if (data.formatStreams?.length > 0) {
-        for (const stream of data.formatStreams) {
-          if (stream.url && (stream.container === 'mp4' || !stream.container)) {
-            allStreams.push({
-              url: stream.url,
-              quality: stream.qualityLabel || '720p',
-              hdr: isHDR(stream),
-              rank: getQualityRank(stream.qualityLabel)
-            });
-          }
+        // Sort by quality (highest first), HDR preferred
+        const sorted = [...data.formatStreams].sort((a, b) => {
+          // Prefer HDR
+          if (isHDR(a) && !isHDR(b)) return -1;
+          if (!isHDR(a) && isHDR(b)) return 1;
+          // Then by quality
+          return getQualityRank(a.qualityLabel) - getQualityRank(b.qualityLabel);
+        });
+        
+        // Find best MP4 or any container
+        const stream = sorted.find((s: any) => s.container === 'mp4') || sorted[0];
+        
+        if (stream?.url) {
+          const hdrLabel = isHDR(stream) ? ' HDR' : '';
+          console.log(`  ✓ Invidious ${instance}: got ${stream.qualityLabel || 'unknown'}${hdrLabel} ${stream.container || 'video'}`);
+          return stream.url;
         }
       }
       
-      // adaptiveFormats often have higher quality (4K, HDR)
+      // adaptiveFormats as fallback (video-only streams, often higher quality)
       if (data.adaptiveFormats?.length > 0) {
         const videoFormats = data.adaptiveFormats.filter((s: any) => 
           s.type?.includes('video') || s.mimeType?.startsWith('video/')
         );
         
-        for (const stream of videoFormats) {
-          if (stream.url && (stream.container === 'mp4' || stream.mimeType?.includes('mp4') || stream.mimeType?.includes('webm'))) {
-            allStreams.push({
-              url: stream.url,
-              quality: stream.qualityLabel || '720p',
-              hdr: isHDR(stream),
-              rank: getQualityRank(stream.qualityLabel)
-            });
-          }
-        }
-      }
-      
-      if (allStreams.length > 0) {
-        // Sort: HDR first, then by quality rank (lower = better)
-        allStreams.sort((a, b) => {
-          // HDR always wins
-          if (a.hdr && !b.hdr) return -1;
-          if (!a.hdr && b.hdr) return 1;
-          // Then highest quality
-          return a.rank - b.rank;
+        // Sort by quality (highest first), HDR preferred
+        const sorted = videoFormats.sort((a: any, b: any) => {
+          if (isHDR(a) && !isHDR(b)) return -1;
+          if (!isHDR(a) && isHDR(b)) return 1;
+          return getQualityRank(a.qualityLabel) - getQualityRank(b.qualityLabel);
         });
         
-        const best = allStreams[0];
-        console.log(`  ✓ Invidious ${instance}: got ${best.quality}${best.hdr ? ' HDR' : ''} (best of ${allStreams.length} streams)`);
-        return { url: best.url, quality: best.quality, source: 'inv' as const, hdr: best.hdr };
+        // Prefer MP4/H264 for compatibility, but accept highest quality available
+        const adaptive = sorted.find((s: any) => s.container === 'mp4' || s.mimeType?.includes('mp4')) || sorted[0];
+        
+        if (adaptive?.url) {
+          const hdrLabel = isHDR(adaptive) ? ' HDR' : '';
+          console.log(`  ✓ Invidious ${instance}: got adaptive ${adaptive.qualityLabel || 'unknown'}${hdrLabel}`);
+          return adaptive.url;
+        }
       }
       
       console.log(`  ${instance}: no usable streams in response`);
@@ -522,40 +507,24 @@ async function extractViaInvidious(youtubeKey: string): Promise<ExtractionResult
   
   // Try all instances in parallel
   const results = await Promise.all(INVIDIOUS_INSTANCES.map(tryInstance));
-  const validResults = results.filter((r): r is ExtractionResult => r !== null);
+  const validUrl = results.find(r => r !== null);
   
-  if (validResults.length === 0) {
-    console.log(`  No Invidious instance returned a valid URL`);
-    return null;
+  if (validUrl) {
+    console.log(`✓ Got URL from Invidious`);
+    return validUrl;
   }
   
-  // Sort by quality to get the best one (highest resolution first, HDR preferred)
-  const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
-  const getQualityRank = (q: string): number => {
-    const idx = qualityPriority.findIndex(p => q.includes(p));
-    return idx === -1 ? 998 : idx;
-  };
-  
-  validResults.sort((a, b) => {
-    // Prefer HDR
-    if (a.hdr && !b.hdr) return -1;
-    if (!a.hdr && b.hdr) return 1;
-    // Then by quality
-    return getQualityRank(a.quality) - getQualityRank(b.quality);
-  });
-  
-  const best = validResults[0];
-  console.log(`✓ Got URL from Invidious (best: ${best.quality}${best.hdr ? ' HDR' : ''} from ${validResults.length} results)`);
-  return best;
+  console.log(`  No Invidious instance returned a valid URL`);
+  return null;
 }
 
 // ============ PIPED EXTRACTOR ============
 // Returns proxied video URLs via Piped's proxy servers (most stable)
 
-async function extractViaPiped(youtubeKey: string): Promise<ExtractionResult | null> {
+async function extractViaPiped(youtubeKey: string): Promise<string | null> {
   console.log(`Trying Piped instances for ${youtubeKey}`);
   
-  const tryInstance = async (instance: string): Promise<ExtractionResult | null> => {
+  const tryInstance = async (instance: string): Promise<string | null> => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 6000);
     
@@ -589,18 +558,16 @@ async function extractViaPiped(youtubeKey: string): Promise<ExtractionResult | n
         );
         
         if (combined?.url) {
-          const quality = combined.quality || '720p';
-          console.log(`  ✓ Piped ${instance}: got ${quality}`);
-          return { url: combined.url, quality, source: 'pip', hdr: false };
+          console.log(`  ✓ Piped ${instance}: got ${combined.quality || 'unknown'}`);
+          return combined.url;
         }
         
         // Fall back to video-only (highest quality available)
         const videoOnly = sorted.find((s: any) => s.mimeType?.startsWith('video/'));
         
         if (videoOnly?.url) {
-          const quality = videoOnly.quality || '720p';
-          console.log(`  ✓ Piped ${instance}: got video-only ${quality}`);
-          return { url: videoOnly.url, quality, source: 'pip', hdr: false };
+          console.log(`  ✓ Piped ${instance}: got video-only ${videoOnly.quality || 'unknown'}`);
+          return videoOnly.url;
         }
       }
       
@@ -611,27 +578,17 @@ async function extractViaPiped(youtubeKey: string): Promise<ExtractionResult | n
     }
   };
   
-  // Try all instances in parallel, pick best quality
+  // Try all instances in parallel, return first success
   const results = await Promise.all(PIPED_INSTANCES.map(tryInstance));
-  const validResults = results.filter((r): r is ExtractionResult => r !== null);
+  const validUrl = results.find(r => r !== null);
   
-  if (validResults.length === 0) {
-    console.log(`  No Piped instance returned a valid URL`);
-    return null;
+  if (validUrl) {
+    console.log(`✓ Got URL from Piped`);
+    return validUrl;
   }
   
-  // Sort by quality to get the best one
-  const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
-  const getQualityRank = (q: string): number => {
-    const idx = qualityPriority.findIndex(p => q.includes(p));
-    return idx === -1 ? 998 : idx;
-  };
-  
-  validResults.sort((a, b) => getQualityRank(a.quality) - getQualityRank(b.quality));
-  
-  const best = validResults[0];
-  console.log(`✓ Got URL from Piped (best: ${best.quality} from ${validResults.length} results)`);
-  return best;
+  console.log(`  No Piped instance returned a valid URL`);
+  return null;
 }
 
 // ============ COBALT EXTRACTOR (FALLBACK) ============
@@ -642,7 +599,7 @@ interface CobaltResult {
   status: 'redirect' | 'tunnel' | 'picker';
 }
 
-async function extractViaCobalt(youtubeKey: string): Promise<ExtractionResult | null> {
+async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
   console.log(`Trying Cobalt instances (fallback) for ${youtubeKey}`);
   const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
   
@@ -695,7 +652,7 @@ async function extractViaCobalt(youtubeKey: string): Promise<ExtractionResult | 
     const valid = results.find(r => r !== null);
     if (valid) {
       console.log(`  ✓ Cobalt ${valid.instance}: got ${valid.status} URL`);
-      return { url: valid.url, quality: 'HD', source: 'cob', hdr: false };
+      return valid.url;
     }
   }
   
@@ -706,20 +663,20 @@ async function extractViaCobalt(youtubeKey: string): Promise<ExtractionResult | 
 // ============ MAIN YOUTUBE EXTRACTOR ============
 // Tries: 1. Invidious (direct URLs), 2. Piped (proxied URLs), 3. Cobalt (fallback)
 
-async function extractYouTubeDirectUrl(youtubeKey: string): Promise<ExtractionResult | null> {
+async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | null> {
   console.log(`\nExtracting YouTube URL for key: ${youtubeKey}`);
   
   // 1. Try Invidious first (direct googlevideo URLs)
-  const invidiousResult = await extractViaInvidious(youtubeKey);
-  if (invidiousResult) return invidiousResult;
+  const invidiousUrl = await extractViaInvidious(youtubeKey);
+  if (invidiousUrl) return invidiousUrl;
   
   // 2. Try Piped (proxied URLs)
-  const pipedResult = await extractViaPiped(youtubeKey);
-  if (pipedResult) return pipedResult;
+  const pipedUrl = await extractViaPiped(youtubeKey);
+  if (pipedUrl) return pipedUrl;
   
   // 3. Fall back to Cobalt (may return tunnel URLs that expire)
-  const cobaltResult = await extractViaCobalt(youtubeKey);
-  if (cobaltResult) return cobaltResult;
+  const cobaltUrl = await extractViaCobalt(youtubeKey);
+  if (cobaltUrl) return cobaltUrl;
   
   console.log('No YouTube URL found from any extractor');
   return null;
@@ -734,9 +691,6 @@ interface SearchResult {
   trackId?: number;
   country?: string;
   youtubeKey?: string;
-  quality?: string;       // e.g., "1080p", "720p", "4K"
-  extractorSource?: string; // e.g., "inv", "pip", "cob"
-  hdr?: boolean;
 }
 
 async function multiPassSearch(tmdbMeta: TMDBMetadata): Promise<SearchResult> {
@@ -828,17 +782,14 @@ async function resolvePreview(imdbId: string, type: string, supabase: any): Prom
       // Resolve fresh each time using the cached key
       if (cached.youtube_key && !cached.preview_url) {
         console.log(`Cache hit: YouTube key ${cached.youtube_key}, resolving fresh URL...`);
-        const freshResult = await extractYouTubeDirectUrl(cached.youtube_key);
-        if (freshResult) {
+        const freshUrl = await extractYouTubeDirectUrl(cached.youtube_key);
+        if (freshUrl) {
           return {
             found: true,
             source: 'youtube',
-            previewUrl: freshResult.url,
+            previewUrl: freshUrl,
             youtubeKey: cached.youtube_key,
-            country: 'yt',
-            quality: freshResult.quality,
-            extractorSource: freshResult.source,
-            hdr: freshResult.hdr
+            country: 'yt'
           };
         }
         // If extraction failed, continue to try full resolution
@@ -893,9 +844,9 @@ async function resolvePreview(imdbId: string, type: string, supabase: any): Prom
   // Try 2: YouTube fallback via extractors (direct URLs)
   if (tmdbMeta.youtubeTrailerKey) {
     console.log(`\nTrying YouTube extractors for key: ${tmdbMeta.youtubeTrailerKey}`);
-    const youtubeResult = await extractYouTubeDirectUrl(tmdbMeta.youtubeTrailerKey);
+    const youtubeDirectUrl = await extractYouTubeDirectUrl(tmdbMeta.youtubeTrailerKey);
     
-    if (youtubeResult) {
+    if (youtubeDirectUrl) {
       // Cache only the youtube_key, NOT the URL (tunnel URLs expire quickly)
       // Next time we'll resolve fresh using the cached key
       await supabase
@@ -913,12 +864,9 @@ async function resolvePreview(imdbId: string, type: string, supabase: any): Prom
       return {
         found: true,
         source: 'youtube',
-        previewUrl: youtubeResult.url,
+        previewUrl: youtubeDirectUrl,
         youtubeKey: tmdbMeta.youtubeTrailerKey,
-        country: 'yt',
-        quality: youtubeResult.quality,
-        extractorSource: youtubeResult.source,
-        hdr: youtubeResult.hdr
+        country: 'yt'
       };
     }
   }
@@ -989,22 +937,11 @@ serve(async (req) => {
       
       if (result.found && result.previewUrl) {
         const isYouTube = result.source === 'youtube';
-        
-        // Build quality string for YouTube sources
-        let qualityStr = '';
-        if (isYouTube && result.quality) {
-          qualityStr = ` ${result.quality}`;
-          if (result.hdr) qualityStr += ' HDR';
-        }
-        
-        // Subtle source indicator for YouTube
-        const srcTag = isYouTube && result.extractorSource ? ` ⋅${result.extractorSource}` : '';
-        
         const streamName = isYouTube 
-          ? `Trailer${qualityStr}` 
+          ? 'Official Trailer' 
           : (type === 'movie' ? 'Movie Preview' : 'Episode Preview');
         const streamTitle = isYouTube 
-          ? `Official Trailer${qualityStr}${srcTag}` 
+          ? 'Official Trailer' 
           : `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`;
         
         return new Response(
