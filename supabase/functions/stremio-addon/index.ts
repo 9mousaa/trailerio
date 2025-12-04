@@ -521,24 +521,13 @@ const PIPED_INSTANCES = [
   'https://api.watch.pluto.lat',
 ];
 
-// Cobalt instances - from instances.cobalt.best (high score instances)
-const COBALT_INSTANCES = [
-  'https://cobalt-api.meowing.de',      // 96% score
-  'https://cobalt-backend.canine.tools', // 92% score
-  'https://cobalt-api.kwiatekmiki.com', // 88% score
-  'https://kityune.imput.net',          // 76% score (official)
-  'https://capi.3kh0.net',              // 76% score
-  'https://nachos.imput.net',           // 72% score (official)
-  'https://sunny.imput.net',            // 72% score (official)
-  'https://blossom.imput.net',          // 64% score (official)
-];
 
 // ============ EXTRACTION RESULT ============
 
 interface ExtractionResult {
   url: string;
   quality: string;  // e.g., "1080p", "720p", "4K"
-  source: 'inv' | 'pip' | 'cob';  // Shorthand: inv=Invidious, pip=Piped, cob=Cobalt
+  source: 'inv' | 'pip';  // Shorthand: inv=Invidious, pip=Piped
   hdr: boolean;
 }
 
@@ -774,77 +763,8 @@ async function extractViaPiped(youtubeKey: string): Promise<ExtractionResult | n
   return best;
 }
 
-// ============ COBALT EXTRACTOR (FALLBACK) ============
-
-interface CobaltResult {
-  url: string;
-  instance: string;
-  status: 'redirect' | 'tunnel' | 'picker';
-}
-
-async function extractViaCobalt(youtubeKey: string): Promise<ExtractionResult | null> {
-  console.log(`Trying Cobalt instances (fallback) for ${youtubeKey}`);
-  const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
-  
-  // Request highest quality: max = 4K/2160p, prefer h264 for compatibility
-  const requestConfigs = [
-    { url: youtubeUrl, videoQuality: 'max', youtubeVideoCodec: 'h264', downloadMode: 'mute' },
-    { url: youtubeUrl, videoQuality: 'max', youtubeVideoCodec: 'h264' },
-    { url: youtubeUrl, videoQuality: 'max' }, // Allow VP9/AV1 as fallback for HDR
-  ];
-  
-  const tryInstance = async (
-    instance: string, 
-    config: Record<string, any>
-  ): Promise<CobaltResult | null> => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    
-    try {
-      const response = await fetch(instance, {
-        method: 'POST',
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(config),
-        signal: controller.signal
-      });
-      clearTimeout(timeout);
-      
-      if (!response.ok) return null;
-      const data = await response.json();
-      
-      if ((data.status === 'redirect' || data.status === 'tunnel') && data.url) {
-        return { url: data.url, instance, status: data.status };
-      }
-      if (data.status === 'picker' && data.picker?.[0]?.url) {
-        return { url: data.picker[0].url, instance, status: 'picker' };
-      }
-      return null;
-    } catch {
-      clearTimeout(timeout);
-      return null;
-    }
-  };
-  
-  for (const config of requestConfigs) {
-    const results = await Promise.all(
-      COBALT_INSTANCES.map(instance => tryInstance(instance, config))
-    );
-    const valid = results.find(r => r !== null);
-    if (valid) {
-      console.log(`  ✓ Cobalt ${valid.instance}: got ${valid.status} URL`);
-      return { url: valid.url, quality: 'HD', source: 'cob', hdr: false };
-    }
-  }
-  
-  console.log(`  No Cobalt instance returned a valid URL`);
-  return null;
-}
-
 // ============ MAIN YOUTUBE EXTRACTOR ============
-// Tries: 1. Invidious (direct URLs), 2. Piped (proxied URLs), 3. Cobalt (fallback)
+// Tries: 1. Invidious (direct URLs), 2. Piped (proxied URLs)
 
 async function extractYouTubeDirectUrl(youtubeKey: string): Promise<ExtractionResult | null> {
   console.log(`\nExtracting YouTube URL for key: ${youtubeKey}`);
@@ -856,10 +776,6 @@ async function extractYouTubeDirectUrl(youtubeKey: string): Promise<ExtractionRe
   // 2. Try Piped (proxied URLs)
   const pipedResult = await extractViaPiped(youtubeKey);
   if (pipedResult) return pipedResult;
-  
-  // 3. Fall back to Cobalt (may return tunnel URLs that expire)
-  const cobaltResult = await extractViaCobalt(youtubeKey);
-  if (cobaltResult) return cobaltResult;
   
   console.log('No YouTube URL found from any extractor');
   return null;
