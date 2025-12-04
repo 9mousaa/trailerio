@@ -382,102 +382,70 @@ function findBestMatch(results: any[], tmdbMeta: TMDBMetadata): ScoreResult | nu
   return null;
 }
 
-// ============ YOUTUBE EXTRACTORS (DIRECT URL) ============
+// ============ YOUTUBE EXTRACTORS (COBALT v10/v11 INSTANCES) ============
 
-const YOUTUBE_EXTRACTORS = [
-  // Piped instances (try multiple)
-  { name: 'Piped-1', type: 'piped', baseUrl: 'https://pipedapi.adminforge.de' },
-  { name: 'Piped-2', type: 'piped', baseUrl: 'https://api.piped.privacydev.net' },
-  { name: 'Piped-3', type: 'piped', baseUrl: 'https://pipedapi.smnz.de' },
-  { name: 'Piped-4', type: 'piped', baseUrl: 'https://pipedapi.simpleprivacy.fr' },
-  { name: 'Piped-5', type: 'piped', baseUrl: 'https://pipedapi-libre.kavin.rocks' },
-  // Invidious instances
-  { name: 'Invidious-1', type: 'invidious', baseUrl: 'https://yewtu.be' },
-  { name: 'Invidious-2', type: 'invidious', baseUrl: 'https://invidious.f5.si' },
+const COBALT_INSTANCES = [
+  // Community instances without turnstile (from cobalt.directory)
+  'https://cobalt-backend.canine.tools',    // 96%
+  'https://nuko-c.meowing.de',              // 96%
+  'https://cobalt-api.clxxped.lol',         // 92%
+  'https://subito-c.meowing.de',            // 88%
+  'https://cobalt-api.kwiatekmiki.com',     // 80%
 ];
 
 async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | null> {
   console.log(`Extracting direct URL for YouTube key: ${youtubeKey}`);
+  const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
   
-  for (const extractor of YOUTUBE_EXTRACTORS) {
+  for (const instance of COBALT_INSTANCES) {
     try {
-      console.log(`Trying ${extractor.name} (${extractor.baseUrl})...`);
+      console.log(`Trying Cobalt instance: ${instance}`);
       
-      if (extractor.type === 'piped') {
-        // Piped API format
-        const response = await fetch(`${extractor.baseUrl}/streams/${youtubeKey}`, {
-          headers: { 'Accept': 'application/json' }
-        });
-        
-        console.log(`${extractor.name} response status: ${response.status}`);
-        
-        if (response.ok) {
-          const data = await response.json();
-          // Get best video stream (preferring 720p or 480p with audio)
-          const videoStreams = data.videoStreams || [];
-          console.log(`${extractor.name}: found ${videoStreams.length} video streams`);
-          
-          // First try combined streams (video + audio)
-          const combinedStream = videoStreams.find((s: any) => 
-            s.quality === '720p' && s.videoOnly === false
-          ) || videoStreams.find((s: any) => 
-            s.quality === '480p' && s.videoOnly === false
-          ) || videoStreams.find((s: any) => 
-            s.quality === '360p' && s.videoOnly === false
-          ) || videoStreams.find((s: any) => !s.videoOnly);
-          
-          if (combinedStream?.url) {
-            console.log(`✓ ${extractor.name} returned direct URL (${combinedStream.quality})`);
-            return combinedStream.url;
-          }
-          
-          // If no combined, try HLS stream
-          if (data.hls) {
-            console.log(`✓ ${extractor.name} returned HLS URL`);
-            return data.hls;
-          }
-        } else {
-          const errorText = await response.text().catch(() => 'unknown error');
-          console.log(`${extractor.name} error: ${errorText.substring(0, 100)}`);
+      const response = await fetch(instance, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          url: youtubeUrl,
+          videoQuality: '720',
+          youtubeVideoCodec: 'h264',
+        })
+      });
+      
+      console.log(`${instance} response status: ${response.status}`);
+      
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => 'unknown');
+        console.log(`${instance} error: ${errorText.substring(0, 100)}`);
+        continue;
+      }
+      
+      const data = await response.json();
+      console.log(`${instance} response status type: ${data.status}`);
+      
+      if (data.status === 'tunnel' || data.status === 'redirect') {
+        if (data.url) {
+          console.log(`✓ Got direct URL from ${instance}`);
+          return data.url;
         }
-      } else if (extractor.type === 'invidious') {
-        // Invidious API format
-        const response = await fetch(`${extractor.baseUrl}/api/v1/videos/${youtubeKey}`, {
-          headers: { 'Accept': 'application/json' }
-        });
-        
-        console.log(`${extractor.name} response status: ${response.status}`);
-        
-        if (response.ok) {
-          const data = await response.json();
-          // Get format streams (direct URLs with audio)
-          const formats = data.formatStreams || [];
-          console.log(`${extractor.name}: found ${formats.length} format streams`);
-          
-          // Prefer 720p or 480p or 360p
-          const preferredFormat = formats.find((f: any) => 
-            f.qualityLabel === '720p'
-          ) || formats.find((f: any) => 
-            f.qualityLabel === '480p'
-          ) || formats.find((f: any) => 
-            f.qualityLabel === '360p'
-          ) || formats[0];
-          
-          if (preferredFormat?.url) {
-            console.log(`✓ ${extractor.name} returned direct URL (${preferredFormat.qualityLabel})`);
-            return preferredFormat.url;
-          }
-        } else {
-          const errorText = await response.text().catch(() => 'unknown error');
-          console.log(`${extractor.name} error: ${errorText.substring(0, 100)}`);
+      } else if (data.status === 'picker' && data.picker?.length > 0) {
+        // Multiple options, pick first video
+        const videoOption = data.picker.find((p: any) => p.type === 'video') || data.picker[0];
+        if (videoOption?.url) {
+          console.log(`✓ Got direct URL from ${instance} (picker)`);
+          return videoOption.url;
         }
+      } else if (data.status === 'error') {
+        console.log(`${instance} error: ${data.error?.code || 'unknown'}`);
       }
     } catch (error) {
-      console.error(`${extractor.name} error:`, error);
+      console.error(`${instance} fetch error:`, error);
     }
   }
   
-  console.log('All YouTube extractors failed');
+  console.log('All Cobalt instances failed');
   return null;
 }
 
