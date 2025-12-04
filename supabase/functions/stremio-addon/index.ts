@@ -177,29 +177,61 @@ interface ITunesSearchParams {
 async function searchITunes(params: ITunesSearchParams): Promise<any[]> {
   const { term, country, type } = params;
   
-  const queryParams = new URLSearchParams({
-    term,
-    country,
-    limit: '100',
-    media: type === 'movie' ? 'movie' : 'tvShow',
-    entity: type === 'movie' ? 'movie' : 'tvSeason',
-  });
+  // Use specific media/entity for movies, broader search for TV
+  const queryParams = type === 'movie' 
+    ? new URLSearchParams({
+        term,
+        country,
+        limit: '50',
+        media: 'movie',
+        entity: 'movie',
+      })
+    : new URLSearchParams({
+        term,
+        country,
+        limit: '100',
+        media: 'tvShow',
+        entity: 'tvSeason',
+      });
   
   const url = `https://itunes.apple.com/search?${queryParams}`;
   
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000); // 8s timeout for thorough search
+    const timeout = setTimeout(() => controller.abort(), 8000);
     
     const response = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
     
-    const data = await response.json();
-    const results = (data.results || []).filter((r: any) => r.previewUrl);
+    if (!response.ok) {
+      console.log(`  iTunes ${country.toUpperCase()}: HTTP ${response.status}`);
+      return [];
+    }
     
-    console.log(`  iTunes ${country.toUpperCase()}: ${results.length} results`);
-    return results;
-  } catch {
+    const data = await response.json();
+    const allResults = data.results || [];
+    
+    // Log what we get for debugging
+    if (allResults.length > 0) {
+      const first = allResults[0];
+      const kinds = [...new Set(allResults.map((r: any) => r.kind || r.wrapperType))];
+      console.log(`  iTunes ${country.toUpperCase()}: ${allResults.length} results, kinds: ${kinds.join(',')}`);
+      
+      // Check for previewUrl
+      const withPreview = allResults.filter((r: any) => r.previewUrl);
+      if (withPreview.length > 0) {
+        console.log(`    Found ${withPreview.length} with previewUrl!`);
+        return withPreview;
+      } else {
+        console.log(`    No previewUrl. Sample: "${first.trackName}", kind=${first.kind}, wrapperType=${first.wrapperType}`);
+      }
+    } else {
+      console.log(`  iTunes ${country.toUpperCase()}: 0 results`);
+    }
+    
+    return [];
+  } catch (err) {
+    console.log(`  iTunes ${country.toUpperCase()}: error - ${err}`);
     return [];
   }
 }
