@@ -382,9 +382,73 @@ function findBestMatch(results: any[], tmdbMeta: TMDBMetadata): ScoreResult | nu
   return null;
 }
 
-// ============ YOUTUBE FALLBACK (NATIVE STREMIO ytId) ============
-// Note: cobalt.tools v7 API shut down Nov 11, 2024
-// Using Stremio's native ytId stream type instead
+// ============ YOUTUBE EXTRACTORS (DIRECT URL) ============
+
+const YOUTUBE_EXTRACTORS = [
+  { name: 'Piped', baseUrl: 'https://pipedapi.kavin.rocks' },
+  { name: 'Invidious-1', baseUrl: 'https://inv.nadeko.net' },
+  { name: 'Invidious-2', baseUrl: 'https://invidious.nerdvpn.de' },
+];
+
+async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | null> {
+  console.log(`Extracting direct URL for YouTube key: ${youtubeKey}`);
+  
+  for (const extractor of YOUTUBE_EXTRACTORS) {
+    try {
+      console.log(`Trying ${extractor.name}...`);
+      
+      if (extractor.name === 'Piped') {
+        // Piped API format
+        const response = await fetch(`${extractor.baseUrl}/streams/${youtubeKey}`, {
+          headers: { 'Accept': 'application/json' }
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          // Get best video stream (preferring 720p or 480p)
+          const videoStreams = data.videoStreams || [];
+          const preferredStream = videoStreams.find((s: any) => 
+            s.quality === '720p' && s.videoOnly === false
+          ) || videoStreams.find((s: any) => 
+            s.quality === '480p' && s.videoOnly === false
+          ) || videoStreams.find((s: any) => !s.videoOnly);
+          
+          if (preferredStream?.url) {
+            console.log(`✓ ${extractor.name} returned direct URL (${preferredStream.quality})`);
+            return preferredStream.url;
+          }
+        }
+      } else {
+        // Invidious API format
+        const response = await fetch(`${extractor.baseUrl}/api/v1/videos/${youtubeKey}`, {
+          headers: { 'Accept': 'application/json' }
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          // Get adaptive formats (direct URLs)
+          const formats = data.adaptiveFormats || data.formatStreams || [];
+          // Prefer 720p or 480p with audio
+          const preferredFormat = formats.find((f: any) => 
+            f.qualityLabel === '720p' && f.type?.includes('video')
+          ) || formats.find((f: any) => 
+            f.qualityLabel === '480p' && f.type?.includes('video')
+          ) || formats.find((f: any) => f.type?.includes('video'));
+          
+          if (preferredFormat?.url) {
+            console.log(`✓ ${extractor.name} returned direct URL (${preferredFormat.qualityLabel})`);
+            return preferredFormat.url;
+          }
+        }
+      }
+    } catch (error) {
+      console.error(`${extractor.name} error:`, error);
+    }
+  }
+  
+  console.log('All YouTube extractors failed');
+  return null;
+}
 
 // ============ MULTI-PASS SEARCH ============
 
@@ -538,29 +602,33 @@ async function resolvePreview(imdbId: string, type: string, supabase: any): Prom
     return { ...itunesResult, source: 'itunes' };
   }
   
-  // Try 2: YouTube fallback (native Stremio ytId)
+  // Try 2: YouTube fallback via extractors (direct URLs)
   if (tmdbMeta.youtubeTrailerKey) {
-    console.log(`\nUsing YouTube fallback with key: ${tmdbMeta.youtubeTrailerKey}`);
+    console.log(`\nTrying YouTube extractors for key: ${tmdbMeta.youtubeTrailerKey}`);
+    const youtubeDirectUrl = await extractYouTubeDirectUrl(tmdbMeta.youtubeTrailerKey);
     
-    // Cache YouTube result
-    await supabase
-      .from('itunes_mappings')
-      .upsert({
-        imdb_id: imdbId,
-        track_id: null,
-        preview_url: null,  // No direct URL needed for ytId
-        country: 'yt',
-        youtube_key: tmdbMeta.youtubeTrailerKey,
-        last_checked: new Date().toISOString()
-      }, { onConflict: 'imdb_id' });
-    
-    console.log(`✓ Using YouTube trailer: ${tmdbMeta.youtubeTrailerKey}`);
-    return {
-      found: true,
-      source: 'youtube',
-      youtubeKey: tmdbMeta.youtubeTrailerKey,
-      country: 'yt'
-    };
+    if (youtubeDirectUrl) {
+      // Cache YouTube result with direct URL
+      await supabase
+        .from('itunes_mappings')
+        .upsert({
+          imdb_id: imdbId,
+          track_id: null,
+          preview_url: youtubeDirectUrl,
+          country: 'yt',
+          youtube_key: tmdbMeta.youtubeTrailerKey,
+          last_checked: new Date().toISOString()
+        }, { onConflict: 'imdb_id' });
+      
+      console.log(`✓ Got YouTube direct URL`);
+      return {
+        found: true,
+        source: 'youtube',
+        previewUrl: youtubeDirectUrl,
+        youtubeKey: tmdbMeta.youtubeTrailerKey,
+        country: 'yt'
+      };
+    }
   }
   
   // No result found - cache negative result
@@ -627,32 +695,25 @@ serve(async (req) => {
       
       const result = await resolvePreview(id, type, supabase);
       
-      if (result.found) {
+      if (result.found && result.previewUrl) {
         const isYouTube = result.source === 'youtube';
-        const streams = [];
+        const streamName = isYouTube 
+          ? 'YouTube Trailer' 
+          : (type === 'movie' ? 'Movie Preview' : 'Episode Preview');
+        const streamTitle = isYouTube 
+          ? 'Official Trailer (YouTube)' 
+          : `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`;
         
-        if (isYouTube && result.youtubeKey) {
-          // Use Stremio's native ytId for YouTube
-          streams.push({
-            name: 'YouTube Trailer',
-            title: 'Official Trailer (YouTube)',
-            ytId: result.youtubeKey
-          });
-        } else if (result.previewUrl) {
-          // Use direct URL for iTunes
-          streams.push({
-            name: type === 'movie' ? 'Movie Preview' : 'Episode Preview',
-            title: `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`,
-            url: result.previewUrl
-          });
-        }
-        
-        if (streams.length > 0) {
-          return new Response(
-            JSON.stringify({ streams }),
-            { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-          );
-        }
+        return new Response(
+          JSON.stringify({
+            streams: [{
+              name: streamName,
+              title: streamTitle,
+              url: result.previewUrl
+            }]
+          }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
       }
       
       return new Response(
