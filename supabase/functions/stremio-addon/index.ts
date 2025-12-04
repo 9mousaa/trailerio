@@ -11,8 +11,13 @@ const TMDB_API_KEY = Deno.env.get('TMDB_API_KEY');
 const CACHE_DAYS = 30;
 const MIN_SCORE_THRESHOLD = 0.6;
 
-// Country storefronts to try (Pass 3)
-const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
+// Country storefronts to try - comprehensive list for maximum coverage
+const COUNTRY_VARIANTS = [
+  'us', 'gb', 'ca', 'au',  // Primary English markets
+  'de', 'fr', 'it', 'es',  // Major European markets
+  'nl', 'jp', 'br', 'mx',  // Additional markets with good coverage
+  'nz', 'ie', 'at', 'ch'   // Secondary English/European markets
+];
 
 const MANIFEST = {
   id: "com.trailer.preview",
@@ -213,7 +218,7 @@ async function searchITunes(params: ITunesSearchParams): Promise<any[]> {
     const queryParams = new URLSearchParams({
       term,
       country,
-      limit: '25', // Reduced from 50 for speed
+      limit: '100', // Increased for better coverage
       ...extraParams
     });
     
@@ -221,7 +226,7 @@ async function searchITunes(params: ITunesSearchParams): Promise<any[]> {
     
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout
+      const timeout = setTimeout(() => controller.abort(), 8000); // 8s timeout for larger results
       
       const response = await fetch(url, { signal: controller.signal });
       clearTimeout(timeout);
@@ -233,28 +238,74 @@ async function searchITunes(params: ITunesSearchParams): Promise<any[]> {
         results = results.filter((r: any) => r.kind === filterKind);
       }
       
+      // Filter to only include results with previewUrl early
+      results = results.filter((r: any) => r.previewUrl);
+      
       return results;
     } catch {
       return [];
     }
   };
   
+  const allResults: any[] = [];
+  
   if (type === 'movie') {
-    // Try specific search first, then general
+    // Pass 1: Specific movie search with movieTerm attribute
     let results = await trySearch({ media: 'movie', entity: 'movie', attribute: 'movieTerm' }, null);
-    if (results.length > 0) return results;
+    if (results.length > 0) allResults.push(...results);
     
-    results = await trySearch({}, 'feature-movie');
-    if (results.length > 0) return results;
+    // Pass 2: Movie search without attribute (broader)
+    if (allResults.length < 10) {
+      results = await trySearch({ media: 'movie', entity: 'movie' }, null);
+      for (const r of results) {
+        if (!allResults.find(a => a.trackId === r.trackId)) allResults.push(r);
+      }
+    }
+    
+    // Pass 3: General search filtered to feature-movie
+    if (allResults.length < 10) {
+      results = await trySearch({}, 'feature-movie');
+      for (const r of results) {
+        if (!allResults.find(a => a.trackId === r.trackId)) allResults.push(r);
+      }
+    }
   } else {
-    let results = await trySearch({ media: 'tvShow', entity: 'tvEpisode', attribute: 'showTerm' }, null);
-    if (results.length > 0) return results;
+    // TV SHOWS - try multiple entity types for best coverage
     
-    results = await trySearch({ media: 'tvShow' }, 'tv-episode');
-    if (results.length > 0) return results;
+    // Pass 1: tvSeason - this often has show previews/trailers
+    let results = await trySearch({ media: 'tvShow', entity: 'tvSeason', attribute: 'showTerm' }, null);
+    if (results.length > 0) allResults.push(...results);
+    
+    // Pass 2: tvSeason without attribute
+    if (allResults.length < 10) {
+      results = await trySearch({ media: 'tvShow', entity: 'tvSeason' }, null);
+      for (const r of results) {
+        const id = r.collectionId || r.trackId;
+        if (!allResults.find(a => (a.collectionId || a.trackId) === id)) allResults.push(r);
+      }
+    }
+    
+    // Pass 3: tvEpisode - sometimes has episode previews
+    if (allResults.length < 10) {
+      results = await trySearch({ media: 'tvShow', entity: 'tvEpisode', attribute: 'showTerm' }, null);
+      for (const r of results) {
+        const id = r.collectionId || r.trackId;
+        if (!allResults.find(a => (a.collectionId || a.trackId) === id)) allResults.push(r);
+      }
+    }
+    
+    // Pass 4: General tvShow search
+    if (allResults.length < 10) {
+      results = await trySearch({ media: 'tvShow' }, null);
+      for (const r of results) {
+        const id = r.collectionId || r.trackId;
+        if (!allResults.find(a => (a.collectionId || a.trackId) === id)) allResults.push(r);
+      }
+    }
   }
   
-  return [];
+  console.log(`  iTunes ${country.toUpperCase()}: ${allResults.length} results with previews`);
+  return allResults;
 }
 
 // ============ SCORING LOGIC ============
@@ -267,35 +318,57 @@ interface ScoreResult {
 function scoreItem(tmdbMeta: TMDBMetadata, item: any): number {
   let score = 0;
   
-  // For TV episodes, match against artistName (show name), not trackName (episode name)
-  // For movies, match against trackName
-  const nameToMatch = tmdbMeta.mediaType === 'tv' 
-    ? (item.artistName || item.collectionName || '') 
-    : (item.trackName || item.collectionName || '');
+  // Get all possible names to match from iTunes result
+  // For TV: collectionName (season/show name), artistName (network sometimes), trackName (episode)
+  // For movies: trackName (movie title), collectionName (sometimes set)
+  const namesToCheck: string[] = [];
   
-  const normNameToMatch = normalizeTitle(nameToMatch);
+  if (tmdbMeta.mediaType === 'tv') {
+    // For TV, prioritize collectionName (show/season name), then artistName
+    if (item.collectionName) namesToCheck.push(item.collectionName);
+    if (item.artistName) namesToCheck.push(item.artistName);
+    if (item.trackName) namesToCheck.push(item.trackName);
+  } else {
+    // For movies, prioritize trackName
+    if (item.trackName) namesToCheck.push(item.trackName);
+    if (item.collectionName) namesToCheck.push(item.collectionName);
+  }
+  
   const normTitle = normalizeTitle(tmdbMeta.title);
   const normOriginal = normalizeTitle(tmdbMeta.originalTitle);
   const normAltTitles = tmdbMeta.altTitles.map(t => normalizeTitle(t));
   
-  // Title match scoring
-  if (normNameToMatch === normTitle) {
-    score += 0.5;
-  } else if (normNameToMatch === normOriginal) {
-    score += 0.4;
-  } else if (normAltTitles.includes(normNameToMatch)) {
-    score += 0.4;
-  } else {
-    const fuzzyScore = Math.max(
-      fuzzyMatch(nameToMatch, tmdbMeta.title),
-      fuzzyMatch(nameToMatch, tmdbMeta.originalTitle)
-    );
-    if (fuzzyScore > 0.8) {
-      score += 0.3;
-    } else if (fuzzyScore > 0.6) {
-      score += 0.15;
+  // Find best title match across all iTunes name fields
+  let bestTitleScore = 0;
+  for (const name of namesToCheck) {
+    const normName = normalizeTitle(name);
+    
+    if (normName === normTitle) {
+      bestTitleScore = Math.max(bestTitleScore, 0.5);
+    } else if (normName === normOriginal) {
+      bestTitleScore = Math.max(bestTitleScore, 0.45);
+    } else if (normAltTitles.includes(normName)) {
+      bestTitleScore = Math.max(bestTitleScore, 0.4);
+    } else {
+      // Check if iTunes name contains the title or vice versa
+      if (normName.includes(normTitle) || normTitle.includes(normName)) {
+        bestTitleScore = Math.max(bestTitleScore, 0.35);
+      } else {
+        const fuzzyScore = Math.max(
+          fuzzyMatch(name, tmdbMeta.title),
+          fuzzyMatch(name, tmdbMeta.originalTitle)
+        );
+        if (fuzzyScore > 0.85) {
+          bestTitleScore = Math.max(bestTitleScore, 0.35);
+        } else if (fuzzyScore > 0.7) {
+          bestTitleScore = Math.max(bestTitleScore, 0.25);
+        } else if (fuzzyScore > 0.6) {
+          bestTitleScore = Math.max(bestTitleScore, 0.15);
+        }
+      }
     }
   }
+  score += bestTitleScore;
   
   // Year difference scoring
   const itunesYear = item.releaseDate ? parseInt(item.releaseDate.substring(0, 4)) : null;
@@ -336,7 +409,7 @@ function scoreItem(tmdbMeta: TMDBMetadata, item: any): number {
     }
   }
   
-  // Must have previewUrl
+  // Must have previewUrl (we already filter for this, but safety check)
   if (!item.previewUrl) {
     score -= 1.0;
   }
@@ -494,13 +567,38 @@ async function extractViaInvidious(youtubeKey: string): Promise<ExtractionResult
       const data = await response.json();
       
       // Quality priority: 4K/2160p > 1440p > 1080p > 720p, HDR preferred
-      const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
+      const qualityPriority = ['2160p', '4320p', '1440p', '1080p', '720p', '480p', '360p', '240p', '144p'];
+      
+      // Helper to normalize quality labels (handle 266p, 272p, etc)
+      const normalizeQuality = (label: string | undefined): string => {
+        if (!label) return '720p';
+        // Extract the number part
+        const match = label.match(/(\d+)p/);
+        if (match) {
+          const height = parseInt(match[1]);
+          if (height >= 2160) return '2160p';
+          if (height >= 1440) return '1440p';
+          if (height >= 1080) return '1080p';
+          if (height >= 720) return '720p';
+          if (height >= 480) return '480p';
+          if (height >= 360) return '360p';
+          return label;
+        }
+        return label;
+      };
       
       // Helper to get quality rank (lower is better)
       const getQualityRank = (label: string | undefined): number => {
-        if (!label) return 999;
-        const idx = qualityPriority.findIndex(q => label.includes(q));
+        const normalized = normalizeQuality(label);
+        const idx = qualityPriority.findIndex(q => normalized.includes(q));
         return idx === -1 ? 998 : idx;
+      };
+      
+      // Helper to get actual height for sorting
+      const getHeight = (label: string | undefined): number => {
+        if (!label) return 720;
+        const match = label.match(/(\d+)p/);
+        return match ? parseInt(match[1]) : 720;
       };
       
       // Helper to check for HDR
@@ -511,56 +609,59 @@ async function extractViaInvidious(youtubeKey: string): Promise<ExtractionResult
       };
       
       // Collect ALL available streams from both sources
-      const allStreams: Array<{url: string, quality: string, hdr: boolean, rank: number}> = [];
+      const allStreams: Array<{url: string, quality: string, hdr: boolean, rank: number, height: number}> = [];
       
-      // formatStreams has combined video+audio
-      if (data.formatStreams?.length > 0) {
-        for (const stream of data.formatStreams) {
-          if (stream.url && (stream.container === 'mp4' || !stream.container)) {
-            allStreams.push({
-              url: stream.url,
-              quality: stream.qualityLabel || '720p',
-              hdr: isHDR(stream),
-              rank: getQualityRank(stream.qualityLabel)
-            });
-          }
-        }
-      }
-      
-      // adaptiveFormats often have higher quality (4K, HDR)
+      // adaptiveFormats first - they often have higher quality (4K, HDR)
       if (data.adaptiveFormats?.length > 0) {
         const videoFormats = data.adaptiveFormats.filter((s: any) => 
           s.type?.includes('video') || s.mimeType?.startsWith('video/')
         );
         
         for (const stream of videoFormats) {
-          if (stream.url && (stream.container === 'mp4' || stream.mimeType?.includes('mp4') || stream.mimeType?.includes('webm'))) {
+          // Accept mp4, webm, and any other video format
+          if (stream.url && stream.qualityLabel) {
+            allStreams.push({
+              url: stream.url,
+              quality: stream.qualityLabel,
+              hdr: isHDR(stream),
+              rank: getQualityRank(stream.qualityLabel),
+              height: getHeight(stream.qualityLabel)
+            });
+          }
+        }
+      }
+      
+      // formatStreams has combined video+audio (usually lower quality but playable everywhere)
+      if (data.formatStreams?.length > 0) {
+        for (const stream of data.formatStreams) {
+          if (stream.url) {
             allStreams.push({
               url: stream.url,
               quality: stream.qualityLabel || '720p',
               hdr: isHDR(stream),
-              rank: getQualityRank(stream.qualityLabel)
+              rank: getQualityRank(stream.qualityLabel),
+              height: getHeight(stream.qualityLabel)
             });
           }
         }
       }
       
       if (allStreams.length > 0) {
-        // Sort: HDR first, then by quality rank (lower = better)
+        // Sort: HDR first, then by height (higher is better)
         allStreams.sort((a, b) => {
           // HDR always wins
           if (a.hdr && !b.hdr) return -1;
           if (!a.hdr && b.hdr) return 1;
-          // Then highest quality
-          return a.rank - b.rank;
+          // Then highest resolution
+          return b.height - a.height;
         });
         
         const best = allStreams[0];
-        console.log(`  ✓ Invidious ${instance}: got ${best.quality}${best.hdr ? ' HDR' : ''} (best of ${allStreams.length} streams)`);
-        return { url: best.url, quality: best.quality, source: 'inv' as const, hdr: best.hdr };
+        console.log(`  ✓ Inv ${instance.replace('https://', '').split('/')[0]}: ${best.quality}${best.hdr ? ' HDR' : ''} (${allStreams.length} streams, best height=${best.height})`);
+        return { url: best.url, quality: normalizeQuality(best.quality), source: 'inv' as const, hdr: best.hdr };
       }
       
-      console.log(`  ${instance}: no usable streams in response`);
+      console.log(`  ${instance.replace('https://', '').split('/')[0]}: no usable streams`);
       return null;
     } catch (e) {
       clearTimeout(timeout);
@@ -578,23 +679,23 @@ async function extractViaInvidious(youtubeKey: string): Promise<ExtractionResult
     return null;
   }
   
-  // Sort by quality to get the best one (highest resolution first, HDR preferred)
-  const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
-  const getQualityRank = (q: string): number => {
-    const idx = qualityPriority.findIndex(p => q.includes(p));
-    return idx === -1 ? 998 : idx;
+  // Helper to extract height from quality string
+  const getHeight = (q: string): number => {
+    const match = q.match(/(\d+)p/);
+    return match ? parseInt(match[1]) : 720;
   };
   
+  // Sort by quality (higher resolution first, HDR preferred)
   validResults.sort((a, b) => {
     // Prefer HDR
     if (a.hdr && !b.hdr) return -1;
     if (!a.hdr && b.hdr) return 1;
-    // Then by quality
-    return getQualityRank(a.quality) - getQualityRank(b.quality);
+    // Then by height (higher is better)
+    return getHeight(b.quality) - getHeight(a.quality);
   });
   
   const best = validResults[0];
-  console.log(`✓ Got URL from Invidious (best: ${best.quality}${best.hdr ? ' HDR' : ''} from ${validResults.length} results)`);
+  console.log(`✓ Best Invidious: ${best.quality}${best.hdr ? ' HDR' : ''} (from ${validResults.length} results)`);
   return best;
 }
 
@@ -604,11 +705,11 @@ async function extractViaInvidious(youtubeKey: string): Promise<ExtractionResult
 async function extractViaPiped(youtubeKey: string): Promise<ExtractionResult | null> {
   console.log(`Trying Piped instances for ${youtubeKey}`);
   
-  const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
-  const getQualityRank = (q: string | undefined): number => {
-    if (!q) return 999;
-    const idx = qualityPriority.findIndex(p => q.includes(p));
-    return idx === -1 ? 998 : idx;
+  // Helper to extract height from quality string
+  const getHeight = (q: string | undefined): number => {
+    if (!q) return 720;
+    const match = q.match(/(\d+)p?/);
+    return match ? parseInt(match[1]) : 720;
   };
   
   const tryInstance = async (instance: string): Promise<ExtractionResult | null> => {
@@ -627,26 +728,28 @@ async function extractViaPiped(youtubeKey: string): Promise<ExtractionResult | n
       
       if (!data.videoStreams?.length) return null;
       
-      // Collect ALL video streams and pick the highest quality
-      const allStreams: Array<{url: string, quality: string, rank: number}> = [];
+      // Collect ALL video streams
+      const allStreams: Array<{url: string, quality: string, height: number}> = [];
       
       for (const stream of data.videoStreams) {
         if (stream.url && stream.mimeType?.startsWith('video/')) {
+          const quality = stream.quality || '720p';
           allStreams.push({
             url: stream.url,
-            quality: stream.quality || '720p',
-            rank: getQualityRank(stream.quality)
+            quality,
+            height: getHeight(quality)
           });
         }
       }
       
       if (allStreams.length === 0) return null;
       
-      // Sort by quality (lowest rank = highest quality)
-      allStreams.sort((a, b) => a.rank - b.rank);
+      // Sort by height (higher is better)
+      allStreams.sort((a, b) => b.height - a.height);
       
       const best = allStreams[0];
-      console.log(`  ✓ Piped ${instance}: got ${best.quality} (best of ${allStreams.length} streams)`);
+      const instName = instance.replace('https://', '').split('/')[0];
+      console.log(`  ✓ Pip ${instName}: ${best.quality} (${allStreams.length} streams, best height=${best.height})`);
       return { url: best.url, quality: best.quality, source: 'pip', hdr: false };
     } catch {
       clearTimeout(timeout);
@@ -663,11 +766,11 @@ async function extractViaPiped(youtubeKey: string): Promise<ExtractionResult | n
     return null;
   }
   
-  // Sort by quality to get the best one (reuse getQualityRank from above)
-  validResults.sort((a, b) => getQualityRank(a.quality) - getQualityRank(b.quality));
+  // Sort by height (higher is better)
+  validResults.sort((a, b) => getHeight(b.quality) - getHeight(a.quality));
   
   const best = validResults[0];
-  console.log(`✓ Got URL from Piped (best: ${best.quality} from ${validResults.length} results)`);
+  console.log(`✓ Best Piped: ${best.quality} (from ${validResults.length} results)`);
   return best;
 }
 
