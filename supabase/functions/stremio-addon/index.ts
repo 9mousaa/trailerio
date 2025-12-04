@@ -94,7 +94,7 @@ interface TMDBMetadata {
 async function getTMDBMetadata(imdbId: string, type: string): Promise<TMDBMetadata | null> {
   console.log(`Fetching TMDB metadata for ${imdbId}, type: ${type}`);
   
-  // Step 1: Find by IMDB ID
+  // Step 1: Find by IMDB ID (must be first to get tmdbId)
   const findUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
   const findResponse = await fetch(findUrl);
   const findData = await findResponse.json();
@@ -123,15 +123,19 @@ async function getTMDBMetadata(imdbId: string, type: string): Promise<TMDBMetada
   
   const tmdbId = result.id;
   
-  // Step 2: Get full details with videos (append_to_response)
+  // Step 2: PARALLEL fetch - detail (with videos) + alternative titles
   const detailUrl = `https://api.themoviedb.org/3/${mediaType}/${tmdbId}?api_key=${TMDB_API_KEY}&append_to_response=videos`;
-  const detailResponse = await fetch(detailUrl);
-  const detail = await detailResponse.json();
-  
-  // Step 3: Get alternative titles
   const altTitlesUrl = `https://api.themoviedb.org/3/${mediaType}/${tmdbId}/alternative_titles?api_key=${TMDB_API_KEY}`;
-  const altTitlesResponse = await fetch(altTitlesUrl);
-  const altTitlesData = await altTitlesResponse.json();
+  
+  const [detailResponse, altTitlesResponse] = await Promise.all([
+    fetch(detailUrl),
+    fetch(altTitlesUrl)
+  ]);
+  
+  const [detail, altTitlesData] = await Promise.all([
+    detailResponse.json(),
+    altTitlesResponse.json()
+  ]);
   
   const mainTitle = mediaType === 'movie' ? detail.title : detail.name;
   const originalTitle = mediaType === 'movie' ? detail.original_title : detail.original_name;
@@ -165,8 +169,6 @@ async function getTMDBMetadata(imdbId: string, type: string): Promise<TMDBMetada
     }
   }
   
-  console.log(`TMDB: "${mainTitle}" (${year}), YouTube trailer: ${youtubeTrailerKey || 'none'}`);
-  
   // Extract English alt titles (US, GB, CA, AU)
   const altTitlesArray: string[] = [];
   const englishCountries = ['US', 'GB', 'CA', 'AU'];
@@ -182,7 +184,7 @@ async function getTMDBMetadata(imdbId: string, type: string): Promise<TMDBMetada
     }
   }
   
-  console.log(`TMDB: "${mainTitle}" (${year}), original: "${originalTitle}", altTitles: ${altTitlesArray.length}`);
+  console.log(`TMDB: "${mainTitle}" (${year}), YouTube: ${youtubeTrailerKey || 'none'}, altTitles: ${altTitlesArray.length}`);
   
   return {
     tmdbId,
@@ -207,22 +209,23 @@ interface ITunesSearchParams {
 async function searchITunes(params: ITunesSearchParams): Promise<any[]> {
   const { term, country, type } = params;
   
-  // Strategy: Try specific params first, fall back to general search
-  // Apple's entity=movie often returns 0 results, so we need fallbacks
-  
   const trySearch = async (extraParams: Record<string, string>, filterKind: string | null): Promise<any[]> => {
     const queryParams = new URLSearchParams({
       term,
       country,
-      limit: '50',
+      limit: '25', // Reduced from 50 for speed
       ...extraParams
     });
     
     const url = `https://itunes.apple.com/search?${queryParams}`;
-    console.log(`iTunes search: ${url}`);
     
     try {
-      const response = await fetch(url);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout
+      
+      const response = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeout);
+      
       const data = await response.json();
       let results = data.results || [];
       
@@ -231,40 +234,24 @@ async function searchITunes(params: ITunesSearchParams): Promise<any[]> {
       }
       
       return results;
-    } catch (error) {
-      console.error(`iTunes search error:`, error);
+    } catch {
       return [];
     }
   };
   
   if (type === 'movie') {
-    // Strategy 1: Specific movie search (per docs)
+    // Try specific search first, then general
     let results = await trySearch({ media: 'movie', entity: 'movie', attribute: 'movieTerm' }, null);
-    if (results.length > 0) {
-      console.log(`Found ${results.length} movie results using specific search`);
-      return results;
-    }
+    if (results.length > 0) return results;
     
-    // Strategy 2: General search, filter by kind
     results = await trySearch({}, 'feature-movie');
-    if (results.length > 0) {
-      console.log(`Found ${results.length} movie results using general search`);
-      return results;
-    }
+    if (results.length > 0) return results;
   } else {
-    // Strategy 1: Search for TV episodes (they have previewUrls, seasons don't)
     let results = await trySearch({ media: 'tvShow', entity: 'tvEpisode', attribute: 'showTerm' }, null);
-    if (results.length > 0) {
-      console.log(`Found ${results.length} TV episode results using specific search`);
-      return results;
-    }
+    if (results.length > 0) return results;
     
-    // Strategy 2: General TV search filtered to episodes
     results = await trySearch({ media: 'tvShow' }, 'tv-episode');
-    if (results.length > 0) {
-      console.log(`Found ${results.length} TV results using general search`);
-      return results;
-    }
+    if (results.length > 0) return results;
   }
   
   return [];
@@ -410,10 +397,12 @@ async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | nul
   console.log(`Extracting direct URL for YouTube key: ${youtubeKey}`);
   const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
   
-  for (const instance of COBALT_INSTANCES) {
+  // Helper to try a single instance with timeout
+  const tryInstance = async (instance: string): Promise<{ url: string; instance: string } | null> => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000); // 8s timeout
+    
     try {
-      console.log(`Trying Cobalt instance: ${instance}`);
-      
       const response = await fetch(instance, {
         method: 'POST',
         headers: {
@@ -423,42 +412,42 @@ async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | nul
         body: JSON.stringify({
           url: youtubeUrl,
           videoQuality: '720',
-          youtubeVideoCodec: 'h264',    // AVPlayer compatible codec
-          downloadMode: 'auto',          // Ensure video, not audio-only
-          youtubeHLS: true,              // Prefer HLS for better streaming
+          youtubeVideoCodec: 'h264',
+          downloadMode: 'auto',
+          youtubeHLS: true,
           filenameStyle: 'basic',
-        })
+        }),
+        signal: controller.signal
       });
       
-      console.log(`${instance} response status: ${response.status}`);
+      clearTimeout(timeout);
       
-      if (!response.ok) {
-        const errorText = await response.text().catch(() => 'unknown');
-        console.log(`${instance} error: ${errorText.substring(0, 100)}`);
-        continue;
-      }
+      if (!response.ok) return null;
       
       const data = await response.json();
-      console.log(`${instance} response status type: ${data.status}`);
       
       if (data.status === 'tunnel' || data.status === 'redirect') {
-        if (data.url) {
-          console.log(`✓ Got direct URL from ${instance}`);
-          return data.url;
-        }
+        if (data.url) return { url: data.url, instance };
       } else if (data.status === 'picker' && data.picker?.length > 0) {
-        // Multiple options, pick first video
         const videoOption = data.picker.find((p: any) => p.type === 'video') || data.picker[0];
-        if (videoOption?.url) {
-          console.log(`✓ Got direct URL from ${instance} (picker)`);
-          return videoOption.url;
-        }
-      } else if (data.status === 'error') {
-        console.log(`${instance} error: ${data.error?.code || 'unknown'}`);
+        if (videoOption?.url) return { url: videoOption.url, instance };
       }
-    } catch (error) {
-      console.error(`${instance} fetch error:`, error);
+      return null;
+    } catch {
+      clearTimeout(timeout);
+      return null;
     }
+  };
+  
+  // Race all instances - first successful response wins
+  const results = await Promise.all(
+    COBALT_INSTANCES.map(instance => tryInstance(instance))
+  );
+  
+  const firstSuccess = results.find(r => r !== null);
+  if (firstSuccess) {
+    console.log(`✓ Got direct URL from ${firstSuccess.instance}`);
+    return firstSuccess.url;
   }
   
   console.log('All Cobalt instances failed');
@@ -479,60 +468,60 @@ interface SearchResult {
 async function multiPassSearch(tmdbMeta: TMDBMetadata): Promise<SearchResult> {
   const searchType = tmdbMeta.mediaType === 'movie' ? 'movie' : 'tv';
   
-  // Collect all titles to try
+  // Collect all titles to try (limit to 3 for speed)
   const titlesToTry: string[] = [tmdbMeta.title];
   
   if (tmdbMeta.originalTitle && tmdbMeta.originalTitle !== tmdbMeta.title) {
     titlesToTry.push(tmdbMeta.originalTitle);
   }
   
-  for (const altTitle of tmdbMeta.altTitles) {
-    if (!titlesToTry.includes(altTitle)) {
-      titlesToTry.push(altTitle);
-    }
-  }
+  // Add only first alt title if different
+  const firstAlt = tmdbMeta.altTitles.find(t => !titlesToTry.includes(t));
+  if (firstAlt) titlesToTry.push(firstAlt);
   
   console.log(`Titles to try: ${titlesToTry.join(', ')}`);
   
-  // Pass 1 & 2: Try all titles in US first
+  // Search helper with timeout
+  const searchWithCountry = async (title: string, country: string): Promise<{ results: any[]; country: string } | null> => {
+    try {
+      const results = await searchITunes({ term: title, country, type: searchType });
+      return results.length > 0 ? { results, country } : null;
+    } catch {
+      return null;
+    }
+  };
+  
+  // For each title, search ALL countries in parallel
   for (const title of titlesToTry) {
-    console.log(`\nPass 1/2: Searching US for "${title}"`);
-    const results = await searchITunes({ term: title, country: 'us', type: searchType });
+    console.log(`\nSearching all countries in parallel for "${title}"`);
     
-    if (results.length > 0) {
-      console.log(`Found ${results.length} results in US`);
-      const match = findBestMatch(results, tmdbMeta);
-      if (match) {
-        return {
-          found: true,
-          previewUrl: match.item.previewUrl,
-          trackId: match.item.trackId || match.item.collectionId,
-          country: 'us'
-        };
+    // Launch all country searches simultaneously
+    const countrySearches = COUNTRY_VARIANTS.map(country => 
+      searchWithCountry(title, country)
+    );
+    
+    const allResults = await Promise.all(countrySearches);
+    
+    // Find best match across all countries
+    let bestOverall: { score: number; item: any; country: string } | null = null;
+    
+    for (const result of allResults) {
+      if (!result) continue;
+      
+      const match = findBestMatch(result.results, tmdbMeta);
+      if (match && (!bestOverall || match.score > bestOverall.score)) {
+        bestOverall = { ...match, country: result.country };
       }
     }
-  }
-  
-  // Pass 3: Try main title in other country variants
-  for (const country of COUNTRY_VARIANTS) {
-    if (country === 'us') continue; // Already tried
     
-    for (const title of titlesToTry.slice(0, 2)) { // Only main + original title
-      console.log(`\nPass 3: Searching ${country.toUpperCase()} for "${title}"`);
-      const results = await searchITunes({ term: title, country, type: searchType });
-      
-      if (results.length > 0) {
-        console.log(`Found ${results.length} results in ${country.toUpperCase()}`);
-        const match = findBestMatch(results, tmdbMeta);
-        if (match) {
-          return {
-            found: true,
-            previewUrl: match.item.previewUrl,
-            trackId: match.item.trackId || match.item.collectionId,
-            country
-          };
-        }
-      }
+    if (bestOverall) {
+      console.log(`✓ Best match from ${bestOverall.country.toUpperCase()}, score: ${bestOverall.score.toFixed(2)}`);
+      return {
+        found: true,
+        previewUrl: bestOverall.item.previewUrl,
+        trackId: bestOverall.item.trackId || bestOverall.item.collectionId,
+        country: bestOverall.country
+      };
     }
   }
   
