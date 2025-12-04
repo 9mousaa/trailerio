@@ -11,8 +11,15 @@ const TMDB_API_KEY = Deno.env.get('TMDB_API_KEY');
 const CACHE_DAYS = 30;
 const MIN_SCORE_THRESHOLD = 0.6;
 
-// Country storefronts to try - optimized for speed (primary markets only)
-const COUNTRY_VARIANTS = ['us', 'gb', 'de', 'fr', 'au', 'ca'];
+// Country storefronts to try - maximum coverage (all major iTunes markets)
+const COUNTRY_VARIANTS = [
+  'us', 'gb', 'ca', 'au', 'de', 'fr', 'it', 'es', 'nl', 'be', 'at', 'ch',  // Primary Western markets
+  'jp', 'kr', 'cn', 'hk', 'tw', 'sg', 'my', 'th', 'ph', 'id', 'vn', 'in',  // Asia Pacific
+  'mx', 'br', 'ar', 'cl', 'co', 'pe',                                       // Latin America
+  'se', 'no', 'dk', 'fi', 'pl', 'cz', 'hu', 'ro', 'bg', 'gr', 'pt', 'ie',  // Europe
+  'ru', 'tr', 'il', 'ae', 'sa', 'za', 'eg', 'ng', 'ke',                     // EMEA
+  'nz'                                                                       // Oceania
+];
 
 const MANIFEST = {
   id: "com.trailer.preview",
