@@ -8,12 +8,8 @@ const corsHeaders = {
 };
 
 const TMDB_API_KEY = Deno.env.get('TMDB_API_KEY');
-const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
 const CACHE_DAYS = 30;
 const MIN_SCORE_THRESHOLD = 0.6;
-
-// Video proxy URL for iOS-compatible streaming headers
-const VIDEO_PROXY_URL = `${SUPABASE_URL}/functions/v1/video-proxy`;
 
 // Country storefronts to try (Pass 3)
 const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
@@ -902,20 +898,12 @@ serve(async (req) => {
           ? 'Official Trailer' 
           : `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`;
         
-        // For YouTube sources, wrap URL in proxy for iOS-compatible headers
-        // iTunes previews already have proper headers
-        let streamUrl = result.previewUrl;
-        if (isYouTube && result.previewUrl) {
-          streamUrl = `${VIDEO_PROXY_URL}?url=${encodeURIComponent(result.previewUrl)}`;
-          console.log(`Using proxy for YouTube: ${streamUrl.substring(0, 80)}...`);
-        }
-        
         return new Response(
           JSON.stringify({
             streams: [{
               name: streamName,
               title: streamTitle,
-              url: streamUrl
+              url: result.previewUrl
             }]
           }),
           { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
