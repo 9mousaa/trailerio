@@ -378,19 +378,16 @@ function findBestMatch(results: any[], tmdbMeta: TMDBMetadata): ScoreResult | nu
 }
 
 // ============ YOUTUBE EXTRACTORS ============
-// Priority: 1. Cobalt (most reliable), 2. Invidious (backup if API enabled)
+// Priority: 1. Invidious (direct URLs), 2. Piped (proxied URLs), 3. Cobalt (fallback)
 
-// Cobalt instances - official and community instances
-const COBALT_INSTANCES = [
-  'https://api.cobalt.tools',
-  'https://cobalt-api.hyper.lol',
-];
-
-// Invidious instances - backup (most have API disabled now)
+// Invidious instances - only working instances that return direct googlevideo URLs
 const INVIDIOUS_INSTANCES = [
+  'https://inv.perditum.com',
+  'https://invidious.lunar.icu',
   'https://inv.nadeko.net',
   'https://invidious.nerdvpn.de',
   'https://yewtu.be',
+  'https://invidious.perennialte.ch',
 ];
 
 
@@ -399,7 +396,7 @@ const INVIDIOUS_INSTANCES = [
 interface ExtractionResult {
   url: string;
   quality: string;  // e.g., "1080p", "720p", "4K"
-  source: 'cob' | 'inv';  // Shorthand: cob=Cobalt, inv=Invidious
+  source: 'inv';  // Shorthand: inv=Invidious
   hdr: boolean;
 }
 
@@ -560,92 +557,17 @@ async function extractViaInvidious(youtubeKey: string): Promise<ExtractionResult
   return best;
 }
 
-// ============ COBALT EXTRACTOR ============
-// Cobalt is the most reliable YouTube extractor currently
-
-async function extractViaCobalt(youtubeKey: string): Promise<ExtractionResult | null> {
-  console.log(`Trying Cobalt instances for ${youtubeKey}`);
-  
-  const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
-  
-  for (const instance of COBALT_INSTANCES) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
-    
-    try {
-      const response = await fetch(instance, {
-        method: 'POST',
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          url: youtubeUrl,
-          videoQuality: '1080',
-          youtubeVideoCodec: 'h264',
-          filenameStyle: 'basic',
-        }),
-        signal: controller.signal
-      });
-      clearTimeout(timeout);
-      
-      if (!response.ok) {
-        console.log(`  ${instance}: HTTP ${response.status}`);
-        continue;
-      }
-      
-      const data = await response.json();
-      
-      // Cobalt returns a direct URL or a tunnel URL
-      if (data.url) {
-        console.log(`✓ Cobalt success: ${data.url.substring(0, 80)}...`);
-        return {
-          url: data.url,
-          quality: '1080p',
-          source: 'cob',
-          hdr: false
-        };
-      }
-      
-      // Handle picker response (multiple formats)
-      if (data.picker && data.picker.length > 0) {
-        const videoItem = data.picker.find((p: any) => p.type === 'video') || data.picker[0];
-        if (videoItem?.url) {
-          console.log(`✓ Cobalt picker success: ${videoItem.url.substring(0, 80)}...`);
-          return {
-            url: videoItem.url,
-            quality: '1080p',
-            source: 'cob',
-            hdr: false
-          };
-        }
-      }
-      
-      console.log(`  ${instance}: No URL in response`);
-    } catch (err: any) {
-      clearTimeout(timeout);
-      console.log(`  ${instance}: ${err.message}`);
-    }
-  }
-  
-  return null;
-}
-
 // ============ MAIN YOUTUBE EXTRACTOR ============
-// Uses Cobalt first (most reliable), then Invidious as backup
+// Uses Invidious only (direct googlevideo URLs that actually work)
 
 async function extractYouTubeDirectUrl(youtubeKey: string): Promise<ExtractionResult | null> {
   console.log(`\nExtracting YouTube URL for key: ${youtubeKey}`);
   
-  // Try Cobalt first (most reliable currently)
-  const cobaltResult = await extractViaCobalt(youtubeKey);
-  if (cobaltResult) return cobaltResult;
-  
-  // Try Invidious as backup (most have API disabled)
+  // Try Invidious (direct googlevideo URLs)
   const invidiousResult = await extractViaInvidious(youtubeKey);
   if (invidiousResult) return invidiousResult;
   
-  console.log('No YouTube URL found from any extractor');
+  console.log('No YouTube URL found from Invidious');
   return null;
 }
 
@@ -679,82 +601,37 @@ async function multiPassSearch(tmdbMeta: TMDBMetadata): Promise<SearchResult> {
   
   console.log(`Titles to try: ${titlesToTry.join(', ')}`);
   
-  // Split countries into tiers for faster early exit
-  const TIER1_COUNTRIES = ['us', 'gb', 'ca', 'au', 'de', 'fr']; // Primary markets - most likely to have content
-  const TIER2_COUNTRIES = COUNTRY_VARIANTS.filter(c => !TIER1_COUNTRIES.includes(c));
-  
-  // Search a single country and return match with score
-  const searchAndScore = async (title: string, country: string): Promise<{ score: number; item: any; country: string } | null> => {
+  // Search helper with timeout
+  const searchWithCountry = async (title: string, country: string): Promise<{ results: any[]; country: string } | null> => {
     try {
       const results = await searchITunes({ term: title, country, type: searchType });
-      if (results.length === 0) return null;
-      
-      const match = findBestMatch(results, tmdbMeta);
-      return match ? { ...match, country } : null;
+      return results.length > 0 ? { results, country } : null;
     } catch {
       return null;
     }
   };
   
-  // Race pattern: return first result that meets threshold, while continuing to find better
-  const raceToFirstGoodMatch = async (title: string, countries: string[]): Promise<{ score: number; item: any; country: string } | null> => {
-    return new Promise((resolve) => {
-      let bestMatch: { score: number; item: any; country: string } | null = null;
-      let completed = 0;
-      const total = countries.length;
-      const HIGH_SCORE_THRESHOLD = 0.85; // Return immediately if we find an excellent match
-      
-      // Launch all searches in parallel
-      countries.forEach(country => {
-        searchAndScore(title, country).then(result => {
-          completed++;
-          
-          if (result) {
-            // If we find an excellent match, resolve immediately
-            if (result.score >= HIGH_SCORE_THRESHOLD) {
-              console.log(`⚡ Early exit: excellent match from ${country.toUpperCase()} (score: ${result.score.toFixed(2)})`);
-              resolve(result);
-              return;
-            }
-            
-            // Track best match so far
-            if (!bestMatch || result.score > bestMatch.score) {
-              bestMatch = result;
-            }
-          }
-          
-          // All searches completed
-          if (completed === total) {
-            resolve(bestMatch);
-          }
-        });
-      });
-    });
-  };
-  
+  // For each title, search ALL countries in parallel
   for (const title of titlesToTry) {
-    // Tier 1: Search primary markets first (fastest)
-    console.log(`\nSearching Tier 1 (${TIER1_COUNTRIES.length} countries) for "${title}"`);
-    const tier1Result = await raceToFirstGoodMatch(title, TIER1_COUNTRIES);
+    console.log(`\nSearching all countries in parallel for "${title}"`);
     
-    if (tier1Result && tier1Result.score >= 0.85) {
-      console.log(`✓ Best match from ${tier1Result.country.toUpperCase()}, score: ${tier1Result.score.toFixed(2)}`);
-      return {
-        found: true,
-        previewUrl: tier1Result.item.previewUrl,
-        trackId: tier1Result.item.trackId || tier1Result.item.collectionId,
-        country: tier1Result.country
-      };
-    }
+    // Launch all country searches simultaneously
+    const countrySearches = COUNTRY_VARIANTS.map(country => 
+      searchWithCountry(title, country)
+    );
     
-    // Tier 2: Search remaining countries in parallel
-    console.log(`Searching Tier 2 (${TIER2_COUNTRIES.length} countries) for "${title}"`);
-    const tier2Result = await raceToFirstGoodMatch(title, TIER2_COUNTRIES);
+    const allResults = await Promise.all(countrySearches);
     
-    // Compare tier1 and tier2 results, return best
-    let bestOverall = tier1Result;
-    if (tier2Result && (!bestOverall || tier2Result.score > bestOverall.score)) {
-      bestOverall = tier2Result;
+    // Find best match across all countries
+    let bestOverall: { score: number; item: any; country: string } | null = null;
+    
+    for (const result of allResults) {
+      if (!result) continue;
+      
+      const match = findBestMatch(result.results, tmdbMeta);
+      if (match && (!bestOverall || match.score > bestOverall.score)) {
+        bestOverall = { ...match, country: result.country };
+      }
     }
     
     if (bestOverall) {

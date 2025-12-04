@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import { Play, Copy, Check, Film, Tv } from "lucide-react";
 
-const ADDON_URL = "https://trailerio.lovable.app/functions/v1/stremio-addon";
+const ADDON_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/stremio-addon`;
 const MANIFEST_URL = `${ADDON_URL}/manifest.json`;
 
 // Title lookup map
@@ -249,45 +249,22 @@ const Index = () => {
             </Button>
 
             {testResult && (
-              <div className="rounded-lg bg-muted overflow-hidden">
+              <div className="p-4 rounded-lg bg-muted">
                 {testResult.streams?.[0]?.url ? (
-                  <div className="space-y-4">
-                    {/* Video Player */}
-                    <video 
-                      src={testResult.streams[0].url} 
-                      controls 
-                      autoPlay
-                      className="w-full aspect-video bg-black"
-                    />
-                    
-                    {/* Stream Info */}
-                    <div className="px-4 pb-4 space-y-3">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm text-muted-foreground">
-                          {testResult.streams[0].name || "Trailer"}
-                        </span>
-                        <a
-                          href={testResult.streams[0].url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-2 text-sm text-foreground hover:underline"
-                        >
-                          <Play className="w-3 h-3" />
-                          Open
-                        </a>
-                      </div>
-                      
-                      {/* URL Display */}
-                      <div className="p-3 bg-background rounded-lg">
-                        <div className="text-xs text-muted-foreground mb-1">Stream URL</div>
-                        <div className="font-mono text-xs break-all text-foreground/80">
-                          {testResult.streams[0].url}
-                        </div>
-                      </div>
-                    </div>
+                  <div className="space-y-3">
+                    <div className="text-sm text-muted-foreground">Preview found</div>
+                    <a
+                      href={testResult.streams[0].url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-2 text-foreground hover:underline"
+                    >
+                      <Play className="w-4 h-4" />
+                      Play Preview
+                    </a>
                   </div>
                 ) : (
-                  <div className="p-4 text-sm text-muted-foreground">No preview available</div>
+                  <div className="text-sm text-muted-foreground">No preview available</div>
                 )}
               </div>
             )}
