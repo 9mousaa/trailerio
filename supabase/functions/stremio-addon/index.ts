@@ -383,14 +383,27 @@ function findBestMatch(results: any[], tmdbMeta: TMDBMetadata): ScoreResult | nu
 }
 
 // ============ YOUTUBE EXTRACTORS (COBALT v10/v11 INSTANCES) ============
+// Sources: https://cobalt.directory/ and https://instances.cobalt.best/
+// Sorted by score, all without turnstile requirement
 
 const COBALT_INSTANCES = [
-  // Community instances without turnstile (from cobalt.directory)
-  'https://cobalt-backend.canine.tools',    // 96%
-  'https://nuko-c.meowing.de',              // 96%
-  'https://cobalt-api.clxxped.lol',         // 92%
-  'https://subito-c.meowing.de',            // 88%
-  'https://cobalt-api.kwiatekmiki.com',     // 80%
+  // 96% score - Top tier
+  'https://cobalt-backend.canine.tools',
+  'https://nuko-c.meowing.de',
+  'https://cobalt-api.meowing.de',
+  // 92% score
+  'https://cobalt-api.clxxped.lol',
+  // 88% score
+  'https://subito-c.meowing.de',
+  'https://cobalt-api.kwiatekmiki.com',
+  // 76% score - Official instances
+  'https://kityune.imput.net',
+  'https://capi.3kh0.net',
+  'https://nachos.imput.net',
+  // 72% score
+  'https://sunny.imput.net',
+  // 64% score
+  'https://blossom.imput.net',
 ];
 
 async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | null> {
