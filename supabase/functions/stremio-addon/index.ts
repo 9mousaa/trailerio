@@ -372,13 +372,15 @@ function findBestMatch(results: any[], tmdbMeta: TMDBMetadata): ScoreResult | nu
 // ============ YOUTUBE EXTRACTORS ============
 // Priority: 1. Invidious (direct URLs), 2. Piped (proxied URLs), 3. Cobalt (fallback)
 
-// Invidious instances - try even if api:false (may still work)
+// Invidious instances - official list from api.invidious.io + community instances
 const INVIDIOUS_INSTANCES = [
+  // Official instances with high uptime
   'https://inv.nadeko.net',
-  'https://invidious.nerdvpn.de',
+  'https://invidious.nerdvpn.de', 
   'https://invidious.f5.si',
   'https://inv.perditum.com',
   'https://yewtu.be',
+  // Community instances
   'https://invidious.privacyredirect.com',
   'https://iv.nboeck.de',
   'https://invidious.protokolla.fi',
@@ -390,25 +392,72 @@ const INVIDIOUS_INSTANCES = [
   'https://yt.artemislena.eu',
   'https://invidious.snopyta.org',
   'https://invidious.kavin.rocks',
+  'https://inv.tux.pizza',
+  'https://invidious.projectsegfau.lt',
+  'https://invidious.privacydev.net',
+  'https://invidious.slipfox.xyz',
+  'https://iv.ggtyler.dev',
+  'https://invidious.einfachzocken.eu',
+  'https://invidious.jing.rocks',
+  'https://inv.bp.projectsegfau.lt',
 ];
 
-// Piped instances - return proxied stream URLs via /streams/:videoId
+// Piped instances - comprehensive list from awsmfoss.com
 const PIPED_INSTANCES = [
+  // High priority - CDN enabled
   'https://pipedapi.kavin.rocks',
-  'https://pipedapi.r4fo.com',
+  'https://pipedapi.tokhmi.xyz',
+  'https://pipedapi.moomoo.me',
   'https://pipedapi.syncpundit.io',
+  'https://api-piped.mha.fi',
   'https://piped-api.garudalinux.org',
+  'https://pipedapi.rivo.lol',
   'https://pipedapi.leptons.xyz',
-  'https://pipedapi.adminforge.de',
+  'https://piped-api.lunar.icu',
+  'https://ytapi.dc09.ru',
+  'https://pipedapi.colinslegacy.com',
+  'https://yapi.vyper.me',
+  'https://api.looleh.xyz',
+  'https://piped-api.cfe.re',
+  'https://pipedapi.r4fo.com',
+  'https://pipedapi.nosebs.ru',
+  // Additional instances
+  'https://pipedapi-libre.kavin.rocks',
+  'https://pa.mint.lgbt',
+  'https://pa.il.ax',
+  'https://piped-api.privacy.com.de',
   'https://api.piped.projectsegfau.lt',
+  'https://pipedapi.in.projectsegfau.lt',
+  'https://pipedapi.us.projectsegfau.lt',
+  'https://watchapi.whatever.social',
+  'https://api.piped.privacydev.net',
+  'https://pipedapi.palveluntarjoaja.eu',
+  'https://pipedapi.smnz.de',
+  'https://pipedapi.adminforge.de',
+  'https://pipedapi.qdi.fi',
+  'https://piped-api.hostux.net',
+  'https://pdapi.vern.cc',
+  'https://pipedapi.pfcd.me',
+  'https://pipedapi.frontendfriendly.xyz',
+  'https://api.piped.yt',
+  'https://pipedapi.astartes.nl',
+  'https://pipedapi.osphost.fi',
+  'https://pipedapi.simpleprivacy.fr',
+  'https://pipedapi.drgns.space',
+  'https://piapi.ggtyler.dev',
+  'https://api.watch.pluto.lat',
 ];
 
-// Cobalt instances (fallback) - may return tunnel URLs
+// Cobalt instances - from instances.cobalt.best (high score instances)
 const COBALT_INSTANCES = [
-  'https://cobalt-backend.canine.tools',
-  'https://cobalt-api.kwiatekmiki.com',
-  'https://cobalt-api.meowing.de',
-  'https://nuko-c.meowing.de',
+  'https://cobalt-api.meowing.de',      // 96% score
+  'https://cobalt-backend.canine.tools', // 92% score
+  'https://cobalt-api.kwiatekmiki.com', // 88% score
+  'https://kityune.imput.net',          // 76% score (official)
+  'https://capi.3kh0.net',              // 76% score
+  'https://nachos.imput.net',           // 72% score (official)
+  'https://sunny.imput.net',            // 72% score (official)
+  'https://blossom.imput.net',          // 64% score (official)
 ];
 
 // ============ EXTRACTION RESULT ============
@@ -555,6 +604,13 @@ async function extractViaInvidious(youtubeKey: string): Promise<ExtractionResult
 async function extractViaPiped(youtubeKey: string): Promise<ExtractionResult | null> {
   console.log(`Trying Piped instances for ${youtubeKey}`);
   
+  const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
+  const getQualityRank = (q: string | undefined): number => {
+    if (!q) return 999;
+    const idx = qualityPriority.findIndex(p => q.includes(p));
+    return idx === -1 ? 998 : idx;
+  };
+  
   const tryInstance = async (instance: string): Promise<ExtractionResult | null> => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 6000);
@@ -569,42 +625,29 @@ async function extractViaPiped(youtubeKey: string): Promise<ExtractionResult | n
       if (!response.ok) return null;
       const data = await response.json();
       
-      // Quality priority: highest first
-      const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
-      const getQualityRank = (q: string | undefined): number => {
-        if (!q) return 999;
-        const idx = qualityPriority.findIndex(p => q.includes(p));
-        return idx === -1 ? 998 : idx;
-      };
+      if (!data.videoStreams?.length) return null;
       
-      if (data.videoStreams?.length > 0) {
-        // Sort by quality (highest first)
-        const sorted = [...data.videoStreams].sort((a: any, b: any) => 
-          getQualityRank(a.quality) - getQualityRank(b.quality)
-        );
-        
-        // Find best combined video+audio stream
-        const combined = sorted.find((s: any) => 
-          !s.videoOnly && s.mimeType?.startsWith('video/')
-        );
-        
-        if (combined?.url) {
-          const quality = combined.quality || '720p';
-          console.log(`  ✓ Piped ${instance}: got ${quality}`);
-          return { url: combined.url, quality, source: 'pip', hdr: false };
-        }
-        
-        // Fall back to video-only (highest quality available)
-        const videoOnly = sorted.find((s: any) => s.mimeType?.startsWith('video/'));
-        
-        if (videoOnly?.url) {
-          const quality = videoOnly.quality || '720p';
-          console.log(`  ✓ Piped ${instance}: got video-only ${quality}`);
-          return { url: videoOnly.url, quality, source: 'pip', hdr: false };
+      // Collect ALL video streams and pick the highest quality
+      const allStreams: Array<{url: string, quality: string, rank: number}> = [];
+      
+      for (const stream of data.videoStreams) {
+        if (stream.url && stream.mimeType?.startsWith('video/')) {
+          allStreams.push({
+            url: stream.url,
+            quality: stream.quality || '720p',
+            rank: getQualityRank(stream.quality)
+          });
         }
       }
       
-      return null;
+      if (allStreams.length === 0) return null;
+      
+      // Sort by quality (lowest rank = highest quality)
+      allStreams.sort((a, b) => a.rank - b.rank);
+      
+      const best = allStreams[0];
+      console.log(`  ✓ Piped ${instance}: got ${best.quality} (best of ${allStreams.length} streams)`);
+      return { url: best.url, quality: best.quality, source: 'pip', hdr: false };
     } catch {
       clearTimeout(timeout);
       return null;
@@ -620,13 +663,7 @@ async function extractViaPiped(youtubeKey: string): Promise<ExtractionResult | n
     return null;
   }
   
-  // Sort by quality to get the best one
-  const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
-  const getQualityRank = (q: string): number => {
-    const idx = qualityPriority.findIndex(p => q.includes(p));
-    return idx === -1 ? 998 : idx;
-  };
-  
+  // Sort by quality to get the best one (reuse getQualityRank from above)
   validResults.sort((a, b) => getQualityRank(a.quality) - getQualityRank(b.quality));
   
   const best = validResults[0];
