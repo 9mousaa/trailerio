@@ -411,13 +411,22 @@ const COBALT_INSTANCES = [
   'https://nuko-c.meowing.de',
 ];
 
+// ============ EXTRACTION RESULT ============
+
+interface ExtractionResult {
+  url: string;
+  quality: string;  // e.g., "1080p", "720p", "4K"
+  source: 'inv' | 'pip' | 'cob';  // Shorthand: inv=Invidious, pip=Piped, cob=Cobalt
+  hdr: boolean;
+}
+
 // ============ INVIDIOUS EXTRACTOR ============
 // Returns formatStreams with direct googlevideo.com URLs (if API enabled)
 
-async function extractViaInvidious(youtubeKey: string): Promise<string | null> {
+async function extractViaInvidious(youtubeKey: string): Promise<ExtractionResult | null> {
   console.log(`Trying Invidious instances for ${youtubeKey}`);
   
-  const tryInstance = async (instance: string): Promise<string | null> => {
+  const tryInstance = async (instance: string): Promise<ExtractionResult | null> => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 6000);
     
@@ -467,9 +476,10 @@ async function extractViaInvidious(youtubeKey: string): Promise<string | null> {
         const stream = sorted.find((s: any) => s.container === 'mp4') || sorted[0];
         
         if (stream?.url) {
-          const hdrLabel = isHDR(stream) ? ' HDR' : '';
-          console.log(`  ✓ Invidious ${instance}: got ${stream.qualityLabel || 'unknown'}${hdrLabel} ${stream.container || 'video'}`);
-          return stream.url;
+          const hdr = isHDR(stream);
+          const quality = stream.qualityLabel || '720p';
+          console.log(`  ✓ Invidious ${instance}: got ${quality}${hdr ? ' HDR' : ''} ${stream.container || 'video'}`);
+          return { url: stream.url, quality, source: 'inv', hdr };
         }
       }
       
@@ -490,9 +500,10 @@ async function extractViaInvidious(youtubeKey: string): Promise<string | null> {
         const adaptive = sorted.find((s: any) => s.container === 'mp4' || s.mimeType?.includes('mp4')) || sorted[0];
         
         if (adaptive?.url) {
-          const hdrLabel = isHDR(adaptive) ? ' HDR' : '';
-          console.log(`  ✓ Invidious ${instance}: got adaptive ${adaptive.qualityLabel || 'unknown'}${hdrLabel}`);
-          return adaptive.url;
+          const hdr = isHDR(adaptive);
+          const quality = adaptive.qualityLabel || '720p';
+          console.log(`  ✓ Invidious ${instance}: got adaptive ${quality}${hdr ? ' HDR' : ''}`);
+          return { url: adaptive.url, quality, source: 'inv', hdr };
         }
       }
       
@@ -521,10 +532,10 @@ async function extractViaInvidious(youtubeKey: string): Promise<string | null> {
 // ============ PIPED EXTRACTOR ============
 // Returns proxied video URLs via Piped's proxy servers (most stable)
 
-async function extractViaPiped(youtubeKey: string): Promise<string | null> {
+async function extractViaPiped(youtubeKey: string): Promise<ExtractionResult | null> {
   console.log(`Trying Piped instances for ${youtubeKey}`);
   
-  const tryInstance = async (instance: string): Promise<string | null> => {
+  const tryInstance = async (instance: string): Promise<ExtractionResult | null> => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 6000);
     
@@ -558,16 +569,18 @@ async function extractViaPiped(youtubeKey: string): Promise<string | null> {
         );
         
         if (combined?.url) {
-          console.log(`  ✓ Piped ${instance}: got ${combined.quality || 'unknown'}`);
-          return combined.url;
+          const quality = combined.quality || '720p';
+          console.log(`  ✓ Piped ${instance}: got ${quality}`);
+          return { url: combined.url, quality, source: 'pip', hdr: false };
         }
         
         // Fall back to video-only (highest quality available)
         const videoOnly = sorted.find((s: any) => s.mimeType?.startsWith('video/'));
         
         if (videoOnly?.url) {
-          console.log(`  ✓ Piped ${instance}: got video-only ${videoOnly.quality || 'unknown'}`);
-          return videoOnly.url;
+          const quality = videoOnly.quality || '720p';
+          console.log(`  ✓ Piped ${instance}: got video-only ${quality}`);
+          return { url: videoOnly.url, quality, source: 'pip', hdr: false };
         }
       }
       
@@ -599,7 +612,7 @@ interface CobaltResult {
   status: 'redirect' | 'tunnel' | 'picker';
 }
 
-async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
+async function extractViaCobalt(youtubeKey: string): Promise<ExtractionResult | null> {
   console.log(`Trying Cobalt instances (fallback) for ${youtubeKey}`);
   const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
   
@@ -652,7 +665,7 @@ async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
     const valid = results.find(r => r !== null);
     if (valid) {
       console.log(`  ✓ Cobalt ${valid.instance}: got ${valid.status} URL`);
-      return valid.url;
+      return { url: valid.url, quality: 'HD', source: 'cob', hdr: false };
     }
   }
   
@@ -663,20 +676,20 @@ async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
 // ============ MAIN YOUTUBE EXTRACTOR ============
 // Tries: 1. Invidious (direct URLs), 2. Piped (proxied URLs), 3. Cobalt (fallback)
 
-async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | null> {
+async function extractYouTubeDirectUrl(youtubeKey: string): Promise<ExtractionResult | null> {
   console.log(`\nExtracting YouTube URL for key: ${youtubeKey}`);
   
   // 1. Try Invidious first (direct googlevideo URLs)
-  const invidiousUrl = await extractViaInvidious(youtubeKey);
-  if (invidiousUrl) return invidiousUrl;
+  const invidiousResult = await extractViaInvidious(youtubeKey);
+  if (invidiousResult) return invidiousResult;
   
   // 2. Try Piped (proxied URLs)
-  const pipedUrl = await extractViaPiped(youtubeKey);
-  if (pipedUrl) return pipedUrl;
+  const pipedResult = await extractViaPiped(youtubeKey);
+  if (pipedResult) return pipedResult;
   
   // 3. Fall back to Cobalt (may return tunnel URLs that expire)
-  const cobaltUrl = await extractViaCobalt(youtubeKey);
-  if (cobaltUrl) return cobaltUrl;
+  const cobaltResult = await extractViaCobalt(youtubeKey);
+  if (cobaltResult) return cobaltResult;
   
   console.log('No YouTube URL found from any extractor');
   return null;
@@ -691,6 +704,9 @@ interface SearchResult {
   trackId?: number;
   country?: string;
   youtubeKey?: string;
+  quality?: string;       // e.g., "1080p", "720p", "4K"
+  extractorSource?: string; // e.g., "inv", "pip", "cob"
+  hdr?: boolean;
 }
 
 async function multiPassSearch(tmdbMeta: TMDBMetadata): Promise<SearchResult> {
@@ -782,14 +798,17 @@ async function resolvePreview(imdbId: string, type: string, supabase: any): Prom
       // Resolve fresh each time using the cached key
       if (cached.youtube_key && !cached.preview_url) {
         console.log(`Cache hit: YouTube key ${cached.youtube_key}, resolving fresh URL...`);
-        const freshUrl = await extractYouTubeDirectUrl(cached.youtube_key);
-        if (freshUrl) {
+        const freshResult = await extractYouTubeDirectUrl(cached.youtube_key);
+        if (freshResult) {
           return {
             found: true,
             source: 'youtube',
-            previewUrl: freshUrl,
+            previewUrl: freshResult.url,
             youtubeKey: cached.youtube_key,
-            country: 'yt'
+            country: 'yt',
+            quality: freshResult.quality,
+            extractorSource: freshResult.source,
+            hdr: freshResult.hdr
           };
         }
         // If extraction failed, continue to try full resolution
@@ -844,9 +863,9 @@ async function resolvePreview(imdbId: string, type: string, supabase: any): Prom
   // Try 2: YouTube fallback via extractors (direct URLs)
   if (tmdbMeta.youtubeTrailerKey) {
     console.log(`\nTrying YouTube extractors for key: ${tmdbMeta.youtubeTrailerKey}`);
-    const youtubeDirectUrl = await extractYouTubeDirectUrl(tmdbMeta.youtubeTrailerKey);
+    const youtubeResult = await extractYouTubeDirectUrl(tmdbMeta.youtubeTrailerKey);
     
-    if (youtubeDirectUrl) {
+    if (youtubeResult) {
       // Cache only the youtube_key, NOT the URL (tunnel URLs expire quickly)
       // Next time we'll resolve fresh using the cached key
       await supabase
@@ -864,9 +883,12 @@ async function resolvePreview(imdbId: string, type: string, supabase: any): Prom
       return {
         found: true,
         source: 'youtube',
-        previewUrl: youtubeDirectUrl,
+        previewUrl: youtubeResult.url,
         youtubeKey: tmdbMeta.youtubeTrailerKey,
-        country: 'yt'
+        country: 'yt',
+        quality: youtubeResult.quality,
+        extractorSource: youtubeResult.source,
+        hdr: youtubeResult.hdr
       };
     }
   }
@@ -937,11 +959,22 @@ serve(async (req) => {
       
       if (result.found && result.previewUrl) {
         const isYouTube = result.source === 'youtube';
+        
+        // Build quality string for YouTube sources
+        let qualityStr = '';
+        if (isYouTube && result.quality) {
+          qualityStr = ` ${result.quality}`;
+          if (result.hdr) qualityStr += ' HDR';
+        }
+        
+        // Subtle source indicator for YouTube
+        const srcTag = isYouTube && result.extractorSource ? ` ⋅${result.extractorSource}` : '';
+        
         const streamName = isYouTube 
-          ? 'Official Trailer' 
+          ? `Trailer${qualityStr}` 
           : (type === 'movie' ? 'Movie Preview' : 'Episode Preview');
         const streamTitle = isYouTube 
-          ? 'Official Trailer' 
+          ? `Official Trailer${qualityStr}${srcTag}` 
           : `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`;
         
         return new Response(
