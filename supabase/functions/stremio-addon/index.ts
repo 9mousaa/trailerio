@@ -388,7 +388,7 @@ async function getYouTubeDirectUrl(youtubeKey: string): Promise<string | null> {
   console.log(`Fetching direct URL from cobalt.tools for YouTube key: ${youtubeKey}`);
   
   try {
-    const response = await fetch('https://api.cobalt.tools/', {
+    const response = await fetch('https://api.cobalt.tools/api/json', {
       method: 'POST',
       headers: {
         'Accept': 'application/json',
@@ -396,13 +396,15 @@ async function getYouTubeDirectUrl(youtubeKey: string): Promise<string | null> {
       },
       body: JSON.stringify({
         url: `https://www.youtube.com/watch?v=${youtubeKey}`,
-        videoQuality: '720',
-        filenameStyle: 'basic',
+        aFormat: 'best',
+        filenamePattern: 'basic',
+        isAudioOnly: false,
       })
     });
     
     if (!response.ok) {
-      console.error(`cobalt.tools error: ${response.status}`);
+      const errorText = await response.text();
+      console.error(`cobalt.tools error: ${response.status} - ${errorText}`);
       return null;
     }
     
