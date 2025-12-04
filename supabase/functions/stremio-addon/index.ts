@@ -428,14 +428,40 @@ async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | nul
   console.log(`Extracting direct URL for YouTube key: ${youtubeKey}`);
   const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
   
-  // Different request configurations to try for best streamable format
+  // iOS Safari Requirements:
+  // - MP4 container with H.264 video + AAC audio
+  // - Accept-Ranges: bytes header support
+  // - No Content-Disposition: attachment
+  // - Direct streamable URLs (googlevideo.com CDN)
+  
   const requestConfigs = [
-    // Config 1: Prefer redirect with H264 (most compatible)
-    { videoQuality: '720', youtubeVideoCodec: 'h264', downloadMode: 'auto' },
-    // Config 2: Try without HLS for direct MP4
-    { videoQuality: '720', youtubeVideoCodec: 'h264', downloadMode: 'auto', youtubeHLS: false },
-    // Config 3: Lower quality fallback
-    { videoQuality: '480', youtubeVideoCodec: 'h264', downloadMode: 'auto' },
+    // Config 1: H264 720p - most iOS compatible
+    { 
+      videoQuality: '720', 
+      youtubeVideoCodec: 'h264',  // Forces MP4/H264 (no VP9/AV1/WebM)
+      audioFormat: 'mp3',         // AAC-compatible audio
+      downloadMode: 'auto',
+      filenameStyle: 'basic',
+      disableMetadata: true,
+    },
+    // Config 2: H264 480p fallback
+    { 
+      videoQuality: '480', 
+      youtubeVideoCodec: 'h264',
+      audioFormat: 'mp3',
+      downloadMode: 'auto',
+      filenameStyle: 'basic',
+      disableMetadata: true,
+    },
+    // Config 3: H264 360p last resort
+    { 
+      videoQuality: '360', 
+      youtubeVideoCodec: 'h264',
+      audioFormat: 'mp3',
+      downloadMode: 'auto',
+      filenameStyle: 'basic',
+      disableMetadata: true,
+    },
   ];
   
   // Helper to try a single instance with a specific config
@@ -444,7 +470,7 @@ async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | nul
     config: Record<string, any>
   ): Promise<CobaltResult | null> => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 6000); // 6s timeout
+    const timeout = setTimeout(() => controller.abort(), 8000); // 8s timeout
     
     try {
       const response = await fetch(instance, {
@@ -455,7 +481,6 @@ async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | nul
         },
         body: JSON.stringify({
           url: youtubeUrl,
-          filenameStyle: 'basic',
           ...config,
         }),
         signal: controller.signal
@@ -467,31 +492,41 @@ async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | nul
       
       const data = await response.json();
       
+      // Only accept redirect status - these are direct CDN URLs that work with iOS
       if (data.status === 'redirect' && data.url) {
+        const isDirect = isDirectVideoUrl(data.url);
+        console.log(`  ${instance}: redirect URL, isDirect=${isDirect}`);
         return { 
           url: data.url, 
           instance, 
           status: 'redirect',
-          isDirect: isDirectVideoUrl(data.url)
+          isDirect
         };
-      } else if (data.status === 'tunnel' && data.url) {
-        return { 
-          url: data.url, 
-          instance, 
-          status: 'tunnel',
-          isDirect: isDirectVideoUrl(data.url)
-        };
-      } else if (data.status === 'picker' && data.picker?.length > 0) {
-        const videoOption = data.picker.find((p: any) => p.type === 'video') || data.picker[0];
-        if (videoOption?.url) {
+      }
+      
+      // Handle picker responses - extract video URL
+      if (data.status === 'picker' && data.picker?.length > 0) {
+        const videoOption = data.picker.find((p: any) => p.type === 'video');
+        if (videoOption?.url && isDirectVideoUrl(videoOption.url)) {
+          console.log(`  ${instance}: picker video URL (direct)`);
           return { 
             url: videoOption.url, 
             instance, 
-            status: 'picker',
-            isDirect: isDirectVideoUrl(videoOption.url)
+            status: 'redirect', // Treat as redirect if it's a direct URL
+            isDirect: true
           };
         }
       }
+      
+      // SKIP tunnel URLs entirely - they don't work with iOS Safari because:
+      // - Missing Accept-Ranges: bytes header
+      // - Content-Disposition: attachment triggers download
+      // - CORS issues with mobile browsers
+      // - Proxied through Cobalt which adds incompatible headers
+      if (data.status === 'tunnel') {
+        console.log(`  ${instance}: tunnel URL (skipped - iOS incompatible)`);
+      }
+      
       return null;
     } catch {
       clearTimeout(timeout);
@@ -500,9 +535,8 @@ async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | nul
   };
   
   // Try each config across all instances in parallel
-  // IMPORTANT: Only accept redirect URLs - tunnel URLs don't work with iOS Safari/AVPlayer
   for (const config of requestConfigs) {
-    console.log(`Trying config: ${JSON.stringify(config)}`);
+    console.log(`Trying config: quality=${config.videoQuality}, codec=${config.youtubeVideoCodec}`);
     
     const results = await Promise.all(
       COBALT_INSTANCES.map(instance => tryInstance(instance, config))
@@ -510,28 +544,36 @@ async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | nul
     
     const validResults = results.filter((r): r is CobaltResult => r !== null);
     
-    if (validResults.length === 0) continue;
-    
-    // Priority 1: Direct redirect URLs (googlevideo.com - works with iOS AVPlayer)
-    const directRedirect = validResults.find(r => r.status === 'redirect' && r.isDirect);
-    if (directRedirect) {
-      console.log(`✓ Got direct redirect URL from ${directRedirect.instance}`);
-      return directRedirect.url;
+    if (validResults.length === 0) {
+      console.log(`  No valid results for this config`);
+      continue;
     }
     
-    // Priority 2: Any redirect URL (may still be direct)
+    // Priority 1: Direct googlevideo.com URLs (best for iOS AVPlayer)
+    const directCDN = validResults.find(r => r.isDirect && r.url.includes('googlevideo.com'));
+    if (directCDN) {
+      console.log(`✓ Got direct googlevideo URL from ${directCDN.instance}`);
+      return directCDN.url;
+    }
+    
+    // Priority 2: Any direct video URL
+    const anyDirect = validResults.find(r => r.isDirect);
+    if (anyDirect) {
+      console.log(`✓ Got direct video URL from ${anyDirect.instance}`);
+      return anyDirect.url;
+    }
+    
+    // Priority 3: Any redirect (may still work if it resolves to direct)
     const anyRedirect = validResults.find(r => r.status === 'redirect');
     if (anyRedirect) {
-      console.log(`✓ Got redirect URL from ${anyRedirect.instance}`);
+      console.log(`✓ Got redirect URL from ${anyRedirect.instance} (may work)`);
       return anyRedirect.url;
     }
     
-    // Skip tunnel URLs entirely - they don't work with iOS Safari/AVPlayer
-    // Tunnel URLs are proxied through Cobalt servers and lack proper headers/CORS for mobile playback
-    console.log(`Config returned ${validResults.length} results but no redirects (only tunnels)`);
+    console.log(`  Config returned ${validResults.length} results but none suitable for iOS`);
   }
   
-  console.log('No direct redirect URLs found from any Cobalt instance');
+  console.log('No iOS-compatible direct URLs found from any Cobalt instance');
   return null;
 }
 
