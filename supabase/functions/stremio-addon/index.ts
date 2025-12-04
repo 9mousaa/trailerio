@@ -11,13 +11,8 @@ const TMDB_API_KEY = Deno.env.get('TMDB_API_KEY');
 const CACHE_DAYS = 30;
 const MIN_SCORE_THRESHOLD = 0.6;
 
-// Country storefronts to try - comprehensive list for maximum coverage
-const COUNTRY_VARIANTS = [
-  'us', 'gb', 'ca', 'au',  // Primary English markets
-  'de', 'fr', 'it', 'es',  // Major European markets
-  'nl', 'jp', 'br', 'mx',  // Additional markets with good coverage
-  'nz', 'ie', 'at', 'ch'   // Secondary English/European markets
-];
+// Country storefronts to try - optimized for speed (primary markets only)
+const COUNTRY_VARIANTS = ['us', 'gb', 'de', 'fr', 'au', 'ca'];
 
 const MANIFEST = {
   id: "com.trailer.preview",
@@ -214,98 +209,31 @@ interface ITunesSearchParams {
 async function searchITunes(params: ITunesSearchParams): Promise<any[]> {
   const { term, country, type } = params;
   
-  const trySearch = async (extraParams: Record<string, string>, filterKind: string | null): Promise<any[]> => {
-    const queryParams = new URLSearchParams({
-      term,
-      country,
-      limit: '100', // Increased for better coverage
-      ...extraParams
-    });
-    
-    const url = `https://itunes.apple.com/search?${queryParams}`;
-    
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 8000); // 8s timeout for larger results
-      
-      const response = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeout);
-      
-      const data = await response.json();
-      let results = data.results || [];
-      
-      if (filterKind) {
-        results = results.filter((r: any) => r.kind === filterKind);
-      }
-      
-      // Filter to only include results with previewUrl early
-      results = results.filter((r: any) => r.previewUrl);
-      
-      return results;
-    } catch {
-      return [];
-    }
-  };
+  const queryParams = new URLSearchParams({
+    term,
+    country,
+    limit: '50', // Reduced for speed
+    media: type === 'movie' ? 'movie' : 'tvShow',
+    entity: type === 'movie' ? 'movie' : 'tvSeason',
+  });
   
-  const allResults: any[] = [];
+  const url = `https://itunes.apple.com/search?${queryParams}`;
   
-  if (type === 'movie') {
-    // Pass 1: Specific movie search with movieTerm attribute
-    let results = await trySearch({ media: 'movie', entity: 'movie', attribute: 'movieTerm' }, null);
-    if (results.length > 0) allResults.push(...results);
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout
     
-    // Pass 2: Movie search without attribute (broader)
-    if (allResults.length < 10) {
-      results = await trySearch({ media: 'movie', entity: 'movie' }, null);
-      for (const r of results) {
-        if (!allResults.find(a => a.trackId === r.trackId)) allResults.push(r);
-      }
-    }
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
     
-    // Pass 3: General search filtered to feature-movie
-    if (allResults.length < 10) {
-      results = await trySearch({}, 'feature-movie');
-      for (const r of results) {
-        if (!allResults.find(a => a.trackId === r.trackId)) allResults.push(r);
-      }
-    }
-  } else {
-    // TV SHOWS - try multiple entity types for best coverage
+    const data = await response.json();
+    const results = (data.results || []).filter((r: any) => r.previewUrl);
     
-    // Pass 1: tvSeason - this often has show previews/trailers
-    let results = await trySearch({ media: 'tvShow', entity: 'tvSeason', attribute: 'showTerm' }, null);
-    if (results.length > 0) allResults.push(...results);
-    
-    // Pass 2: tvSeason without attribute
-    if (allResults.length < 10) {
-      results = await trySearch({ media: 'tvShow', entity: 'tvSeason' }, null);
-      for (const r of results) {
-        const id = r.collectionId || r.trackId;
-        if (!allResults.find(a => (a.collectionId || a.trackId) === id)) allResults.push(r);
-      }
-    }
-    
-    // Pass 3: tvEpisode - sometimes has episode previews
-    if (allResults.length < 10) {
-      results = await trySearch({ media: 'tvShow', entity: 'tvEpisode', attribute: 'showTerm' }, null);
-      for (const r of results) {
-        const id = r.collectionId || r.trackId;
-        if (!allResults.find(a => (a.collectionId || a.trackId) === id)) allResults.push(r);
-      }
-    }
-    
-    // Pass 4: General tvShow search
-    if (allResults.length < 10) {
-      results = await trySearch({ media: 'tvShow' }, null);
-      for (const r of results) {
-        const id = r.collectionId || r.trackId;
-        if (!allResults.find(a => (a.collectionId || a.trackId) === id)) allResults.push(r);
-      }
-    }
+    console.log(`  iTunes ${country.toUpperCase()}: ${results.length} results`);
+    return results;
+  } catch {
+    return [];
   }
-  
-  console.log(`  iTunes ${country.toUpperCase()}: ${allResults.length} results with previews`);
-  return allResults;
 }
 
 // ============ SCORING LOGIC ============
@@ -445,80 +373,14 @@ function findBestMatch(results: any[], tmdbMeta: TMDBMetadata): ScoreResult | nu
 // ============ YOUTUBE EXTRACTORS ============
 // Priority: 1. Invidious (direct URLs), 2. Piped (proxied URLs), 3. Cobalt (fallback)
 
-// Invidious instances - official list from api.invidious.io + community instances
+// Invidious instances - only working instances that return direct googlevideo URLs
 const INVIDIOUS_INSTANCES = [
-  // Official instances with high uptime
-  'https://inv.nadeko.net',
-  'https://invidious.nerdvpn.de', 
-  'https://invidious.f5.si',
   'https://inv.perditum.com',
-  'https://yewtu.be',
-  // Community instances
-  'https://invidious.privacyredirect.com',
-  'https://iv.nboeck.de',
-  'https://invidious.protokolla.fi',
   'https://invidious.lunar.icu',
+  'https://inv.nadeko.net',
+  'https://invidious.nerdvpn.de',
+  'https://yewtu.be',
   'https://invidious.perennialte.ch',
-  'https://invidious.drgns.space',
-  'https://invidious.io.lol',
-  'https://vid.puffyan.us',
-  'https://yt.artemislena.eu',
-  'https://invidious.snopyta.org',
-  'https://invidious.kavin.rocks',
-  'https://inv.tux.pizza',
-  'https://invidious.projectsegfau.lt',
-  'https://invidious.privacydev.net',
-  'https://invidious.slipfox.xyz',
-  'https://iv.ggtyler.dev',
-  'https://invidious.einfachzocken.eu',
-  'https://invidious.jing.rocks',
-  'https://inv.bp.projectsegfau.lt',
-];
-
-// Piped instances - comprehensive list from awsmfoss.com
-const PIPED_INSTANCES = [
-  // High priority - CDN enabled
-  'https://pipedapi.kavin.rocks',
-  'https://pipedapi.tokhmi.xyz',
-  'https://pipedapi.moomoo.me',
-  'https://pipedapi.syncpundit.io',
-  'https://api-piped.mha.fi',
-  'https://piped-api.garudalinux.org',
-  'https://pipedapi.rivo.lol',
-  'https://pipedapi.leptons.xyz',
-  'https://piped-api.lunar.icu',
-  'https://ytapi.dc09.ru',
-  'https://pipedapi.colinslegacy.com',
-  'https://yapi.vyper.me',
-  'https://api.looleh.xyz',
-  'https://piped-api.cfe.re',
-  'https://pipedapi.r4fo.com',
-  'https://pipedapi.nosebs.ru',
-  // Additional instances
-  'https://pipedapi-libre.kavin.rocks',
-  'https://pa.mint.lgbt',
-  'https://pa.il.ax',
-  'https://piped-api.privacy.com.de',
-  'https://api.piped.projectsegfau.lt',
-  'https://pipedapi.in.projectsegfau.lt',
-  'https://pipedapi.us.projectsegfau.lt',
-  'https://watchapi.whatever.social',
-  'https://api.piped.privacydev.net',
-  'https://pipedapi.palveluntarjoaja.eu',
-  'https://pipedapi.smnz.de',
-  'https://pipedapi.adminforge.de',
-  'https://pipedapi.qdi.fi',
-  'https://piped-api.hostux.net',
-  'https://pdapi.vern.cc',
-  'https://pipedapi.pfcd.me',
-  'https://pipedapi.frontendfriendly.xyz',
-  'https://api.piped.yt',
-  'https://pipedapi.astartes.nl',
-  'https://pipedapi.osphost.fi',
-  'https://pipedapi.simpleprivacy.fr',
-  'https://pipedapi.drgns.space',
-  'https://piapi.ggtyler.dev',
-  'https://api.watch.pluto.lat',
 ];
 
 
@@ -527,7 +389,7 @@ const PIPED_INSTANCES = [
 interface ExtractionResult {
   url: string;
   quality: string;  // e.g., "1080p", "720p", "4K"
-  source: 'inv' | 'pip';  // Shorthand: inv=Invidious, pip=Piped
+  source: 'inv';  // Shorthand: inv=Invidious
   hdr: boolean;
 }
 
@@ -688,96 +550,17 @@ async function extractViaInvidious(youtubeKey: string): Promise<ExtractionResult
   return best;
 }
 
-// ============ PIPED EXTRACTOR ============
-// Returns proxied video URLs via Piped's proxy servers (most stable)
-
-async function extractViaPiped(youtubeKey: string): Promise<ExtractionResult | null> {
-  console.log(`Trying Piped instances for ${youtubeKey}`);
-  
-  // Helper to extract height from quality string
-  const getHeight = (q: string | undefined): number => {
-    if (!q) return 720;
-    const match = q.match(/(\d+)p?/);
-    return match ? parseInt(match[1]) : 720;
-  };
-  
-  const tryInstance = async (instance: string): Promise<ExtractionResult | null> => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 6000);
-    
-    try {
-      const response = await fetch(`${instance}/streams/${youtubeKey}`, {
-        headers: { 'Accept': 'application/json' },
-        signal: controller.signal
-      });
-      clearTimeout(timeout);
-      
-      if (!response.ok) return null;
-      const data = await response.json();
-      
-      if (!data.videoStreams?.length) return null;
-      
-      // Collect ALL video streams
-      const allStreams: Array<{url: string, quality: string, height: number}> = [];
-      
-      for (const stream of data.videoStreams) {
-        if (stream.url && stream.mimeType?.startsWith('video/')) {
-          const quality = stream.quality || '720p';
-          allStreams.push({
-            url: stream.url,
-            quality,
-            height: getHeight(quality)
-          });
-        }
-      }
-      
-      if (allStreams.length === 0) return null;
-      
-      // Sort by height (higher is better)
-      allStreams.sort((a, b) => b.height - a.height);
-      
-      const best = allStreams[0];
-      const instName = instance.replace('https://', '').split('/')[0];
-      console.log(`  ✓ Pip ${instName}: ${best.quality} (${allStreams.length} streams, best height=${best.height})`);
-      return { url: best.url, quality: best.quality, source: 'pip', hdr: false };
-    } catch {
-      clearTimeout(timeout);
-      return null;
-    }
-  };
-  
-  // Try all instances in parallel, pick best quality
-  const results = await Promise.all(PIPED_INSTANCES.map(tryInstance));
-  const validResults = results.filter((r): r is ExtractionResult => r !== null);
-  
-  if (validResults.length === 0) {
-    console.log(`  No Piped instance returned a valid URL`);
-    return null;
-  }
-  
-  // Sort by height (higher is better)
-  validResults.sort((a, b) => getHeight(b.quality) - getHeight(a.quality));
-  
-  const best = validResults[0];
-  console.log(`✓ Best Piped: ${best.quality} (from ${validResults.length} results)`);
-  return best;
-}
-
 // ============ MAIN YOUTUBE EXTRACTOR ============
-// Tries: 1. Invidious (direct URLs), 2. Piped (proxied URLs)
+// Uses Invidious only (direct googlevideo URLs that actually work)
 
 async function extractYouTubeDirectUrl(youtubeKey: string): Promise<ExtractionResult | null> {
   console.log(`\nExtracting YouTube URL for key: ${youtubeKey}`);
   
-  // 1. Try Invidious first (direct googlevideo URLs)
+  // Try Invidious (direct googlevideo URLs)
   const invidiousResult = await extractViaInvidious(youtubeKey);
   if (invidiousResult) return invidiousResult;
   
-  // 2. Try Piped (proxied URLs)
-  const pipedResult = await extractViaPiped(youtubeKey);
-  if (pipedResult) return pipedResult;
-  
-  console.log('No YouTube URL found from any extractor');
+  console.log('No YouTube URL found from Invidious');
   return null;
 }
 
