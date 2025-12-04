@@ -461,67 +461,54 @@ async function extractViaInvidious(youtubeKey: string): Promise<ExtractionResult
                s.colorInfo?.primaries === 'bt2020';
       };
       
-      // Collect all available streams
-      let bestResult: ExtractionResult | null = null;
-      let bestQualityRank = 999;
+      // Collect ALL available streams from both sources
+      const allStreams: Array<{url: string, quality: string, hdr: boolean, rank: number}> = [];
       
       // formatStreams has combined video+audio
       if (data.formatStreams?.length > 0) {
-        const sorted = [...data.formatStreams].sort((a, b) => {
-          if (isHDR(a) && !isHDR(b)) return -1;
-          if (!isHDR(a) && isHDR(b)) return 1;
-          return getQualityRank(a.qualityLabel) - getQualityRank(b.qualityLabel);
-        });
-        
-        const stream = sorted.find((s: any) => s.container === 'mp4') || sorted[0];
-        if (stream?.url) {
-          const rank = getQualityRank(stream.qualityLabel);
-          if (rank < bestQualityRank) {
-            bestQualityRank = rank;
-            bestResult = { 
-              url: stream.url, 
-              quality: stream.qualityLabel || '720p', 
-              source: 'inv', 
-              hdr: isHDR(stream) 
-            };
+        for (const stream of data.formatStreams) {
+          if (stream.url && (stream.container === 'mp4' || !stream.container)) {
+            allStreams.push({
+              url: stream.url,
+              quality: stream.qualityLabel || '720p',
+              hdr: isHDR(stream),
+              rank: getQualityRank(stream.qualityLabel)
+            });
           }
         }
       }
       
-      // adaptiveFormats often have higher quality (video-only)
+      // adaptiveFormats often have higher quality (4K, HDR)
       if (data.adaptiveFormats?.length > 0) {
         const videoFormats = data.adaptiveFormats.filter((s: any) => 
           s.type?.includes('video') || s.mimeType?.startsWith('video/')
         );
         
-        const sorted = videoFormats.sort((a: any, b: any) => {
-          if (isHDR(a) && !isHDR(b)) return -1;
-          if (!isHDR(a) && isHDR(b)) return 1;
-          return getQualityRank(a.qualityLabel) - getQualityRank(b.qualityLabel);
-        });
-        
-        // Prefer MP4/H264 for compatibility
-        const adaptive = sorted.find((s: any) => s.container === 'mp4' || s.mimeType?.includes('mp4')) || sorted[0];
-        
-        if (adaptive?.url) {
-          const rank = getQualityRank(adaptive.qualityLabel);
-          // Use adaptive if it's significantly better quality (at least 2 ranks better)
-          // OR if we don't have any formatStream result
-          if (rank < bestQualityRank - 1 || !bestResult) {
-            bestQualityRank = rank;
-            bestResult = { 
-              url: adaptive.url, 
-              quality: adaptive.qualityLabel || '720p', 
-              source: 'inv', 
-              hdr: isHDR(adaptive) 
-            };
+        for (const stream of videoFormats) {
+          if (stream.url && (stream.container === 'mp4' || stream.mimeType?.includes('mp4') || stream.mimeType?.includes('webm'))) {
+            allStreams.push({
+              url: stream.url,
+              quality: stream.qualityLabel || '720p',
+              hdr: isHDR(stream),
+              rank: getQualityRank(stream.qualityLabel)
+            });
           }
         }
       }
       
-      if (bestResult) {
-        console.log(`  ✓ Invidious ${instance}: got ${bestResult.quality}${bestResult.hdr ? ' HDR' : ''}`);
-        return bestResult;
+      if (allStreams.length > 0) {
+        // Sort: HDR first, then by quality rank (lower = better)
+        allStreams.sort((a, b) => {
+          // HDR always wins
+          if (a.hdr && !b.hdr) return -1;
+          if (!a.hdr && b.hdr) return 1;
+          // Then highest quality
+          return a.rank - b.rank;
+        });
+        
+        const best = allStreams[0];
+        console.log(`  ✓ Invidious ${instance}: got ${best.quality}${best.hdr ? ' HDR' : ''} (best of ${allStreams.length} streams)`);
+        return { url: best.url, quality: best.quality, source: 'inv' as const, hdr: best.hdr };
       }
       
       console.log(`  ${instance}: no usable streams in response`);
