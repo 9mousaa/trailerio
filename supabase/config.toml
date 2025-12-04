@@ -2,3 +2,6 @@ project_id = "bzancpupafprhnkudfcw"
 
 [functions.stremio-addon]
 verify_jwt = false
+
+[functions.video-proxy]
+verify_jwt = false
