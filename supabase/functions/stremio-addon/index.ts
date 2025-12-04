@@ -792,10 +792,10 @@ serve(async (req) => {
       if (result.found && result.previewUrl) {
         const isYouTube = result.source === 'youtube';
         const streamName = isYouTube 
-          ? 'YouTube Trailer' 
+          ? 'Official Trailer' 
           : (type === 'movie' ? 'Movie Preview' : 'Episode Preview');
         const streamTitle = isYouTube 
-          ? 'Official Trailer (YouTube)' 
+          ? 'Official Trailer' 
           : `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`;
         
         return new Response(
