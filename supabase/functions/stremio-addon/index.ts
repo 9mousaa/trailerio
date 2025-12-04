@@ -423,7 +423,10 @@ async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | nul
         body: JSON.stringify({
           url: youtubeUrl,
           videoQuality: '720',
-          youtubeVideoCodec: 'h264',
+          youtubeVideoCodec: 'h264',    // AVPlayer compatible codec
+          downloadMode: 'auto',          // Ensure video, not audio-only
+          youtubeHLS: true,              // Prefer HLS for better streaming
+          filenameStyle: 'basic',
         })
       });
       
