@@ -601,37 +601,82 @@ async function multiPassSearch(tmdbMeta: TMDBMetadata): Promise<SearchResult> {
   
   console.log(`Titles to try: ${titlesToTry.join(', ')}`);
   
-  // Search helper with timeout
-  const searchWithCountry = async (title: string, country: string): Promise<{ results: any[]; country: string } | null> => {
+  // Split countries into tiers for faster early exit
+  const TIER1_COUNTRIES = ['us', 'gb', 'ca', 'au', 'de', 'fr']; // Primary markets - most likely to have content
+  const TIER2_COUNTRIES = COUNTRY_VARIANTS.filter(c => !TIER1_COUNTRIES.includes(c));
+  
+  // Search a single country and return match with score
+  const searchAndScore = async (title: string, country: string): Promise<{ score: number; item: any; country: string } | null> => {
     try {
       const results = await searchITunes({ term: title, country, type: searchType });
-      return results.length > 0 ? { results, country } : null;
+      if (results.length === 0) return null;
+      
+      const match = findBestMatch(results, tmdbMeta);
+      return match ? { ...match, country } : null;
     } catch {
       return null;
     }
   };
   
-  // For each title, search ALL countries in parallel
-  for (const title of titlesToTry) {
-    console.log(`\nSearching all countries in parallel for "${title}"`);
-    
-    // Launch all country searches simultaneously
-    const countrySearches = COUNTRY_VARIANTS.map(country => 
-      searchWithCountry(title, country)
-    );
-    
-    const allResults = await Promise.all(countrySearches);
-    
-    // Find best match across all countries
-    let bestOverall: { score: number; item: any; country: string } | null = null;
-    
-    for (const result of allResults) {
-      if (!result) continue;
+  // Race pattern: return first result that meets threshold, while continuing to find better
+  const raceToFirstGoodMatch = async (title: string, countries: string[]): Promise<{ score: number; item: any; country: string } | null> => {
+    return new Promise((resolve) => {
+      let bestMatch: { score: number; item: any; country: string } | null = null;
+      let completed = 0;
+      const total = countries.length;
+      const HIGH_SCORE_THRESHOLD = 0.85; // Return immediately if we find an excellent match
       
-      const match = findBestMatch(result.results, tmdbMeta);
-      if (match && (!bestOverall || match.score > bestOverall.score)) {
-        bestOverall = { ...match, country: result.country };
-      }
+      // Launch all searches in parallel
+      countries.forEach(country => {
+        searchAndScore(title, country).then(result => {
+          completed++;
+          
+          if (result) {
+            // If we find an excellent match, resolve immediately
+            if (result.score >= HIGH_SCORE_THRESHOLD) {
+              console.log(`⚡ Early exit: excellent match from ${country.toUpperCase()} (score: ${result.score.toFixed(2)})`);
+              resolve(result);
+              return;
+            }
+            
+            // Track best match so far
+            if (!bestMatch || result.score > bestMatch.score) {
+              bestMatch = result;
+            }
+          }
+          
+          // All searches completed
+          if (completed === total) {
+            resolve(bestMatch);
+          }
+        });
+      });
+    });
+  };
+  
+  for (const title of titlesToTry) {
+    // Tier 1: Search primary markets first (fastest)
+    console.log(`\nSearching Tier 1 (${TIER1_COUNTRIES.length} countries) for "${title}"`);
+    const tier1Result = await raceToFirstGoodMatch(title, TIER1_COUNTRIES);
+    
+    if (tier1Result && tier1Result.score >= 0.85) {
+      console.log(`✓ Best match from ${tier1Result.country.toUpperCase()}, score: ${tier1Result.score.toFixed(2)}`);
+      return {
+        found: true,
+        previewUrl: tier1Result.item.previewUrl,
+        trackId: tier1Result.item.trackId || tier1Result.item.collectionId,
+        country: tier1Result.country
+      };
+    }
+    
+    // Tier 2: Search remaining countries in parallel
+    console.log(`Searching Tier 2 (${TIER2_COUNTRIES.length} countries) for "${title}"`);
+    const tier2Result = await raceToFirstGoodMatch(title, TIER2_COUNTRIES);
+    
+    // Compare tier1 and tier2 results, return best
+    let bestOverall = tier1Result;
+    if (tier2Result && (!bestOverall || tier2Result.score > bestOverall.score)) {
+      bestOverall = tier2Result;
     }
     
     if (bestOverall) {
