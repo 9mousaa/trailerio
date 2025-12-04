@@ -14,13 +14,10 @@ const MIN_SCORE_THRESHOLD = 0.6;
 // Country storefronts to try (Pass 3)
 const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
 
-// Apple TV countries to search
-const APPLE_TV_COUNTRIES = ['us', 'gb', 'ca', 'au', 'de', 'fr'];
-
 const MANIFEST = {
   id: "com.trailer.preview",
   name: "Trailer Preview",
-  version: "2.1.0",
+  version: "2.0.0",
   description: "Watch trailers and previews for movies and TV shows",
   logo: "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/Film_reel.svg/200px-Film_reel.svg.png",
   resources: [
@@ -30,297 +27,6 @@ const MANIFEST = {
   idPrefixes: ["tt"],
   catalogs: []
 };
-
-// ============ APPLE TV SCRAPER ============
-
-// Cache the developer token (valid for ~24 hours)
-let appleTVToken: { token: string; expiry: number } | null = null;
-
-async function getAppleTVToken(): Promise<string | null> {
-  // Return cached token if still valid
-  if (appleTVToken && appleTVToken.expiry > Date.now()) {
-    return appleTVToken.token;
-  }
-  
-  console.log('Fetching Apple TV developer token...');
-  
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
-    
-    const response = await fetch('https://tv.apple.com/us', {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-        'Accept': 'text/html,application/xhtml+xml',
-      },
-      signal: controller.signal
-    });
-    clearTimeout(timeout);
-    
-    if (!response.ok) {
-      console.log(`Apple TV page fetch failed: ${response.status}`);
-      return null;
-    }
-    
-    const html = await response.text();
-    
-    // Look for serialized-server-data script which contains the token
-    const scriptMatch = html.match(/<script[^>]*id="serialized-server-data"[^>]*>([^<]+)<\/script>/);
-    if (!scriptMatch) {
-      console.log('Could not find serialized-server-data script');
-      return null;
-    }
-    
-    const serverData = JSON.parse(scriptMatch[1]);
-    const token = serverData?.[0]?.data?.configureParams?.developerToken;
-    
-    if (!token) {
-      console.log('Could not extract developerToken from server data');
-      return null;
-    }
-    
-    // Cache for 12 hours
-    appleTVToken = {
-      token,
-      expiry: Date.now() + (12 * 60 * 60 * 1000)
-    };
-    
-    console.log('✓ Got Apple TV developer token');
-    return token;
-  } catch (e) {
-    console.log(`Apple TV token error: ${e instanceof Error ? e.message : 'unknown'}`);
-    return null;
-  }
-}
-
-interface AppleTVSearchResult {
-  id: string;
-  title: string;
-  releaseYear: number | null;
-  type: 'movie' | 'show';
-}
-
-async function searchAppleTV(
-  title: string, 
-  country: string, 
-  type: 'movie' | 'show',
-  token: string
-): Promise<AppleTVSearchResult[]> {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    
-    // Try amp-api endpoint (Apple Media Products API)
-    const searchUrl = `https://amp-api.apps.apple.com/v1/catalog/${country}/search?` + new URLSearchParams({
-      term: title,
-      types: type === 'movie' ? 'movies' : 'tv-shows',
-      limit: '10',
-      platform: 'web',
-      additionalPlatforms: 'appletv'
-    });
-    
-    const response = await fetch(searchUrl, {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-        'Origin': 'https://tv.apple.com',
-        'Referer': 'https://tv.apple.com/',
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-      },
-      signal: controller.signal
-    });
-    clearTimeout(timeout);
-    
-    if (!response.ok) {
-      console.log(`  Apple TV search (${country}): HTTP ${response.status}`);
-      return [];
-    }
-    
-    const data = await response.json();
-    const results: AppleTVSearchResult[] = [];
-    
-    // Parse results from amp-api format
-    const searchResults = type === 'movie' 
-      ? data?.results?.movies?.data || []
-      : data?.results?.['tv-shows']?.data || [];
-    
-    console.log(`  Apple TV search (${country}): ${searchResults.length} results`);
-    
-    for (const item of searchResults) {
-      const id = item?.id;
-      const attrs = item?.attributes;
-      const itemTitle = attrs?.name;
-      const releaseDate = attrs?.releaseDate;
-      const releaseYear = releaseDate ? parseInt(String(releaseDate).substring(0, 4)) : null;
-      
-      if (id && itemTitle) {
-        results.push({ 
-          id, 
-          title: itemTitle, 
-          releaseYear, 
-          type: type === 'movie' ? 'movie' : 'show' 
-        });
-      }
-    }
-    
-    return results;
-  } catch (e) {
-    console.log(`Apple TV search error (${country}): ${e instanceof Error ? e.message : 'unknown'}`);
-    return [];
-  }
-}
-
-interface AppleTVTrailer {
-  hlsUrl: string;
-  title: string;
-}
-
-async function getAppleTVTrailer(
-  appleId: string, 
-  type: 'movie' | 'show',
-  country: string,
-  token: string
-): Promise<AppleTVTrailer | null> {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    
-    const endpoint = type === 'movie' ? 'movies' : 'shows';
-    const apiUrl = `https://tv.apple.com/api/uts/v3/${endpoint}/${appleId}?` + new URLSearchParams({
-      caller: 'web',
-      locale: `en-${country.toUpperCase()}`,
-      pfm: 'appletv',
-      sf: '143441',
-      utscf: 'OjAAAAAAAAA~',
-      utsk: '6e3013c6d6fae3c2::::::235656c069bb0efb',
-      v: '68'
-    });
-    
-    const response = await fetch(apiUrl, {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-        'Origin': 'https://tv.apple.com',
-        'Referer': 'https://tv.apple.com/',
-        'User-Agent': 'AppleTV6,2/11.1'
-      },
-      signal: controller.signal
-    });
-    clearTimeout(timeout);
-    
-    if (!response.ok) {
-      console.log(`Apple TV detail fetch failed: ${response.status}`);
-      return null;
-    }
-    
-    const data = await response.json();
-    
-    // Try to get background video (main trailer)
-    const bgVideo = data?.data?.content?.backgroundVideo;
-    if (bgVideo?.assets?.hlsUrl) {
-      return {
-        hlsUrl: bgVideo.assets.hlsUrl,
-        title: bgVideo.title || 'Official Trailer'
-      };
-    }
-    
-    // Try to find trailers in shelves
-    const shelves = data?.data?.canvas?.shelves || [];
-    for (const shelf of shelves) {
-      if (shelf?.title === 'Trailers' || shelf?.title?.includes('Trailer')) {
-        const trailerItems = shelf?.items || [];
-        if (trailerItems.length > 0) {
-          const firstTrailer = trailerItems[0];
-          const hlsUrl = firstTrailer?.playables?.[0]?.assets?.hlsUrl;
-          if (hlsUrl) {
-            return {
-              hlsUrl,
-              title: firstTrailer?.playables?.[0]?.title || 'Official Trailer'
-            };
-          }
-        }
-      }
-    }
-    
-    return null;
-  } catch (e) {
-    console.log(`Apple TV trailer fetch error: ${e instanceof Error ? e.message : 'unknown'}`);
-    return null;
-  }
-}
-
-interface AppleTVResult {
-  found: boolean;
-  hlsUrl?: string;
-  appleId?: string;
-  country?: string;
-  trailerTitle?: string;
-}
-
-async function findAppleTVTrailer(tmdbMeta: TMDBMetadata): Promise<AppleTVResult> {
-  console.log(`\nSearching Apple TV for "${tmdbMeta.title}" (${tmdbMeta.year})`);
-  
-  const token = await getAppleTVToken();
-  if (!token) {
-    console.log('Could not get Apple TV token, skipping');
-    return { found: false };
-  }
-  
-  const searchType = tmdbMeta.mediaType === 'movie' ? 'movie' : 'show';
-  const titlesToTry = [tmdbMeta.title];
-  if (tmdbMeta.originalTitle && tmdbMeta.originalTitle !== tmdbMeta.title) {
-    titlesToTry.push(tmdbMeta.originalTitle);
-  }
-  
-  for (const searchTitle of titlesToTry) {
-    // Search all countries in parallel
-    const searchPromises = APPLE_TV_COUNTRIES.map(country => 
-      searchAppleTV(searchTitle, country, searchType, token)
-        .then(results => ({ country, results }))
-    );
-    
-    const allSearchResults = await Promise.all(searchPromises);
-    
-    // Find best match across all countries
-    for (const { country, results } of allSearchResults) {
-      for (const result of results) {
-        // Title match check
-        const normResult = normalizeTitle(result.title);
-        const normSearch = normalizeTitle(searchTitle);
-        
-        const titleMatch = normResult === normSearch || 
-                           fuzzyMatch(result.title, searchTitle) > 0.8;
-        
-        // Year match check (allow ±1 year)
-        const yearMatch = !tmdbMeta.year || !result.releaseYear || 
-                          Math.abs(result.releaseYear - tmdbMeta.year) <= 1;
-        
-        if (titleMatch && yearMatch) {
-          console.log(`  Found match: "${result.title}" (${result.releaseYear}) in ${country.toUpperCase()}`);
-          
-          // Fetch the trailer
-          const trailer = await getAppleTVTrailer(result.id, searchType, country, token);
-          
-          if (trailer?.hlsUrl) {
-            console.log(`✓ Got Apple TV HLS URL: ${trailer.hlsUrl.substring(0, 80)}...`);
-            return {
-              found: true,
-              hlsUrl: trailer.hlsUrl,
-              appleId: result.id,
-              country,
-              trailerTitle: trailer.title
-            };
-          }
-        }
-      }
-    }
-  }
-  
-  console.log('No Apple TV trailer found');
-  return { found: false };
-}
 
 // ============ TITLE NORMALIZATION ============
 
@@ -1135,32 +841,7 @@ async function resolvePreview(imdbId: string, type: string, supabase: any): Prom
     return { ...itunesResult, source: 'itunes' };
   }
   
-  // Try 2: Apple TV scraper (HLS streams, up to 4K HDR)
-  const appleTVResult = await findAppleTVTrailer(tmdbMeta);
-  
-  if (appleTVResult.found && appleTVResult.hlsUrl) {
-    // Cache Apple TV result (HLS URLs are persistent)
-    await supabase
-      .from('itunes_mappings')
-      .upsert({
-        imdb_id: imdbId,
-        track_id: null,
-        preview_url: appleTVResult.hlsUrl,
-        country: `atv-${appleTVResult.country || 'us'}`,
-        youtube_key: null,
-        last_checked: new Date().toISOString()
-      }, { onConflict: 'imdb_id' });
-    
-    console.log(`✓ Found Apple TV trailer: ${appleTVResult.hlsUrl.substring(0, 80)}...`);
-    return {
-      found: true,
-      source: 'itunes', // Use 'itunes' for compatibility
-      previewUrl: appleTVResult.hlsUrl,
-      country: `atv-${appleTVResult.country || 'us'}`
-    };
-  }
-  
-  // Try 3: YouTube fallback via extractors (direct URLs)
+  // Try 2: YouTube fallback via extractors (direct URLs)
   if (tmdbMeta.youtubeTrailerKey) {
     console.log(`\nTrying YouTube extractors for key: ${tmdbMeta.youtubeTrailerKey}`);
     const youtubeDirectUrl = await extractYouTubeDirectUrl(tmdbMeta.youtubeTrailerKey);
@@ -1202,7 +883,7 @@ async function resolvePreview(imdbId: string, type: string, supabase: any): Prom
       last_checked: new Date().toISOString()
     }, { onConflict: 'imdb_id' });
   
-  console.log('No preview found from iTunes, Apple TV, or YouTube');
+  console.log('No preview found from iTunes or YouTube');
   return { found: false };
 }
 
@@ -1226,7 +907,7 @@ serve(async (req) => {
   try {
     if (path === '/health' || path === '/health.json') {
       return new Response(
-        JSON.stringify({ status: 'ok', version: '2.1.0' }),
+        JSON.stringify({ status: 'ok', version: '2.0.0' }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
@@ -1256,22 +937,12 @@ serve(async (req) => {
       
       if (result.found && result.previewUrl) {
         const isYouTube = result.source === 'youtube';
-        const isAppleTV = result.country?.startsWith('atv-');
-        
-        let streamName: string;
-        let streamTitle: string;
-        
-        if (isYouTube) {
-          streamName = 'Official Trailer';
-          streamTitle = 'Official Trailer (YouTube)';
-        } else if (isAppleTV) {
-          streamName = 'Official Trailer';
-          const atvCountry = result.country?.replace('atv-', '').toUpperCase() || 'US';
-          streamTitle = `Official Trailer - Apple TV (${atvCountry})`;
-        } else {
-          streamName = type === 'movie' ? 'Movie Preview' : 'Episode Preview';
-          streamTitle = `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`;
-        }
+        const streamName = isYouTube 
+          ? 'Official Trailer' 
+          : (type === 'movie' ? 'Movie Preview' : 'Episode Preview');
+        const streamTitle = isYouTube 
+          ? 'Official Trailer' 
+          : `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`;
         
         return new Response(
           JSON.stringify({
