@@ -499,7 +499,8 @@ async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | nul
     }
   };
   
-  // Try first config across all instances in parallel
+  // Try each config across all instances in parallel
+  // IMPORTANT: Only accept redirect URLs - tunnel URLs don't work with iOS Safari/AVPlayer
   for (const config of requestConfigs) {
     console.log(`Trying config: ${JSON.stringify(config)}`);
     
@@ -511,36 +512,26 @@ async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | nul
     
     if (validResults.length === 0) continue;
     
-    // Priority 1: Direct redirect URLs (best - actual video CDN URLs)
+    // Priority 1: Direct redirect URLs (googlevideo.com - works with iOS AVPlayer)
     const directRedirect = validResults.find(r => r.status === 'redirect' && r.isDirect);
     if (directRedirect) {
       console.log(`✓ Got direct redirect URL from ${directRedirect.instance}`);
       return directRedirect.url;
     }
     
-    // Priority 2: Any redirect (may still work)
+    // Priority 2: Any redirect URL (may still be direct)
     const anyRedirect = validResults.find(r => r.status === 'redirect');
     if (anyRedirect) {
       console.log(`✓ Got redirect URL from ${anyRedirect.instance}`);
       return anyRedirect.url;
     }
     
-    // Priority 3: Direct tunnel URLs (if they're actually direct video URLs)
-    const directTunnel = validResults.find(r => r.isDirect);
-    if (directTunnel) {
-      console.log(`✓ Got direct video URL from ${directTunnel.instance}`);
-      return directTunnel.url;
-    }
-    
-    // Priority 4: Any tunnel as last resort (may expire, but better than nothing)
-    const anyTunnel = validResults.find(r => r.status === 'tunnel');
-    if (anyTunnel) {
-      console.log(`⚠ Got tunnel URL from ${anyTunnel.instance} (may expire)`);
-      return anyTunnel.url;
-    }
+    // Skip tunnel URLs entirely - they don't work with iOS Safari/AVPlayer
+    // Tunnel URLs are proxied through Cobalt servers and lack proper headers/CORS for mobile playback
+    console.log(`Config returned ${validResults.length} results but no redirects (only tunnels)`);
   }
   
-  console.log('All Cobalt instances and configs failed');
+  console.log('No direct redirect URLs found from any Cobalt instance');
   return null;
 }
 
