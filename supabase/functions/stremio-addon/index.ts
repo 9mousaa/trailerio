@@ -382,6 +382,14 @@ const INVIDIOUS_INSTANCES = [
   'https://invidious.privacyredirect.com',
   'https://iv.nboeck.de',
   'https://invidious.protokolla.fi',
+  'https://invidious.lunar.icu',
+  'https://invidious.perennialte.ch',
+  'https://invidious.drgns.space',
+  'https://invidious.io.lol',
+  'https://vid.puffyan.us',
+  'https://yt.artemislena.eu',
+  'https://invidious.snopyta.org',
+  'https://invidious.kavin.rocks',
 ];
 
 // Piped instances - return proxied stream URLs via /streams/:videoId
