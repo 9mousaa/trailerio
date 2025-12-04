@@ -461,50 +461,67 @@ async function extractViaInvidious(youtubeKey: string): Promise<ExtractionResult
                s.colorInfo?.primaries === 'bt2020';
       };
       
-      // formatStreams has combined video+audio (preferred)
+      // Collect all available streams
+      let bestResult: ExtractionResult | null = null;
+      let bestQualityRank = 999;
+      
+      // formatStreams has combined video+audio
       if (data.formatStreams?.length > 0) {
-        // Sort by quality (highest first), HDR preferred
         const sorted = [...data.formatStreams].sort((a, b) => {
-          // Prefer HDR
           if (isHDR(a) && !isHDR(b)) return -1;
           if (!isHDR(a) && isHDR(b)) return 1;
-          // Then by quality
           return getQualityRank(a.qualityLabel) - getQualityRank(b.qualityLabel);
         });
         
-        // Find best MP4 or any container
         const stream = sorted.find((s: any) => s.container === 'mp4') || sorted[0];
-        
         if (stream?.url) {
-          const hdr = isHDR(stream);
-          const quality = stream.qualityLabel || '720p';
-          console.log(`  ✓ Invidious ${instance}: got ${quality}${hdr ? ' HDR' : ''} ${stream.container || 'video'}`);
-          return { url: stream.url, quality, source: 'inv', hdr };
+          const rank = getQualityRank(stream.qualityLabel);
+          if (rank < bestQualityRank) {
+            bestQualityRank = rank;
+            bestResult = { 
+              url: stream.url, 
+              quality: stream.qualityLabel || '720p', 
+              source: 'inv', 
+              hdr: isHDR(stream) 
+            };
+          }
         }
       }
       
-      // adaptiveFormats as fallback (video-only streams, often higher quality)
+      // adaptiveFormats often have higher quality (video-only)
       if (data.adaptiveFormats?.length > 0) {
         const videoFormats = data.adaptiveFormats.filter((s: any) => 
           s.type?.includes('video') || s.mimeType?.startsWith('video/')
         );
         
-        // Sort by quality (highest first), HDR preferred
         const sorted = videoFormats.sort((a: any, b: any) => {
           if (isHDR(a) && !isHDR(b)) return -1;
           if (!isHDR(a) && isHDR(b)) return 1;
           return getQualityRank(a.qualityLabel) - getQualityRank(b.qualityLabel);
         });
         
-        // Prefer MP4/H264 for compatibility, but accept highest quality available
+        // Prefer MP4/H264 for compatibility
         const adaptive = sorted.find((s: any) => s.container === 'mp4' || s.mimeType?.includes('mp4')) || sorted[0];
         
         if (adaptive?.url) {
-          const hdr = isHDR(adaptive);
-          const quality = adaptive.qualityLabel || '720p';
-          console.log(`  ✓ Invidious ${instance}: got adaptive ${quality}${hdr ? ' HDR' : ''}`);
-          return { url: adaptive.url, quality, source: 'inv', hdr };
+          const rank = getQualityRank(adaptive.qualityLabel);
+          // Use adaptive if it's significantly better quality (at least 2 ranks better)
+          // OR if we don't have any formatStream result
+          if (rank < bestQualityRank - 1 || !bestResult) {
+            bestQualityRank = rank;
+            bestResult = { 
+              url: adaptive.url, 
+              quality: adaptive.qualityLabel || '720p', 
+              source: 'inv', 
+              hdr: isHDR(adaptive) 
+            };
+          }
         }
+      }
+      
+      if (bestResult) {
+        console.log(`  ✓ Invidious ${instance}: got ${bestResult.quality}${bestResult.hdr ? ' HDR' : ''}`);
+        return bestResult;
       }
       
       console.log(`  ${instance}: no usable streams in response`);
@@ -518,15 +535,31 @@ async function extractViaInvidious(youtubeKey: string): Promise<ExtractionResult
   
   // Try all instances in parallel
   const results = await Promise.all(INVIDIOUS_INSTANCES.map(tryInstance));
-  const validUrl = results.find(r => r !== null);
+  const validResults = results.filter((r): r is ExtractionResult => r !== null);
   
-  if (validUrl) {
-    console.log(`✓ Got URL from Invidious`);
-    return validUrl;
+  if (validResults.length === 0) {
+    console.log(`  No Invidious instance returned a valid URL`);
+    return null;
   }
   
-  console.log(`  No Invidious instance returned a valid URL`);
-  return null;
+  // Sort by quality to get the best one (highest resolution first, HDR preferred)
+  const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
+  const getQualityRank = (q: string): number => {
+    const idx = qualityPriority.findIndex(p => q.includes(p));
+    return idx === -1 ? 998 : idx;
+  };
+  
+  validResults.sort((a, b) => {
+    // Prefer HDR
+    if (a.hdr && !b.hdr) return -1;
+    if (!a.hdr && b.hdr) return 1;
+    // Then by quality
+    return getQualityRank(a.quality) - getQualityRank(b.quality);
+  });
+  
+  const best = validResults[0];
+  console.log(`✓ Got URL from Invidious (best: ${best.quality}${best.hdr ? ' HDR' : ''} from ${validResults.length} results)`);
+  return best;
 }
 
 // ============ PIPED EXTRACTOR ============
@@ -591,17 +624,27 @@ async function extractViaPiped(youtubeKey: string): Promise<ExtractionResult | n
     }
   };
   
-  // Try all instances in parallel, return first success
+  // Try all instances in parallel, pick best quality
   const results = await Promise.all(PIPED_INSTANCES.map(tryInstance));
-  const validUrl = results.find(r => r !== null);
+  const validResults = results.filter((r): r is ExtractionResult => r !== null);
   
-  if (validUrl) {
-    console.log(`✓ Got URL from Piped`);
-    return validUrl;
+  if (validResults.length === 0) {
+    console.log(`  No Piped instance returned a valid URL`);
+    return null;
   }
   
-  console.log(`  No Piped instance returned a valid URL`);
-  return null;
+  // Sort by quality to get the best one
+  const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
+  const getQualityRank = (q: string): number => {
+    const idx = qualityPriority.findIndex(p => q.includes(p));
+    return idx === -1 ? 998 : idx;
+  };
+  
+  validResults.sort((a, b) => getQualityRank(a.quality) - getQualityRank(b.quality));
+  
+  const best = validResults[0];
+  console.log(`✓ Got URL from Piped (best: ${best.quality} from ${validResults.length} results)`);
+  return best;
 }
 
 // ============ COBALT EXTRACTOR (FALLBACK) ============
