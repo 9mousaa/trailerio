@@ -606,33 +606,29 @@ async function resolvePreview(imdbId: string, type: string, supabase: any): Prom
     return { ...itunesResult, source: 'itunes' };
   }
   
-  // Try 2: YouTube fallback via extractors (direct URLs)
+  // Try 2: YouTube fallback - use ytId for Stremio native playback
   if (tmdbMeta.youtubeTrailerKey) {
-    console.log(`\nTrying YouTube extractors for key: ${tmdbMeta.youtubeTrailerKey}`);
-    const youtubeDirectUrl = await extractYouTubeDirectUrl(tmdbMeta.youtubeTrailerKey);
+    console.log(`\nUsing YouTube trailer: ${tmdbMeta.youtubeTrailerKey}`);
     
-    if (youtubeDirectUrl) {
-      // Cache YouTube result with direct URL
-      await supabase
-        .from('itunes_mappings')
-        .upsert({
-          imdb_id: imdbId,
-          track_id: null,
-          preview_url: youtubeDirectUrl,
-          country: 'yt',
-          youtube_key: tmdbMeta.youtubeTrailerKey,
-          last_checked: new Date().toISOString()
-        }, { onConflict: 'imdb_id' });
-      
-      console.log(`✓ Got YouTube direct URL`);
-      return {
-        found: true,
-        source: 'youtube',
-        previewUrl: youtubeDirectUrl,
-        youtubeKey: tmdbMeta.youtubeTrailerKey,
-        country: 'yt'
-      };
-    }
+    // Cache YouTube key for native Stremio playback (no extraction needed)
+    await supabase
+      .from('itunes_mappings')
+      .upsert({
+        imdb_id: imdbId,
+        track_id: null,
+        preview_url: null,
+        country: 'yt',
+        youtube_key: tmdbMeta.youtubeTrailerKey,
+        last_checked: new Date().toISOString()
+      }, { onConflict: 'imdb_id' });
+    
+    console.log(`✓ Cached YouTube key for native playback`);
+    return {
+      found: true,
+      source: 'youtube',
+      youtubeKey: tmdbMeta.youtubeTrailerKey,
+      country: 'yt'
+    };
   }
   
   // No result found - cache negative result
@@ -699,25 +695,35 @@ serve(async (req) => {
       
       const result = await resolvePreview(id, type, supabase);
       
-      if (result.found && result.previewUrl) {
+      if (result.found) {
         const isYouTube = result.source === 'youtube';
-        const streamName = isYouTube 
-          ? 'YouTube Trailer' 
-          : (type === 'movie' ? 'Movie Preview' : 'Episode Preview');
-        const streamTitle = isYouTube 
-          ? 'Official Trailer (YouTube)' 
-          : `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`;
         
-        return new Response(
-          JSON.stringify({
-            streams: [{
-              name: streamName,
-              title: streamTitle,
-              url: result.previewUrl
-            }]
-          }),
-          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
+        if (isYouTube && result.youtubeKey) {
+          // Use Stremio's native YouTube playback (ytId) - works on iOS
+          return new Response(
+            JSON.stringify({
+              streams: [{
+                name: 'YouTube Trailer',
+                title: 'Official Trailer (YouTube)',
+                ytId: result.youtubeKey
+              }]
+            }),
+            { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          );
+        } else if (result.previewUrl) {
+          // iTunes direct URL - streamable
+          const streamName = type === 'movie' ? 'Movie Preview' : 'Episode Preview';
+          return new Response(
+            JSON.stringify({
+              streams: [{
+                name: streamName,
+                title: `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`,
+                url: result.previewUrl
+              }]
+            }),
+            { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          );
+        }
       }
       
       return new Response(
