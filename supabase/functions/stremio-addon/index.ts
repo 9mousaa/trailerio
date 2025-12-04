@@ -373,167 +373,75 @@ function findBestMatch(results: any[], tmdbMeta: TMDBMetadata): ScoreResult | nu
   return null;
 }
 
-// ============ YOUTUBE EXTRACTORS (COBALT v10/v11 INSTANCES) ============
-// Sources: https://cobalt.directory/ and https://instances.cobalt.best/
-// Sorted by score, all without turnstile requirement
+// ============ YOUTUBE EXTRACTORS ============
+// Priority: 1. Invidious (direct proxied URLs), 2. Piped (direct proxied URLs), 3. Cobalt (fallback)
 
-const COBALT_INSTANCES = [
-  // 96% score - Top tier
-  'https://cobalt-backend.canine.tools',
-  'https://nuko-c.meowing.de',
-  'https://cobalt-api.meowing.de',
-  // 92% score
-  'https://cobalt-api.clxxped.lol',
-  // 88% score
-  'https://subito-c.meowing.de',
-  'https://cobalt-api.kwiatekmiki.com',
-  // 76% score - Official instances
-  'https://kityune.imput.net',
-  'https://capi.3kh0.net',
-  'https://nachos.imput.net',
-  // 72% score
-  'https://sunny.imput.net',
-  // 64% score
-  'https://blossom.imput.net',
+// Piped instances - return proxied stream URLs via /streams/:videoId (most reliable)
+const PIPED_INSTANCES = [
+  'https://pipedapi.kavin.rocks',
+  'https://pipedapi.r4fo.com',
+  'https://pipedapi.syncpundit.io',
+  'https://piped-api.garudalinux.org',
+  'https://pipedapi.leptons.xyz',
+  'https://pipedapi.adminforge.de',
+  'https://api.piped.projectsegfau.lt',
 ];
 
-// Check if URL is a direct streamable video URL (not a tunnel/temporary URL)
-function isDirectVideoUrl(url: string): boolean {
-  if (!url) return false;
-  // Direct video URLs typically have video file extensions or are from known CDNs
-  const directPatterns = [
-    /\.(mp4|m3u8|webm|mkv|mov)(\?|$)/i,
-    /googlevideo\.com/i,
-    /ytimg\.com/i,
-    /youtube\.com\/videoplayback/i,
-    /manifest\.googlevideo\.com/i,
-  ];
-  // Tunnel URLs to avoid (temporary, expire quickly)
-  const tunnelPatterns = [
-    /cobalt/i,
-    /tunnel/i,
-    /\.workers\.dev/i,
-  ];
-  
-  const isDirect = directPatterns.some(p => p.test(url));
-  const isTunnel = tunnelPatterns.some(p => p.test(url));
-  
-  return isDirect && !isTunnel;
-}
+// Cobalt instances (fallback) - may return tunnel URLs
+const COBALT_INSTANCES = [
+  'https://cobalt-backend.canine.tools',
+  'https://cobalt-api.kwiatekmiki.com',
+  'https://cobalt-api.meowing.de',
+  'https://nuko-c.meowing.de',
+];
 
-interface CobaltResult {
-  url: string;
-  instance: string;
-  status: 'redirect' | 'tunnel' | 'picker';
-  isDirect: boolean;
-}
+// ============ PIPED EXTRACTOR ============
+// Returns proxied video URLs via Piped's proxy servers (most stable)
 
-async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | null> {
-  console.log(`Extracting direct URL for YouTube key: ${youtubeKey}`);
-  const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
+async function extractViaPiped(youtubeKey: string): Promise<string | null> {
+  console.log(`Trying Piped instances for ${youtubeKey}`);
   
-  // iOS Safari Requirements:
-  // - MP4 container with H.264 video + AAC audio
-  // - Accept-Ranges: bytes header support
-  // - No Content-Disposition: attachment
-  // - Direct streamable URLs (googlevideo.com CDN)
-  
-  // Request configs - prioritize iOS-compatible formats
-  // Per Cobalt API docs: downloadMode: 'mute' = video-only stream
-  // audioBitrate only accepts: 320/256/128/96/64/8 (NOT '0')
-  const requestConfigs = [
-    // Config 1: H264 720p video-only (direct URL, no tunnel muxing)
-    { 
-      url: youtubeUrl,
-      videoQuality: '720', 
-      youtubeVideoCodec: 'h264',
-      downloadMode: 'mute',
-    },
-    // Config 2: H264 480p video-only  
-    { 
-      url: youtubeUrl,
-      videoQuality: '480', 
-      youtubeVideoCodec: 'h264',
-      downloadMode: 'mute',
-    },
-    // Config 3: H264 720p with audio (may return tunnel URL)
-    { 
-      url: youtubeUrl,
-      videoQuality: '720', 
-      youtubeVideoCodec: 'h264',
-    },
-    // Config 4: H264 480p with audio
-    { 
-      url: youtubeUrl,
-      videoQuality: '480', 
-      youtubeVideoCodec: 'h264',
-    },
-  ];
-  
-  // Helper to try a single instance with a specific config
-  const tryInstance = async (
-    instance: string, 
-    config: Record<string, any>
-  ): Promise<CobaltResult | null> => {
+  const tryInstance = async (instance: string): Promise<string | null> => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000); // 8s timeout
+    const timeout = setTimeout(() => controller.abort(), 6000);
     
     try {
-      const response = await fetch(instance, {
-        method: 'POST',
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          url: youtubeUrl,
-          ...config,
-        }),
+      const response = await fetch(`${instance}/streams/${youtubeKey}`, {
+        headers: { 'Accept': 'application/json' },
         signal: controller.signal
       });
-      
       clearTimeout(timeout);
       
       if (!response.ok) return null;
-      
       const data = await response.json();
       
-      // Accept redirect status - these are direct CDN URLs
-      if (data.status === 'redirect' && data.url) {
-        const isDirect = isDirectVideoUrl(data.url);
-        console.log(`  ${instance}: redirect URL, isDirect=${isDirect}`);
-        return { 
-          url: data.url, 
-          instance, 
-          status: 'redirect',
-          isDirect
-        };
-      }
-      
-      // Handle picker responses - extract video URL
-      if (data.status === 'picker' && data.picker?.length > 0) {
-        const videoOption = data.picker.find((p: any) => p.type === 'video');
-        if (videoOption?.url) {
-          console.log(`  ${instance}: picker video URL`);
-          return { 
-            url: videoOption.url, 
-            instance, 
-            status: 'picker',
-            isDirect: isDirectVideoUrl(videoOption.url)
-          };
+      // Look for MP4/H264 video stream (preferably 720p with audio)
+      if (data.videoStreams?.length > 0) {
+        // Find combined video+audio stream (videoOnly: false)
+        const combined = data.videoStreams.find((s: any) => 
+          !s.videoOnly && 
+          s.mimeType?.startsWith('video/mp4') &&
+          s.quality === '720p'
+        ) || data.videoStreams.find((s: any) => 
+          !s.videoOnly && s.mimeType?.startsWith('video/mp4')
+        );
+        
+        if (combined?.url) {
+          console.log(`  ✓ Piped ${instance}: got ${combined.quality || 'unknown'} MP4`);
+          return combined.url;
         }
-      }
-      
-      // Accept tunnel URLs - our video-proxy will fix the headers
-      // (Content-Disposition: inline, Accept-Ranges: bytes, etc.)
-      if (data.status === 'tunnel' && data.url) {
-        console.log(`  ${instance}: tunnel URL (will use proxy for headers)`);
-        return { 
-          url: data.url, 
-          instance, 
-          status: 'tunnel',
-          isDirect: false
-        };
+        
+        // Fall back to video-only if no combined stream
+        const videoOnly = data.videoStreams.find((s: any) => 
+          s.mimeType?.startsWith('video/mp4') && s.quality === '720p'
+        ) || data.videoStreams.find((s: any) => 
+          s.mimeType?.startsWith('video/mp4')
+        );
+        
+        if (videoOnly?.url) {
+          console.log(`  ✓ Piped ${instance}: got video-only ${videoOnly.quality || 'unknown'}`);
+          return videoOnly.url;
+        }
       }
       
       return null;
@@ -543,59 +451,101 @@ async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | nul
     }
   };
   
-  // Try each config across all instances in parallel
-  for (const config of requestConfigs) {
-    console.log(`Trying config: quality=${config.videoQuality}, codec=${config.youtubeVideoCodec}`);
+  // Try all instances in parallel, return first success
+  const results = await Promise.all(PIPED_INSTANCES.map(tryInstance));
+  const validUrl = results.find(r => r !== null);
+  
+  if (validUrl) {
+    console.log(`✓ Got URL from Piped`);
+    return validUrl;
+  }
+  
+  console.log(`  No Piped instance returned a valid URL`);
+  return null;
+}
+
+// ============ COBALT EXTRACTOR (FALLBACK) ============
+
+interface CobaltResult {
+  url: string;
+  instance: string;
+  status: 'redirect' | 'tunnel' | 'picker';
+}
+
+async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
+  console.log(`Trying Cobalt instances (fallback) for ${youtubeKey}`);
+  const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
+  
+  const requestConfigs = [
+    { url: youtubeUrl, videoQuality: '720', youtubeVideoCodec: 'h264', downloadMode: 'mute' },
+    { url: youtubeUrl, videoQuality: '720', youtubeVideoCodec: 'h264' },
+  ];
+  
+  const tryInstance = async (
+    instance: string, 
+    config: Record<string, any>
+  ): Promise<CobaltResult | null> => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
     
+    try {
+      const response = await fetch(instance, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(config),
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+      
+      if (!response.ok) return null;
+      const data = await response.json();
+      
+      if ((data.status === 'redirect' || data.status === 'tunnel') && data.url) {
+        return { url: data.url, instance, status: data.status };
+      }
+      if (data.status === 'picker' && data.picker?.[0]?.url) {
+        return { url: data.picker[0].url, instance, status: 'picker' };
+      }
+      return null;
+    } catch {
+      clearTimeout(timeout);
+      return null;
+    }
+  };
+  
+  for (const config of requestConfigs) {
     const results = await Promise.all(
       COBALT_INSTANCES.map(instance => tryInstance(instance, config))
     );
-    
-    const validResults = results.filter((r): r is CobaltResult => r !== null);
-    
-    if (validResults.length === 0) {
-      console.log(`  No valid results for this config`);
-      continue;
-    }
-    
-    // Priority 1: Direct googlevideo.com URLs (best - native streaming)
-    const directCDN = validResults.find(r => r.isDirect && r.url.includes('googlevideo.com'));
-    if (directCDN) {
-      console.log(`✓ Got direct googlevideo URL from ${directCDN.instance}`);
-      return directCDN.url;
-    }
-    
-    // Priority 2: Any direct video URL
-    const anyDirect = validResults.find(r => r.isDirect);
-    if (anyDirect) {
-      console.log(`✓ Got direct video URL from ${anyDirect.instance}`);
-      return anyDirect.url;
-    }
-    
-    // Priority 3: Any redirect URL
-    const anyRedirect = validResults.find(r => r.status === 'redirect');
-    if (anyRedirect) {
-      console.log(`✓ Got redirect URL from ${anyRedirect.instance}`);
-      return anyRedirect.url;
-    }
-    
-    // Priority 4: Tunnel URLs (will be proxied to fix headers)
-    const anyTunnel = validResults.find(r => r.status === 'tunnel');
-    if (anyTunnel) {
-      console.log(`✓ Got tunnel URL from ${anyTunnel.instance} (will proxy)`);
-      return anyTunnel.url;
-    }
-    
-    // Priority 5: Picker URLs
-    const anyPicker = validResults.find(r => r.status === 'picker');
-    if (anyPicker) {
-      console.log(`✓ Got picker URL from ${anyPicker.instance}`);
-      return anyPicker.url;
+    const valid = results.find(r => r !== null);
+    if (valid) {
+      console.log(`  ✓ Cobalt ${valid.instance}: got ${valid.status} URL`);
+      return valid.url;
     }
   }
   
-  console.log('No URLs found from any Cobalt instance');
+  console.log(`  No Cobalt instance returned a valid URL`);
   return null;
+}
+
+// ============ MAIN YOUTUBE EXTRACTOR ============
+// Tries: 1. Piped (stable proxied URLs), 2. Cobalt (fallback, may have expiring tunnels)
+
+async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | null> {
+  console.log(`\nExtracting YouTube URL for key: ${youtubeKey}`);
+  
+  // 1. Try Piped first (most stable proxied URLs)
+  const pipedUrl = await extractViaPiped(youtubeKey);
+  if (pipedUrl) return pipedUrl;
+  
+  // 2. Fall back to Cobalt (may return tunnel URLs that expire)
+  const cobaltUrl = await extractViaCobalt(youtubeKey);
+  if (cobaltUrl) return cobaltUrl;
+  
+  console.log('No YouTube URL found from any extractor');
   return null;
 }
 
