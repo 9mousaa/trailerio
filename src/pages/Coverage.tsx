@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, Database, Target, TrendingUp, XCircle, CheckCircle } from "lucide-react";
 
-const ADDON_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/stremio-addon`;
+const ADDON_URL = "https://trailerio.lovable.app/functions/v1/stremio-addon";
 
 // Title lookup map
 const TITLE_MAP: Record<string, string> = {
