@@ -88,6 +88,7 @@ interface TMDBMetadata {
   year: number | null;
   runtime: number | null; // in minutes
   altTitles: string[];
+  youtubeTrailerKey: string | null;
 }
 
 async function getTMDBMetadata(imdbId: string, type: string): Promise<TMDBMetadata | null> {
@@ -122,8 +123,8 @@ async function getTMDBMetadata(imdbId: string, type: string): Promise<TMDBMetada
   
   const tmdbId = result.id;
   
-  // Step 2: Get full details
-  const detailUrl = `https://api.themoviedb.org/3/${mediaType}/${tmdbId}?api_key=${TMDB_API_KEY}`;
+  // Step 2: Get full details with videos (append_to_response)
+  const detailUrl = `https://api.themoviedb.org/3/${mediaType}/${tmdbId}?api_key=${TMDB_API_KEY}&append_to_response=videos`;
   const detailResponse = await fetch(detailUrl);
   const detail = await detailResponse.json();
   
@@ -137,6 +138,34 @@ async function getTMDBMetadata(imdbId: string, type: string): Promise<TMDBMetada
   const releaseDate = mediaType === 'movie' ? detail.release_date : detail.first_air_date;
   const year = releaseDate ? parseInt(releaseDate.substring(0, 4)) : null;
   const runtime = detail.runtime || null;
+  
+  // Extract YouTube trailer key from videos
+  let youtubeTrailerKey: string | null = null;
+  const videos = detail.videos?.results || [];
+  
+  // Priority: Official Trailer > Trailer > Teaser
+  const trailerPriority = ['Trailer', 'Teaser', 'Clip'];
+  for (const priority of trailerPriority) {
+    const trailer = videos.find((v: any) => 
+      v.site === 'YouTube' && 
+      v.type === priority && 
+      v.official === true
+    );
+    if (trailer) {
+      youtubeTrailerKey = trailer.key;
+      break;
+    }
+  }
+  
+  // Fallback: any YouTube video
+  if (!youtubeTrailerKey) {
+    const anyYouTube = videos.find((v: any) => v.site === 'YouTube');
+    if (anyYouTube) {
+      youtubeTrailerKey = anyYouTube.key;
+    }
+  }
+  
+  console.log(`TMDB: "${mainTitle}" (${year}), YouTube trailer: ${youtubeTrailerKey || 'none'}`);
   
   // Extract English alt titles (US, GB, CA, AU)
   const altTitlesArray: string[] = [];
@@ -162,7 +191,8 @@ async function getTMDBMetadata(imdbId: string, type: string): Promise<TMDBMetada
     originalTitle: originalTitle || mainTitle,
     year,
     runtime,
-    altTitles: altTitlesArray
+    altTitles: altTitlesArray,
+    youtubeTrailerKey
   };
 }
 
@@ -352,13 +382,64 @@ function findBestMatch(results: any[], tmdbMeta: TMDBMetadata): ScoreResult | nu
   return null;
 }
 
+// ============ YOUTUBE FALLBACK (COBALT.TOOLS) ============
+
+async function getYouTubeDirectUrl(youtubeKey: string): Promise<string | null> {
+  console.log(`Fetching direct URL from cobalt.tools for YouTube key: ${youtubeKey}`);
+  
+  try {
+    const response = await fetch('https://api.cobalt.tools/', {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        url: `https://www.youtube.com/watch?v=${youtubeKey}`,
+        videoQuality: '720',
+        filenameStyle: 'basic',
+      })
+    });
+    
+    if (!response.ok) {
+      console.error(`cobalt.tools error: ${response.status}`);
+      return null;
+    }
+    
+    const data = await response.json();
+    console.log(`cobalt.tools response status: ${data.status}`);
+    
+    if (data.status === 'stream' || data.status === 'redirect') {
+      console.log(`✓ Got direct YouTube URL from cobalt.tools`);
+      return data.url;
+    }
+    
+    if (data.status === 'picker' && data.picker?.length > 0) {
+      // Multiple options available, pick the first video
+      const videoOption = data.picker.find((p: any) => p.type === 'video') || data.picker[0];
+      if (videoOption?.url) {
+        console.log(`✓ Got direct YouTube URL from cobalt.tools (picker)`);
+        return videoOption.url;
+      }
+    }
+    
+    console.log(`cobalt.tools returned no usable URL: ${JSON.stringify(data)}`);
+    return null;
+  } catch (error) {
+    console.error('cobalt.tools fetch error:', error);
+    return null;
+  }
+}
+
 // ============ MULTI-PASS SEARCH ============
 
 interface SearchResult {
   found: boolean;
+  source?: 'itunes' | 'youtube';
   previewUrl?: string;
   trackId?: number;
   country?: string;
+  youtubeKey?: string;
 }
 
 async function multiPassSearch(tmdbMeta: TMDBMetadata): Promise<SearchResult> {
@@ -448,11 +529,15 @@ async function resolvePreview(imdbId: string, type: string, supabase: any): Prom
     if (daysSinceCheck < CACHE_DAYS) {
       if (cached.preview_url) {
         console.log('Cache hit: returning cached preview');
+        // Determine source from URL pattern
+        const isYouTube = cached.preview_url.includes('googlevideo.com') || cached.youtube_key;
         return {
           found: true,
+          source: isYouTube ? 'youtube' : 'itunes',
           previewUrl: cached.preview_url,
           trackId: cached.track_id,
-          country: cached.country
+          country: cached.country,
+          youtubeKey: cached.youtube_key
         };
       } else {
         console.log('Cache hit: negative cache (no preview found previously)');
@@ -468,25 +553,69 @@ async function resolvePreview(imdbId: string, type: string, supabase: any): Prom
     return { found: false };
   }
   
-  // Run multi-pass search
-  const result = await multiPassSearch(tmdbMeta);
+  // Try 1: iTunes multi-pass search
+  const itunesResult = await multiPassSearch(tmdbMeta);
   
-  // Cache the result (positive or negative)
+  if (itunesResult.found) {
+    // Cache iTunes result
+    await supabase
+      .from('itunes_mappings')
+      .upsert({
+        imdb_id: imdbId,
+        track_id: itunesResult.trackId,
+        preview_url: itunesResult.previewUrl,
+        country: itunesResult.country || 'us',
+        youtube_key: null,
+        last_checked: new Date().toISOString()
+      }, { onConflict: 'imdb_id' });
+    
+    console.log(`✓ Found iTunes preview: ${itunesResult.previewUrl}`);
+    return { ...itunesResult, source: 'itunes' };
+  }
+  
+  // Try 2: YouTube fallback via cobalt.tools
+  if (tmdbMeta.youtubeTrailerKey) {
+    console.log(`\nTrying YouTube fallback for key: ${tmdbMeta.youtubeTrailerKey}`);
+    const youtubeDirectUrl = await getYouTubeDirectUrl(tmdbMeta.youtubeTrailerKey);
+    
+    if (youtubeDirectUrl) {
+      // Cache YouTube result
+      await supabase
+        .from('itunes_mappings')
+        .upsert({
+          imdb_id: imdbId,
+          track_id: null,
+          preview_url: youtubeDirectUrl,
+          country: 'yt',
+          youtube_key: tmdbMeta.youtubeTrailerKey,
+          last_checked: new Date().toISOString()
+        }, { onConflict: 'imdb_id' });
+      
+      console.log(`✓ Found YouTube trailer via cobalt.tools`);
+      return {
+        found: true,
+        source: 'youtube',
+        previewUrl: youtubeDirectUrl,
+        youtubeKey: tmdbMeta.youtubeTrailerKey,
+        country: 'yt'
+      };
+    }
+  }
+  
+  // No result found - cache negative result
   await supabase
     .from('itunes_mappings')
     .upsert({
       imdb_id: imdbId,
-      track_id: result.found ? result.trackId : null,
-      preview_url: result.found ? result.previewUrl : null,
-      country: result.country || 'us',
+      track_id: null,
+      preview_url: null,
+      country: 'us',
+      youtube_key: null,
       last_checked: new Date().toISOString()
     }, { onConflict: 'imdb_id' });
   
-  if (result.found) {
-    console.log(`✓ Found preview: ${result.previewUrl}`);
-  }
-  
-  return result;
+  console.log('No preview found from iTunes or YouTube');
+  return { found: false };
 }
 
 // ============ HTTP SERVER ============
@@ -538,12 +667,19 @@ serve(async (req) => {
       const result = await resolvePreview(id, type, supabase);
       
       if (result.found && result.previewUrl) {
-        const streamName = type === 'movie' ? 'iTunes Movie Preview' : 'iTunes Episode Preview';
+        const isYouTube = result.source === 'youtube';
+        const streamName = isYouTube 
+          ? 'YouTube Trailer' 
+          : (type === 'movie' ? 'Movie Preview' : 'Episode Preview');
+        const streamTitle = isYouTube 
+          ? 'Official Trailer (YouTube)' 
+          : `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`;
+        
         return new Response(
           JSON.stringify({
             streams: [{
               name: streamName,
-              title: `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`,
+              title: streamTitle,
               url: result.previewUrl
             }]
           }),

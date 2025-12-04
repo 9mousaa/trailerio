@@ -22,6 +22,7 @@ export type Database = {
           last_checked: string
           preview_url: string | null
           track_id: number | null
+          youtube_key: string | null
         }
         Insert: {
           country?: string | null
@@ -30,6 +31,7 @@ export type Database = {
           last_checked?: string
           preview_url?: string | null
           track_id?: number | null
+          youtube_key?: string | null
         }
         Update: {
           country?: string | null
@@ -38,6 +40,7 @@ export type Database = {
           last_checked?: string
           preview_url?: string | null
           track_id?: number | null
+          youtube_key?: string | null
         }
         Relationships: []
       }
