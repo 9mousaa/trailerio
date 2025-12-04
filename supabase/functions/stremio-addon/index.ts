@@ -378,16 +378,19 @@ function findBestMatch(results: any[], tmdbMeta: TMDBMetadata): ScoreResult | nu
 }
 
 // ============ YOUTUBE EXTRACTORS ============
-// Priority: 1. Invidious (direct URLs), 2. Piped (proxied URLs), 3. Cobalt (fallback)
+// Priority: 1. Cobalt (most reliable), 2. Invidious (backup if API enabled)
 
-// Invidious instances - only working instances that return direct googlevideo URLs
+// Cobalt instances - official and community instances
+const COBALT_INSTANCES = [
+  'https://api.cobalt.tools',
+  'https://cobalt-api.hyper.lol',
+];
+
+// Invidious instances - backup (most have API disabled now)
 const INVIDIOUS_INSTANCES = [
-  'https://inv.perditum.com',
-  'https://invidious.lunar.icu',
   'https://inv.nadeko.net',
   'https://invidious.nerdvpn.de',
   'https://yewtu.be',
-  'https://invidious.perennialte.ch',
 ];
 
 
@@ -396,7 +399,7 @@ const INVIDIOUS_INSTANCES = [
 interface ExtractionResult {
   url: string;
   quality: string;  // e.g., "1080p", "720p", "4K"
-  source: 'inv';  // Shorthand: inv=Invidious
+  source: 'cob' | 'inv';  // Shorthand: cob=Cobalt, inv=Invidious
   hdr: boolean;
 }
 
@@ -557,17 +560,92 @@ async function extractViaInvidious(youtubeKey: string): Promise<ExtractionResult
   return best;
 }
 
+// ============ COBALT EXTRACTOR ============
+// Cobalt is the most reliable YouTube extractor currently
+
+async function extractViaCobalt(youtubeKey: string): Promise<ExtractionResult | null> {
+  console.log(`Trying Cobalt instances for ${youtubeKey}`);
+  
+  const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
+  
+  for (const instance of COBALT_INSTANCES) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    
+    try {
+      const response = await fetch(instance, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          url: youtubeUrl,
+          videoQuality: '1080',
+          youtubeVideoCodec: 'h264',
+          filenameStyle: 'basic',
+        }),
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+      
+      if (!response.ok) {
+        console.log(`  ${instance}: HTTP ${response.status}`);
+        continue;
+      }
+      
+      const data = await response.json();
+      
+      // Cobalt returns a direct URL or a tunnel URL
+      if (data.url) {
+        console.log(`✓ Cobalt success: ${data.url.substring(0, 80)}...`);
+        return {
+          url: data.url,
+          quality: '1080p',
+          source: 'cob',
+          hdr: false
+        };
+      }
+      
+      // Handle picker response (multiple formats)
+      if (data.picker && data.picker.length > 0) {
+        const videoItem = data.picker.find((p: any) => p.type === 'video') || data.picker[0];
+        if (videoItem?.url) {
+          console.log(`✓ Cobalt picker success: ${videoItem.url.substring(0, 80)}...`);
+          return {
+            url: videoItem.url,
+            quality: '1080p',
+            source: 'cob',
+            hdr: false
+          };
+        }
+      }
+      
+      console.log(`  ${instance}: No URL in response`);
+    } catch (err: any) {
+      clearTimeout(timeout);
+      console.log(`  ${instance}: ${err.message}`);
+    }
+  }
+  
+  return null;
+}
+
 // ============ MAIN YOUTUBE EXTRACTOR ============
-// Uses Invidious only (direct googlevideo URLs that actually work)
+// Uses Cobalt first (most reliable), then Invidious as backup
 
 async function extractYouTubeDirectUrl(youtubeKey: string): Promise<ExtractionResult | null> {
   console.log(`\nExtracting YouTube URL for key: ${youtubeKey}`);
   
-  // Try Invidious (direct googlevideo URLs)
+  // Try Cobalt first (most reliable currently)
+  const cobaltResult = await extractViaCobalt(youtubeKey);
+  if (cobaltResult) return cobaltResult;
+  
+  // Try Invidious as backup (most have API disabled)
   const invidiousResult = await extractViaInvidious(youtubeKey);
   if (invidiousResult) return invidiousResult;
   
-  console.log('No YouTube URL found from Invidious');
+  console.log('No YouTube URL found from any extractor');
   return null;
 }
 
