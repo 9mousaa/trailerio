@@ -393,14 +393,58 @@ const COBALT_INSTANCES = [
   'https://blossom.imput.net',
 ];
 
+// Check if URL is a direct streamable video URL (not a tunnel/temporary URL)
+function isDirectVideoUrl(url: string): boolean {
+  if (!url) return false;
+  // Direct video URLs typically have video file extensions or are from known CDNs
+  const directPatterns = [
+    /\.(mp4|m3u8|webm|mkv|mov)(\?|$)/i,
+    /googlevideo\.com/i,
+    /ytimg\.com/i,
+    /youtube\.com\/videoplayback/i,
+    /manifest\.googlevideo\.com/i,
+  ];
+  // Tunnel URLs to avoid (temporary, expire quickly)
+  const tunnelPatterns = [
+    /cobalt/i,
+    /tunnel/i,
+    /\.workers\.dev/i,
+  ];
+  
+  const isDirect = directPatterns.some(p => p.test(url));
+  const isTunnel = tunnelPatterns.some(p => p.test(url));
+  
+  return isDirect && !isTunnel;
+}
+
+interface CobaltResult {
+  url: string;
+  instance: string;
+  status: 'redirect' | 'tunnel' | 'picker';
+  isDirect: boolean;
+}
+
 async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | null> {
   console.log(`Extracting direct URL for YouTube key: ${youtubeKey}`);
   const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
   
-  // Helper to try a single instance with timeout
-  const tryInstance = async (instance: string): Promise<{ url: string; instance: string } | null> => {
+  // Different request configurations to try for best streamable format
+  const requestConfigs = [
+    // Config 1: Prefer redirect with H264 (most compatible)
+    { videoQuality: '720', youtubeVideoCodec: 'h264', downloadMode: 'auto' },
+    // Config 2: Try without HLS for direct MP4
+    { videoQuality: '720', youtubeVideoCodec: 'h264', downloadMode: 'auto', youtubeHLS: false },
+    // Config 3: Lower quality fallback
+    { videoQuality: '480', youtubeVideoCodec: 'h264', downloadMode: 'auto' },
+  ];
+  
+  // Helper to try a single instance with a specific config
+  const tryInstance = async (
+    instance: string, 
+    config: Record<string, any>
+  ): Promise<CobaltResult | null> => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000); // 8s timeout
+    const timeout = setTimeout(() => controller.abort(), 6000); // 6s timeout
     
     try {
       const response = await fetch(instance, {
@@ -411,11 +455,8 @@ async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | nul
         },
         body: JSON.stringify({
           url: youtubeUrl,
-          videoQuality: '720',
-          youtubeVideoCodec: 'h264',
-          downloadMode: 'auto',
-          youtubeHLS: true,
           filenameStyle: 'basic',
+          ...config,
         }),
         signal: controller.signal
       });
@@ -426,11 +467,30 @@ async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | nul
       
       const data = await response.json();
       
-      if (data.status === 'tunnel' || data.status === 'redirect') {
-        if (data.url) return { url: data.url, instance };
+      if (data.status === 'redirect' && data.url) {
+        return { 
+          url: data.url, 
+          instance, 
+          status: 'redirect',
+          isDirect: isDirectVideoUrl(data.url)
+        };
+      } else if (data.status === 'tunnel' && data.url) {
+        return { 
+          url: data.url, 
+          instance, 
+          status: 'tunnel',
+          isDirect: isDirectVideoUrl(data.url)
+        };
       } else if (data.status === 'picker' && data.picker?.length > 0) {
         const videoOption = data.picker.find((p: any) => p.type === 'video') || data.picker[0];
-        if (videoOption?.url) return { url: videoOption.url, instance };
+        if (videoOption?.url) {
+          return { 
+            url: videoOption.url, 
+            instance, 
+            status: 'picker',
+            isDirect: isDirectVideoUrl(videoOption.url)
+          };
+        }
       }
       return null;
     } catch {
@@ -439,18 +499,48 @@ async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | nul
     }
   };
   
-  // Race all instances - first successful response wins
-  const results = await Promise.all(
-    COBALT_INSTANCES.map(instance => tryInstance(instance))
-  );
-  
-  const firstSuccess = results.find(r => r !== null);
-  if (firstSuccess) {
-    console.log(`✓ Got direct URL from ${firstSuccess.instance}`);
-    return firstSuccess.url;
+  // Try first config across all instances in parallel
+  for (const config of requestConfigs) {
+    console.log(`Trying config: ${JSON.stringify(config)}`);
+    
+    const results = await Promise.all(
+      COBALT_INSTANCES.map(instance => tryInstance(instance, config))
+    );
+    
+    const validResults = results.filter((r): r is CobaltResult => r !== null);
+    
+    if (validResults.length === 0) continue;
+    
+    // Priority 1: Direct redirect URLs (best - actual video CDN URLs)
+    const directRedirect = validResults.find(r => r.status === 'redirect' && r.isDirect);
+    if (directRedirect) {
+      console.log(`✓ Got direct redirect URL from ${directRedirect.instance}`);
+      return directRedirect.url;
+    }
+    
+    // Priority 2: Any redirect (may still work)
+    const anyRedirect = validResults.find(r => r.status === 'redirect');
+    if (anyRedirect) {
+      console.log(`✓ Got redirect URL from ${anyRedirect.instance}`);
+      return anyRedirect.url;
+    }
+    
+    // Priority 3: Direct tunnel URLs (if they're actually direct video URLs)
+    const directTunnel = validResults.find(r => r.isDirect);
+    if (directTunnel) {
+      console.log(`✓ Got direct video URL from ${directTunnel.instance}`);
+      return directTunnel.url;
+    }
+    
+    // Priority 4: Any tunnel as last resort (may expire, but better than nothing)
+    const anyTunnel = validResults.find(r => r.status === 'tunnel');
+    if (anyTunnel) {
+      console.log(`⚠ Got tunnel URL from ${anyTunnel.instance} (may expire)`);
+      return anyTunnel.url;
+    }
   }
   
-  console.log('All Cobalt instances failed');
+  console.log('All Cobalt instances and configs failed');
   return null;
 }
 
