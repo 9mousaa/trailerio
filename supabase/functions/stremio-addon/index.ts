@@ -435,31 +435,63 @@ async function extractViaInvidious(youtubeKey: string): Promise<string | null> {
       
       const data = await response.json();
       
+      // Quality priority: 4K/2160p > 1440p > 1080p > 720p, HDR preferred
+      const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
+      
+      // Helper to get quality rank (lower is better)
+      const getQualityRank = (label: string | undefined): number => {
+        if (!label) return 999;
+        const idx = qualityPriority.findIndex(q => label.includes(q));
+        return idx === -1 ? 998 : idx;
+      };
+      
+      // Helper to check for HDR
+      const isHDR = (s: any): boolean => {
+        return s.qualityLabel?.toLowerCase().includes('hdr') || 
+               s.type?.toLowerCase().includes('hdr') ||
+               s.colorInfo?.primaries === 'bt2020';
+      };
+      
       // formatStreams has combined video+audio (preferred)
       if (data.formatStreams?.length > 0) {
-        // Prefer 720p MP4
-        const stream = data.formatStreams.find((s: any) => 
-          s.container === 'mp4' && s.qualityLabel === '720p'
-        ) || data.formatStreams.find((s: any) => 
-          s.container === 'mp4'
-        ) || data.formatStreams[0];
+        // Sort by quality (highest first), HDR preferred
+        const sorted = [...data.formatStreams].sort((a, b) => {
+          // Prefer HDR
+          if (isHDR(a) && !isHDR(b)) return -1;
+          if (!isHDR(a) && isHDR(b)) return 1;
+          // Then by quality
+          return getQualityRank(a.qualityLabel) - getQualityRank(b.qualityLabel);
+        });
+        
+        // Find best MP4 or any container
+        const stream = sorted.find((s: any) => s.container === 'mp4') || sorted[0];
         
         if (stream?.url) {
-          console.log(`  ✓ Invidious ${instance}: got ${stream.qualityLabel || 'unknown'} ${stream.container || 'video'}`);
+          const hdrLabel = isHDR(stream) ? ' HDR' : '';
+          console.log(`  ✓ Invidious ${instance}: got ${stream.qualityLabel || 'unknown'}${hdrLabel} ${stream.container || 'video'}`);
           return stream.url;
         }
       }
       
-      // adaptiveFormats as fallback (video-only streams)
+      // adaptiveFormats as fallback (video-only streams, often higher quality)
       if (data.adaptiveFormats?.length > 0) {
-        const adaptive = data.adaptiveFormats.find((s: any) => 
-          s.container === 'mp4' && s.qualityLabel === '720p'
-        ) || data.adaptiveFormats.find((s: any) => 
-          s.container === 'mp4' && s.type?.includes('video')
+        const videoFormats = data.adaptiveFormats.filter((s: any) => 
+          s.type?.includes('video') || s.mimeType?.startsWith('video/')
         );
         
+        // Sort by quality (highest first), HDR preferred
+        const sorted = videoFormats.sort((a: any, b: any) => {
+          if (isHDR(a) && !isHDR(b)) return -1;
+          if (!isHDR(a) && isHDR(b)) return 1;
+          return getQualityRank(a.qualityLabel) - getQualityRank(b.qualityLabel);
+        });
+        
+        // Prefer MP4/H264 for compatibility, but accept highest quality available
+        const adaptive = sorted.find((s: any) => s.container === 'mp4' || s.mimeType?.includes('mp4')) || sorted[0];
+        
         if (adaptive?.url) {
-          console.log(`  ✓ Invidious ${instance}: got adaptive ${adaptive.qualityLabel || 'unknown'}`);
+          const hdrLabel = isHDR(adaptive) ? ' HDR' : '';
+          console.log(`  ✓ Invidious ${instance}: got adaptive ${adaptive.qualityLabel || 'unknown'}${hdrLabel}`);
           return adaptive.url;
         }
       }
@@ -506,28 +538,32 @@ async function extractViaPiped(youtubeKey: string): Promise<string | null> {
       if (!response.ok) return null;
       const data = await response.json();
       
-      // Look for MP4/H264 video stream (preferably 720p with audio)
+      // Quality priority: highest first
+      const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
+      const getQualityRank = (q: string | undefined): number => {
+        if (!q) return 999;
+        const idx = qualityPriority.findIndex(p => q.includes(p));
+        return idx === -1 ? 998 : idx;
+      };
+      
       if (data.videoStreams?.length > 0) {
-        // Find combined video+audio stream (videoOnly: false)
-        const combined = data.videoStreams.find((s: any) => 
-          !s.videoOnly && 
-          s.mimeType?.startsWith('video/mp4') &&
-          s.quality === '720p'
-        ) || data.videoStreams.find((s: any) => 
-          !s.videoOnly && s.mimeType?.startsWith('video/mp4')
+        // Sort by quality (highest first)
+        const sorted = [...data.videoStreams].sort((a: any, b: any) => 
+          getQualityRank(a.quality) - getQualityRank(b.quality)
+        );
+        
+        // Find best combined video+audio stream
+        const combined = sorted.find((s: any) => 
+          !s.videoOnly && s.mimeType?.startsWith('video/')
         );
         
         if (combined?.url) {
-          console.log(`  ✓ Piped ${instance}: got ${combined.quality || 'unknown'} MP4`);
+          console.log(`  ✓ Piped ${instance}: got ${combined.quality || 'unknown'}`);
           return combined.url;
         }
         
-        // Fall back to video-only if no combined stream
-        const videoOnly = data.videoStreams.find((s: any) => 
-          s.mimeType?.startsWith('video/mp4') && s.quality === '720p'
-        ) || data.videoStreams.find((s: any) => 
-          s.mimeType?.startsWith('video/mp4')
-        );
+        // Fall back to video-only (highest quality available)
+        const videoOnly = sorted.find((s: any) => s.mimeType?.startsWith('video/'));
         
         if (videoOnly?.url) {
           console.log(`  ✓ Piped ${instance}: got video-only ${videoOnly.quality || 'unknown'}`);
@@ -567,9 +603,11 @@ async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
   console.log(`Trying Cobalt instances (fallback) for ${youtubeKey}`);
   const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
   
+  // Request highest quality: max = 4K/2160p, prefer h264 for compatibility
   const requestConfigs = [
-    { url: youtubeUrl, videoQuality: '720', youtubeVideoCodec: 'h264', downloadMode: 'mute' },
-    { url: youtubeUrl, videoQuality: '720', youtubeVideoCodec: 'h264' },
+    { url: youtubeUrl, videoQuality: 'max', youtubeVideoCodec: 'h264', downloadMode: 'mute' },
+    { url: youtubeUrl, videoQuality: 'max', youtubeVideoCodec: 'h264' },
+    { url: youtubeUrl, videoQuality: 'max' }, // Allow VP9/AV1 as fallback for HDR
   ];
   
   const tryInstance = async (
