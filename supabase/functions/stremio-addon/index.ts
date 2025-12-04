@@ -382,56 +382,9 @@ function findBestMatch(results: any[], tmdbMeta: TMDBMetadata): ScoreResult | nu
   return null;
 }
 
-// ============ YOUTUBE FALLBACK (COBALT.TOOLS) ============
-
-async function getYouTubeDirectUrl(youtubeKey: string): Promise<string | null> {
-  console.log(`Fetching direct URL from cobalt.tools for YouTube key: ${youtubeKey}`);
-  
-  try {
-    const response = await fetch('https://api.cobalt.tools/api/json', {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        url: `https://www.youtube.com/watch?v=${youtubeKey}`,
-        aFormat: 'best',
-        filenamePattern: 'basic',
-        isAudioOnly: false,
-      })
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`cobalt.tools error: ${response.status} - ${errorText}`);
-      return null;
-    }
-    
-    const data = await response.json();
-    console.log(`cobalt.tools response status: ${data.status}`);
-    
-    if (data.status === 'stream' || data.status === 'redirect') {
-      console.log(`✓ Got direct YouTube URL from cobalt.tools`);
-      return data.url;
-    }
-    
-    if (data.status === 'picker' && data.picker?.length > 0) {
-      // Multiple options available, pick the first video
-      const videoOption = data.picker.find((p: any) => p.type === 'video') || data.picker[0];
-      if (videoOption?.url) {
-        console.log(`✓ Got direct YouTube URL from cobalt.tools (picker)`);
-        return videoOption.url;
-      }
-    }
-    
-    console.log(`cobalt.tools returned no usable URL: ${JSON.stringify(data)}`);
-    return null;
-  } catch (error) {
-    console.error('cobalt.tools fetch error:', error);
-    return null;
-  }
-}
+// ============ YOUTUBE FALLBACK (NATIVE STREMIO ytId) ============
+// Note: cobalt.tools v7 API shut down Nov 11, 2024
+// Using Stremio's native ytId stream type instead
 
 // ============ MULTI-PASS SEARCH ============
 
@@ -529,10 +482,20 @@ async function resolvePreview(imdbId: string, type: string, supabase: any): Prom
     const daysSinceCheck = (Date.now() - lastChecked.getTime()) / (1000 * 60 * 60 * 24);
     
     if (daysSinceCheck < CACHE_DAYS) {
+      // Check for YouTube cache first (youtube_key without preview_url)
+      if (cached.youtube_key && !cached.preview_url) {
+        console.log('Cache hit: returning cached YouTube trailer');
+        return {
+          found: true,
+          source: 'youtube',
+          youtubeKey: cached.youtube_key,
+          country: 'yt'
+        };
+      }
       if (cached.preview_url) {
         console.log('Cache hit: returning cached preview');
-        // Determine source from URL pattern
-        const isYouTube = cached.preview_url.includes('googlevideo.com') || cached.youtube_key;
+        // Determine source from country
+        const isYouTube = cached.country === 'yt' || cached.youtube_key;
         return {
           found: true,
           source: isYouTube ? 'youtube' : 'itunes',
@@ -541,7 +504,7 @@ async function resolvePreview(imdbId: string, type: string, supabase: any): Prom
           country: cached.country,
           youtubeKey: cached.youtube_key
         };
-      } else {
+      } else if (!cached.youtube_key) {
         console.log('Cache hit: negative cache (no preview found previously)');
         return { found: false };
       }
@@ -575,33 +538,29 @@ async function resolvePreview(imdbId: string, type: string, supabase: any): Prom
     return { ...itunesResult, source: 'itunes' };
   }
   
-  // Try 2: YouTube fallback via cobalt.tools
+  // Try 2: YouTube fallback (native Stremio ytId)
   if (tmdbMeta.youtubeTrailerKey) {
-    console.log(`\nTrying YouTube fallback for key: ${tmdbMeta.youtubeTrailerKey}`);
-    const youtubeDirectUrl = await getYouTubeDirectUrl(tmdbMeta.youtubeTrailerKey);
+    console.log(`\nUsing YouTube fallback with key: ${tmdbMeta.youtubeTrailerKey}`);
     
-    if (youtubeDirectUrl) {
-      // Cache YouTube result
-      await supabase
-        .from('itunes_mappings')
-        .upsert({
-          imdb_id: imdbId,
-          track_id: null,
-          preview_url: youtubeDirectUrl,
-          country: 'yt',
-          youtube_key: tmdbMeta.youtubeTrailerKey,
-          last_checked: new Date().toISOString()
-        }, { onConflict: 'imdb_id' });
-      
-      console.log(`✓ Found YouTube trailer via cobalt.tools`);
-      return {
-        found: true,
-        source: 'youtube',
-        previewUrl: youtubeDirectUrl,
-        youtubeKey: tmdbMeta.youtubeTrailerKey,
-        country: 'yt'
-      };
-    }
+    // Cache YouTube result
+    await supabase
+      .from('itunes_mappings')
+      .upsert({
+        imdb_id: imdbId,
+        track_id: null,
+        preview_url: null,  // No direct URL needed for ytId
+        country: 'yt',
+        youtube_key: tmdbMeta.youtubeTrailerKey,
+        last_checked: new Date().toISOString()
+      }, { onConflict: 'imdb_id' });
+    
+    console.log(`✓ Using YouTube trailer: ${tmdbMeta.youtubeTrailerKey}`);
+    return {
+      found: true,
+      source: 'youtube',
+      youtubeKey: tmdbMeta.youtubeTrailerKey,
+      country: 'yt'
+    };
   }
   
   // No result found - cache negative result
@@ -668,25 +627,32 @@ serve(async (req) => {
       
       const result = await resolvePreview(id, type, supabase);
       
-      if (result.found && result.previewUrl) {
+      if (result.found) {
         const isYouTube = result.source === 'youtube';
-        const streamName = isYouTube 
-          ? 'YouTube Trailer' 
-          : (type === 'movie' ? 'Movie Preview' : 'Episode Preview');
-        const streamTitle = isYouTube 
-          ? 'Official Trailer (YouTube)' 
-          : `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`;
+        const streams = [];
         
-        return new Response(
-          JSON.stringify({
-            streams: [{
-              name: streamName,
-              title: streamTitle,
-              url: result.previewUrl
-            }]
-          }),
-          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
+        if (isYouTube && result.youtubeKey) {
+          // Use Stremio's native ytId for YouTube
+          streams.push({
+            name: 'YouTube Trailer',
+            title: 'Official Trailer (YouTube)',
+            ytId: result.youtubeKey
+          });
+        } else if (result.previewUrl) {
+          // Use direct URL for iTunes
+          streams.push({
+            name: type === 'movie' ? 'Movie Preview' : 'Episode Preview',
+            title: `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`,
+            url: result.previewUrl
+          });
+        }
+        
+        if (streams.length > 0) {
+          return new Response(
+            JSON.stringify({ streams }),
+            { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          );
+        }
       }
       
       return new Response(
