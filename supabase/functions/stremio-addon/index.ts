@@ -439,22 +439,22 @@ async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | nul
   // - Direct streamable URLs (googlevideo.com CDN)
   
   // Request configs - prioritize iOS-compatible formats
-  // iOS requires: MP4 container + H.264 video + AAC audio
-  // audioBitrate: '0' = video-only stream (avoids tunnel muxing, gives direct URLs)
+  // Per Cobalt API docs: downloadMode: 'mute' = video-only stream
+  // audioBitrate only accepts: 320/256/128/96/64/8 (NOT '0')
   const requestConfigs = [
-    // Config 1: H264 720p video-only (most reliable - direct URL)
+    // Config 1: H264 720p video-only (direct URL, no tunnel muxing)
     { 
       url: youtubeUrl,
       videoQuality: '720', 
       youtubeVideoCodec: 'h264',
-      audioBitrate: '0',
+      downloadMode: 'mute',
     },
     // Config 2: H264 480p video-only  
     { 
       url: youtubeUrl,
       videoQuality: '480', 
       youtubeVideoCodec: 'h264',
-      audioBitrate: '0',
+      downloadMode: 'mute',
     },
     // Config 3: H264 720p with audio (may return tunnel URL)
     { 
