@@ -1150,8 +1150,8 @@ serve(async (req) => {
         return new Response(
           JSON.stringify({
             streams: [{
-              name: streamName,
-              title: streamTitle,
+              name: streamTitle,
+              title: streamName,
               url: result.previewUrl
             }]
           }),
