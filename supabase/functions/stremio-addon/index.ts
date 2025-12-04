@@ -438,33 +438,35 @@ async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | nul
   // - No Content-Disposition: attachment
   // - Direct streamable URLs (googlevideo.com CDN)
   
+  // Request configs - prioritize iOS-compatible formats
+  // iOS requires: MP4 container + H.264 video + AAC audio
+  // audioBitrate: '0' = video-only stream (avoids tunnel muxing, gives direct URLs)
   const requestConfigs = [
-    // Config 1: H264 720p - most iOS compatible
+    // Config 1: H264 720p video-only (most reliable - direct URL)
     { 
+      url: youtubeUrl,
       videoQuality: '720', 
-      youtubeVideoCodec: 'h264',  // Forces MP4/H264 (no VP9/AV1/WebM)
-      audioFormat: 'mp3',         // AAC-compatible audio
-      downloadMode: 'auto',
-      filenameStyle: 'basic',
-      disableMetadata: true,
+      youtubeVideoCodec: 'h264',
+      audioBitrate: '0',
     },
-    // Config 2: H264 480p fallback
+    // Config 2: H264 480p video-only  
     { 
+      url: youtubeUrl,
       videoQuality: '480', 
       youtubeVideoCodec: 'h264',
-      audioFormat: 'mp3',
-      downloadMode: 'auto',
-      filenameStyle: 'basic',
-      disableMetadata: true,
+      audioBitrate: '0',
     },
-    // Config 3: H264 360p last resort
+    // Config 3: H264 720p with audio (may return tunnel URL)
     { 
-      videoQuality: '360', 
+      url: youtubeUrl,
+      videoQuality: '720', 
       youtubeVideoCodec: 'h264',
-      audioFormat: 'mp3',
-      downloadMode: 'auto',
-      filenameStyle: 'basic',
-      disableMetadata: true,
+    },
+    // Config 4: H264 480p with audio
+    { 
+      url: youtubeUrl,
+      videoQuality: '480', 
+      youtubeVideoCodec: 'h264',
     },
   ];
   
