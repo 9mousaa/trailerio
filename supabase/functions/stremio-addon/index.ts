@@ -645,29 +645,36 @@ async function resolvePreview(imdbId: string, type: string, supabase: any): Prom
     const daysSinceCheck = (Date.now() - lastChecked.getTime()) / (1000 * 60 * 60 * 24);
     
     if (daysSinceCheck < CACHE_DAYS) {
-      // Check for YouTube cache first (youtube_key without preview_url)
+      // YouTube cache: has youtube_key but no preview_url (we don't cache URLs, they expire)
+      // Resolve fresh each time using the cached key
       if (cached.youtube_key && !cached.preview_url) {
-        console.log('Cache hit: returning cached YouTube trailer');
-        return {
-          found: true,
-          source: 'youtube',
-          youtubeKey: cached.youtube_key,
-          country: 'yt'
-        };
+        console.log(`Cache hit: YouTube key ${cached.youtube_key}, resolving fresh URL...`);
+        const freshUrl = await extractYouTubeDirectUrl(cached.youtube_key);
+        if (freshUrl) {
+          return {
+            found: true,
+            source: 'youtube',
+            previewUrl: freshUrl,
+            youtubeKey: cached.youtube_key,
+            country: 'yt'
+          };
+        }
+        // If extraction failed, continue to try full resolution
+        console.log('Fresh YouTube extraction failed, continuing...');
       }
+      // iTunes cache: has preview_url (these don't expire)
       if (cached.preview_url) {
-        console.log('Cache hit: returning cached preview');
-        // Determine source from country
-        const isYouTube = cached.country === 'yt' || cached.youtube_key;
+        console.log('Cache hit: returning cached iTunes preview');
         return {
           found: true,
-          source: isYouTube ? 'youtube' : 'itunes',
+          source: 'itunes',
           previewUrl: cached.preview_url,
           trackId: cached.track_id,
-          country: cached.country,
-          youtubeKey: cached.youtube_key
+          country: cached.country
         };
-      } else if (!cached.youtube_key) {
+      } 
+      // Negative cache: no youtube_key and no preview_url
+      if (!cached.youtube_key) {
         console.log('Cache hit: negative cache (no preview found previously)');
         return { found: false };
       }
@@ -707,19 +714,20 @@ async function resolvePreview(imdbId: string, type: string, supabase: any): Prom
     const youtubeDirectUrl = await extractYouTubeDirectUrl(tmdbMeta.youtubeTrailerKey);
     
     if (youtubeDirectUrl) {
-      // Cache YouTube result with direct URL
+      // Cache only the youtube_key, NOT the URL (tunnel URLs expire quickly)
+      // Next time we'll resolve fresh using the cached key
       await supabase
         .from('itunes_mappings')
         .upsert({
           imdb_id: imdbId,
           track_id: null,
-          preview_url: youtubeDirectUrl,
+          preview_url: null, // Don't cache the URL - it expires
           country: 'yt',
           youtube_key: tmdbMeta.youtubeTrailerKey,
           last_checked: new Date().toISOString()
         }, { onConflict: 'imdb_id' });
       
-      console.log(`✓ Got YouTube direct URL`);
+      console.log(`✓ Got YouTube direct URL (not caching URL, only key)`);
       return {
         found: true,
         source: 'youtube',
