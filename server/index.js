@@ -544,6 +544,23 @@ async function resolvePreview(imdbId, type) {
         country: 'yt'
       };
     }
+    
+    // If YouTube extraction failed (bot detection), fallback to iTunes
+    console.log('\n========== YouTube extraction failed, trying iTunes fallback ==========');
+    const itunesResult = await multiPassSearch(tmdbMeta);
+    console.log(`iTunes search result: ${itunesResult.found ? 'FOUND' : 'NOT FOUND'}`);
+    
+    if (itunesResult.found) {
+      setCache(imdbId, {
+        track_id: itunesResult.trackId,
+        preview_url: itunesResult.previewUrl,
+        country: itunesResult.country || 'us',
+        youtube_key: tmdbMeta.youtubeTrailerKey // Keep the key for future retries
+      });
+      
+      console.log(`✓ Found iTunes preview: ${itunesResult.previewUrl}`);
+      return { ...itunesResult, source: 'itunes' };
+    }
   }
   
   if (!tmdbMeta.youtubeTrailerKey) {
