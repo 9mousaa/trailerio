@@ -1011,7 +1011,7 @@ serve(async (req) => {
       );
     }
     
-    // Video proxy endpoint to bypass CORS for tunnel URLs
+    // Video proxy endpoint to bypass CORS for tunnel URLs with Range request support
     if (path.startsWith('/proxy-video')) {
       const videoUrl = url.searchParams.get('url');
       if (!videoUrl) {
@@ -1024,17 +1024,25 @@ serve(async (req) => {
       console.log(`Proxying video: ${videoUrl.substring(0, 100)}...`);
       
       try {
-        const videoResponse = await fetch(videoUrl, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': 'https://www.youtube.com/',
-            'Origin': 'https://www.youtube.com',
-          }
-        });
+        // Build headers for upstream request, forwarding Range if present
+        const rangeHeader = req.headers.get('Range');
+        const fetchHeaders: Record<string, string> = {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': '*/*',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Referer': 'https://www.youtube.com/',
+          'Origin': 'https://www.youtube.com',
+        };
         
-        if (!videoResponse.ok) {
+        if (rangeHeader) {
+          fetchHeaders['Range'] = rangeHeader;
+          console.log(`  Range request: ${rangeHeader}`);
+        }
+        
+        const videoResponse = await fetch(videoUrl, { headers: fetchHeaders });
+        
+        // Handle both 200 (full content) and 206 (partial content) as success
+        if (!videoResponse.ok && videoResponse.status !== 206) {
           console.log(`Proxy fetch failed: HTTP ${videoResponse.status}`);
           return new Response(
             JSON.stringify({ error: `Upstream returned ${videoResponse.status}` }),
@@ -1044,10 +1052,12 @@ serve(async (req) => {
         
         const contentType = videoResponse.headers.get('Content-Type') || 'video/mp4';
         const contentLength = videoResponse.headers.get('Content-Length');
+        const contentRange = videoResponse.headers.get('Content-Range');
         
         const responseHeaders: Record<string, string> = {
           ...corsHeaders,
           'Content-Type': contentType,
+          'Accept-Ranges': 'bytes',
           'Cache-Control': 'public, max-age=3600',
         };
         
@@ -1055,10 +1065,18 @@ serve(async (req) => {
           responseHeaders['Content-Length'] = contentLength;
         }
         
-        console.log(`✓ Proxying video, type: ${contentType}, size: ${contentLength || 'unknown'}`);
+        // Forward Content-Range for partial content responses
+        if (contentRange) {
+          responseHeaders['Content-Range'] = contentRange;
+        }
+        
+        // Use 206 status if we got partial content, otherwise 200
+        const responseStatus = videoResponse.status === 206 ? 206 : 200;
+        
+        console.log(`✓ Proxying video, status: ${responseStatus}, type: ${contentType}, size: ${contentLength || 'chunked'}, range: ${contentRange || 'none'}`);
         
         return new Response(videoResponse.body, {
-          status: 200,
+          status: responseStatus,
           headers: responseHeaders
         });
       } catch (e) {
