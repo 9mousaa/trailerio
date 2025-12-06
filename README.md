@@ -1,73 +1,221 @@
-# Welcome to your Lovable project
+# Trailer Preview - Stremio Add-on
 
-## Project info
+A React application for watching trailers and previews directly in Stremio. Automatically finds matching trailers using TMDB metadata.
 
-**URL**: https://lovable.dev/projects/8d44fbd7-e3c3-4c23-9d78-18a798a0a50b
+## Technologies
 
-## How can I edit this code?
+- **Vite** - Build tool and dev server
+- **TypeScript** - Type safety
+- **React** - UI framework
+- **shadcn-ui** - UI components
+- **Tailwind CSS** - Styling
+- **Supabase** - Backend services
 
-There are several ways of editing your application.
+## Local Development
 
-**Use Lovable**
+### Prerequisites
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/8d44fbd7-e3c3-4c23-9d78-18a798a0a50b) and start prompting.
+- Node.js 20+ and npm (or use [nvm](https://github.com/nvm-sh/nvm#installing-and-updating))
 
-Changes made via Lovable will be committed automatically to this repo.
-
-**Use your preferred IDE**
-
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
-
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
-
-Follow these steps:
+### Setup
 
 ```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
+# Install dependencies
+npm install
 
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
+# Start development server
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+The application will be available at `http://localhost:8080`
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+## Deployment to DigitalOcean VPS
 
-**Use GitHub Codespaces**
+### Quick Setup (Recommended)
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+If you have an existing VPS with multiple apps (like plaio.cc), use the automated setup script:
 
-## What technologies are used for this project?
+1. **SSH into your VPS:**
+   ```bash
+   ssh root@your-vps-ip
+   ```
 
-This project is built with:
+2. **Check your current setup (optional):**
+   ```bash
+   # Upload check-vps-setup.sh to your VPS first, then:
+   chmod +x check-vps-setup.sh
+   ./check-vps-setup.sh
+   ```
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+3. **Run the automated setup:**
+   ```bash
+   # Upload setup-vps.sh to your VPS, then:
+   chmod +x setup-vps.sh
+   sudo ./setup-vps.sh
+   ```
 
-## How can I deploy this project?
+   The script will:
+   - Install Docker if needed
+   - Clone/update the repository
+   - Build and start the container
+   - Help configure Nginx (subdomain or path-based)
 
-Simply open [Lovable](https://lovable.dev/projects/8d44fbd7-e3c3-4c23-9d78-18a798a0a50b) and click on Share -> Publish.
+### Manual Deployment
 
-## Can I connect a custom domain to my Lovable project?
+#### Prerequisites on VPS
 
-Yes, you can!
+- Docker and Docker Compose installed
+- Git installed
+- Nginx (if you want reverse proxy)
 
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
+#### Deployment Steps
 
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+1. **SSH into your VPS:**
+   ```bash
+   ssh root@your-vps-ip
+   ```
+
+2. **Install Docker (if not already installed):**
+   ```bash
+   # For Ubuntu/Debian
+   curl -fsSL https://get.docker.com -o get-docker.sh
+   sh get-docker.sh
+   
+   # Install Docker Compose
+   apt-get install docker-compose-plugin -y
+   ```
+
+3. **Clone your repository:**
+   ```bash
+   cd /opt
+   git clone <your-repo-url> trailerio
+   cd trailerio
+   ```
+
+4. **Build and run with Docker Compose:**
+   ```bash
+   docker compose up -d --build
+   ```
+
+   The app will run on port **8081** (to avoid conflicts with existing nginx on port 80).
+
+5. **Verify the deployment:**
+   ```bash
+   # Check if container is running
+   docker ps
+   
+   # Check logs
+   docker compose logs -f
+   ```
+
+### Nginx Configuration Options
+
+Since you have multiple apps on plaio.cc, choose one of these options:
+
+#### Option 1: Subdomain Setup (trailerio.plaio.cc)
+
+1. **Create Nginx config:**
+   ```bash
+   cp nginx-subdomain.conf /etc/nginx/sites-available/trailerio
+   # Edit the file to change server_name if needed
+   nano /etc/nginx/sites-available/trailerio
+   ```
+
+2. **Enable the site:**
+   ```bash
+   ln -s /etc/nginx/sites-available/trailerio /etc/nginx/sites-enabled/
+   nginx -t
+   systemctl reload nginx
+   ```
+
+3. **Set up SSL:**
+   ```bash
+   certbot --nginx -d trailerio.plaio.cc
+   ```
+
+#### Option 2: Path-based Setup (plaio.cc/trailerio)
+
+1. **Edit your existing plaio.cc nginx config:**
+   ```bash
+   nano /etc/nginx/sites-available/plaio.cc  # or your main config
+   ```
+
+2. **Add the location block from `nginx-path.conf`** to your existing server block
+
+3. **Reload Nginx:**
+   ```bash
+   nginx -t
+   systemctl reload nginx
+   ```
+
+**Note:** For path-based routing, you may need to configure Vite's base path. See "Path-based Routing" section below.
+
+### Path-based Routing (if using /trailerio path)
+
+If you're using path-based routing (plaio.cc/trailerio), you need to configure Vite's base path:
+
+1. **Update `vite.config.ts`:**
+   ```typescript
+   export default defineConfig({
+     base: '/trailerio/',  // Add this line
+     // ... rest of config
+   });
+   ```
+
+2. **Update `src/App.tsx` to use HashRouter or configure BrowserRouter with basename:**
+   ```typescript
+   <BrowserRouter basename="/trailerio">
+     {/* ... */}
+   </BrowserRouter>
+   ```
+
+3. **Rebuild:**
+   ```bash
+   docker compose up -d --build
+   ```
+
+### Updating the Application
+
+```bash
+cd /opt/trailerio  # or wherever you installed it
+git pull
+docker compose up -d --build
+```
+
+### Environment Variables
+
+If you need to set environment variables, create a `.env` file in the project root and update `docker-compose.yml` to include it:
+
+```yaml
+services:
+  web:
+    # ... existing config ...
+    env_file:
+      - .env
+```
+
+### Troubleshooting
+
+- **Check container logs:** `docker compose logs -f`
+- **Restart container:** `docker compose restart`
+- **Rebuild container:** `docker compose up -d --build`
+- **Check if port 80 is available:** `netstat -tulpn | grep :80`
+
+## Project Structure
+
+```
+trailerio/
+├── src/              # Source code
+├── public/           # Static assets
+├── supabase/         # Supabase functions and migrations
+├── Dockerfile        # Docker build configuration
+├── docker-compose.yml # Docker Compose configuration
+└── nginx.conf        # Nginx configuration for production
+```
+
+## Build Commands
+
+- `npm run dev` - Start development server
+- `npm run build` - Build for production
+- `npm run preview` - Preview production build locally
+- `npm run lint` - Run ESLint

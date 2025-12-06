@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+    labels:
+      # Traefik configuration
+      - "traefik.enable=true"
+      - "traefik.http.routers.trailerio.rule=Host(`trailerio.plaio.cc`)"
+      - "traefik.http.routers.trailerio.entrypoints=web"
+      - "traefik.http.routers.trailerio.entrypoints=websecure"
+      - "traefik.http.routers.trailerio.tls.certresolver=letsencrypt"
+      - "traefik.http.services.trailerio.loadbalancer.server.port=80"
+    networks:
+      - plaio_default  # Connect to Traefik network
+
+networks:
+  plaio_default:
+    external: true  # Use existing Traefik network
+
