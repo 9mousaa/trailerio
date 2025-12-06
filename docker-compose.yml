@@ -30,6 +30,9 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.trailerio.rule=Host(`trailerio.your-domain.com`)"
       - "traefik.http.routers.trailerio.entrypoints=websecure"
+      # TLS certificate resolver - update name if your Traefik uses different resolver
+      # Common names: letsencrypt, acme, le
+      # Remove the line below if Traefik doesn't have a cert resolver configured
       - "traefik.http.routers.trailerio.tls.certresolver=letsencrypt"
       - "traefik.http.services.trailerio.loadbalancer.server.port=80"
       # HTTP to HTTPS redirect
