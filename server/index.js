@@ -356,10 +356,14 @@ async function extractViaYtDlp(youtubeKey) {
   
   try {
     // Format priority: 4K > 1440p > 1080p > 720p > best (MP4 preferred)
+    // Added user-agent and referer to reduce bot detection
     const formatString = 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160][ext=mp4]+bestaudio/bestvideo[height<=2160]+bestaudio/bestvideo[height<=1440]+bestaudio/bestvideo[height<=1080]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=2160][ext=mp4]/best[height<=1080][ext=mp4]/best[ext=mp4]/best';
     
+    const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+    const referer = 'https://www.youtube.com/';
+    
     const { stdout } = await Promise.race([
-      execAsync(`yt-dlp -f "${formatString}" -g --no-warnings --no-playlist --no-check-certificate "${youtubeUrl}"`, {
+      execAsync(`yt-dlp -f "${formatString}" -g --no-warnings --no-playlist --no-check-certificate --user-agent "${userAgent}" --referer "${referer}" "${youtubeUrl}"`, {
         timeout: YT_DLP_TIMEOUT
       }),
       new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), YT_DLP_TIMEOUT))
