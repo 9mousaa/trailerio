@@ -405,10 +405,14 @@ const PIPED_INSTANCES = [
 
 // Cobalt instances (PRIMARY) - muxed audio+video with iOS-compatible codecs
 const COBALT_INSTANCES = [
+  'https://capi.3kh0.net',             // Has YouTube support enabled
+  'https://cobalt.api.timelessnesses.me',
   'https://cobalt-backend.canine.tools',
   'https://cobalt-api.kwiatekmiki.com',
   'https://cobalt-api.meowing.de',
   'https://nuko-c.meowing.de',
+  'https://dl.khyernet.xyz',
+  'https://cobalt.lostdusty.dev',
 ];
 
 // ============ INVIDIOUS EXTRACTOR ============
@@ -680,7 +684,8 @@ async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
       clearTimeout(timeout);
       
       if (!response.ok) {
-        console.log(`  Cobalt ${instance}: HTTP ${response.status}`);
+        const errorBody = await response.text().catch(() => 'no body');
+        console.log(`  Cobalt ${instance}: HTTP ${response.status} - ${errorBody.substring(0, 100)}`);
         return null;
       }
       
@@ -1006,6 +1011,65 @@ serve(async (req) => {
       );
     }
     
+    // Video proxy endpoint to bypass CORS for tunnel URLs
+    if (path.startsWith('/proxy-video')) {
+      const videoUrl = url.searchParams.get('url');
+      if (!videoUrl) {
+        return new Response(
+          JSON.stringify({ error: 'Missing url parameter' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+      
+      console.log(`Proxying video: ${videoUrl.substring(0, 100)}...`);
+      
+      try {
+        const videoResponse = await fetch(videoUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://www.youtube.com/',
+            'Origin': 'https://www.youtube.com',
+          }
+        });
+        
+        if (!videoResponse.ok) {
+          console.log(`Proxy fetch failed: HTTP ${videoResponse.status}`);
+          return new Response(
+            JSON.stringify({ error: `Upstream returned ${videoResponse.status}` }),
+            { status: videoResponse.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          );
+        }
+        
+        const contentType = videoResponse.headers.get('Content-Type') || 'video/mp4';
+        const contentLength = videoResponse.headers.get('Content-Length');
+        
+        const responseHeaders: Record<string, string> = {
+          ...corsHeaders,
+          'Content-Type': contentType,
+          'Cache-Control': 'public, max-age=3600',
+        };
+        
+        if (contentLength) {
+          responseHeaders['Content-Length'] = contentLength;
+        }
+        
+        console.log(`✓ Proxying video, type: ${contentType}, size: ${contentLength || 'unknown'}`);
+        
+        return new Response(videoResponse.body, {
+          status: 200,
+          headers: responseHeaders
+        });
+      } catch (e) {
+        console.error('Proxy error:', e);
+        return new Response(
+          JSON.stringify({ error: 'Failed to proxy video' }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+    }
+    
     if (path === '/manifest.json' || path === '/' || path === '') {
       return new Response(
         JSON.stringify(MANIFEST),
@@ -1038,12 +1102,23 @@ serve(async (req) => {
           ? 'Official Trailer' 
           : `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`;
         
+        // For YouTube URLs that might be tunnel URLs (not direct googlevideo.com),
+        // wrap them in our proxy to bypass CORS issues
+        let finalUrl = result.previewUrl;
+        if (isYouTube && !result.previewUrl.includes('googlevideo.com') && !result.previewUrl.includes('video-ssl.itunes.apple.com')) {
+          // This is likely a tunnel URL - wrap it in our proxy
+          const baseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+          const proxyPath = `/functions/v1/stremio-addon/proxy-video?url=${encodeURIComponent(result.previewUrl)}`;
+          finalUrl = `${baseUrl}${proxyPath}`;
+          console.log(`Wrapping tunnel URL in proxy: ${finalUrl.substring(0, 80)}...`);
+        }
+        
         return new Response(
           JSON.stringify({
             streams: [{
               name: streamName,
               title: streamTitle,
-              url: result.previewUrl
+              url: finalUrl
             }]
           }),
           { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
