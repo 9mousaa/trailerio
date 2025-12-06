@@ -606,35 +606,46 @@ async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
   
   // Three muxing strategies for iOS compatibility
   // CRITICAL: downloadMode: 'auto' ensures video + audio are muxed together
+  // videoQuality must be a specific resolution (not 'max') - using 2160 for 4K
   const requestConfigs = [
-    // Strategy 1: H.264 for maximum iOS/Safari compatibility (muxed video+audio)
+    // Strategy 1: H.264 4K for maximum iOS/Safari compatibility (muxed video+audio)
     { 
       url: youtubeUrl, 
-      videoQuality: 'max',           // Request 4K if available
+      videoQuality: '2160',          // 4K resolution
       youtubeVideoCodec: 'h264',     // H.264/MP4 for iOS compatibility
       downloadMode: 'auto',          // CRITICAL: mux video + audio together
       audioFormat: 'best',           // Keep best audio format
-      codec: 'h264'                  // For logging
+      codec: 'h264-4k'               // For logging
     },
     
-    // Strategy 2: VP9 for higher quality + HDR support (muxed)
+    // Strategy 2: H.264 1080p fallback for iOS compatibility
     { 
       url: youtubeUrl, 
-      videoQuality: 'max',
+      videoQuality: '1080',          // 1080p fallback
+      youtubeVideoCodec: 'h264',     // H.264/MP4 for iOS compatibility
+      downloadMode: 'auto',
+      audioFormat: 'best',
+      codec: 'h264-1080p'
+    },
+    
+    // Strategy 3: VP9 4K for higher quality + HDR support (muxed)
+    { 
+      url: youtubeUrl, 
+      videoQuality: '2160',
       youtubeVideoCodec: 'vp9',      // VP9/WebM for 4K/HDR
       downloadMode: 'auto',
       audioFormat: 'best',
-      codec: 'vp9'
+      codec: 'vp9-4k'
     },
     
-    // Strategy 3: AV1 for best efficiency (muxed)
+    // Strategy 4: AV1 4K for best efficiency (muxed)
     { 
       url: youtubeUrl, 
-      videoQuality: 'max',
+      videoQuality: '2160',
       youtubeVideoCodec: 'av1',      // AV1/WebM for best quality
       downloadMode: 'auto',
       audioFormat: 'best',
-      codec: 'av1'
+      codec: 'av1-4k'
     },
   ];
   
