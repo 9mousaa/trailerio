@@ -295,15 +295,20 @@ async function extractViaPiped(youtubeKey) {
 async function extractYouTubeDirectUrl(youtubeKey) {
   console.log(`\nExtracting YouTube URL for key: ${youtubeKey}`);
   
-  // 1. Try Piped FIRST (most stable - returns proxied URLs that don't expire)
-  const pipedUrl = await extractViaPiped(youtubeKey);
-  if (pipedUrl) {
-    console.log('✓ Got YouTube URL from Piped (stable proxied)');
-    return pipedUrl;
+  try {
+    // 1. Try Piped FIRST (most stable - returns proxied URLs that don't expire)
+    console.log('Step 1: Trying Piped...');
+    const pipedUrl = await extractViaPiped(youtubeKey);
+    if (pipedUrl) {
+      console.log('✓ Got YouTube URL from Piped (stable proxied)');
+      return pipedUrl;
+    }
+    console.log('Piped extraction failed, trying Invidious...');
+  } catch (e) {
+    console.error(`Piped extraction error: ${e.message || e}`);
   }
   
   // 2. Try Invidious (googlevideo URLs)
-  console.log(`Trying ${invidiousInstances.length} Invidious instances as fallback for key: ${youtubeKey}`);
   const invidiousInstances = [
     'https://invidious.fdn.fr',
     'https://invidious.flokinet.to',
@@ -377,12 +382,18 @@ async function extractYouTubeDirectUrl(youtubeKey) {
     }
   };
   
-  const invidiousResults = await Promise.all(invidiousInstances.map(tryInvidious));
-  const invidiousUrl = invidiousResults.find(r => r !== null);
-  
-  if (invidiousUrl) {
-    console.log('✓ Got YouTube URL from Invidious');
-    return invidiousUrl;
+  try {
+    console.log(`Step 2: Trying ${invidiousInstances.length} Invidious instances...`);
+    const invidiousResults = await Promise.all(invidiousInstances.map(tryInvidious));
+    const invidiousUrl = invidiousResults.find(r => r !== null);
+    
+    if (invidiousUrl) {
+      console.log('✓ Got YouTube URL from Invidious');
+      return invidiousUrl;
+    }
+    console.log('Invidious extraction failed');
+  } catch (e) {
+    console.error(`Invidious extraction error: ${e.message || e}`);
   }
   
   console.log('No YouTube URL found from any extractor');
