@@ -123,23 +123,59 @@ async function getTMDBMetadata(imdbId, type) {
   let youtubeTrailerKey = null;
   const videos = detail.videos?.results || [];
   
-  const trailerPriority = ['Trailer', 'Teaser', 'Clip'];
-  for (const priority of trailerPriority) {
-    const trailer = videos.find(v => 
-      v.site === 'YouTube' && 
-      v.type === priority && 
+  // Priority: Official Trailer > Official Teaser > Any Trailer > Official Clip > Any YouTube video
+  // Filter out behind-the-scenes, featurettes, etc.
+  const excludeTypes = ['Behind the Scenes', 'Featurette', 'Bloopers', 'Opening Credits'];
+  const excludeNames = ['behind', 'featurette', 'bloopers', 'opening', 'credits', 'making of'];
+  
+  const filteredVideos = videos.filter(v => {
+    if (v.site !== 'YouTube') return false;
+    const name = (v.name || '').toLowerCase();
+    return !excludeTypes.includes(v.type) && 
+           !excludeNames.some(exclude => name.includes(exclude));
+  });
+  
+  // Priority 1: Official Trailer
+  let trailer = filteredVideos.find(v => 
+    v.type === 'Trailer' && 
+    v.official === true
+  );
+  if (trailer) {
+    youtubeTrailerKey = trailer.key;
+    console.log(`Found official trailer: ${trailer.name || 'Trailer'}`);
+  } else {
+    // Priority 2: Official Teaser
+    trailer = filteredVideos.find(v => 
+      v.type === 'Teaser' && 
       v.official === true
     );
     if (trailer) {
       youtubeTrailerKey = trailer.key;
-      break;
-    }
-  }
-  
-  if (!youtubeTrailerKey) {
-    const anyYouTube = videos.find(v => v.site === 'YouTube');
-    if (anyYouTube) {
-      youtubeTrailerKey = anyYouTube.key;
+      console.log(`Found official teaser: ${trailer.name || 'Teaser'}`);
+    } else {
+      // Priority 3: Any Trailer (not official)
+      trailer = filteredVideos.find(v => v.type === 'Trailer');
+      if (trailer) {
+        youtubeTrailerKey = trailer.key;
+        console.log(`Found trailer: ${trailer.name || 'Trailer'}`);
+      } else {
+        // Priority 4: Official Clip
+        trailer = filteredVideos.find(v => 
+          v.type === 'Clip' && 
+          v.official === true
+        );
+        if (trailer) {
+          youtubeTrailerKey = trailer.key;
+          console.log(`Found official clip: ${trailer.name || 'Clip'}`);
+        } else {
+          // Last resort: Any YouTube video (but prefer official)
+          trailer = filteredVideos.find(v => v.official === true) || filteredVideos[0];
+          if (trailer) {
+            youtubeTrailerKey = trailer.key;
+            console.log(`Found YouTube video: ${trailer.name || 'Video'} (${trailer.type})`);
+          }
+        }
+      }
     }
   }
   
@@ -692,40 +728,43 @@ async function extractViaYtDlp(youtubeKey) {
   console.log(`Trying yt-dlp directly for ${youtubeKey}...`);
   
   try {
-    // Try highest quality first (1080p or best available)
-    // Format: bestvideo[height<=1080]+bestaudio/best[height<=1080] for combined stream
-    // Fallback to just best if combined not available
+    // Try highest quality formats first - prioritize combined streams (video+audio)
+    // Format priority: 4K > 1440p > 1080p > 720p, prefer MP4 container
     const formats = [
+      'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160][ext=mp4]', // 4K MP4
+      'bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/best[height<=1440][ext=mp4]', // 1440p MP4
       'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]', // 1080p MP4
-      'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]',   // 720p MP4
+      'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]',  // 720p MP4
+      'best[height<=2160]',  // Best quality up to 4K (any format)
       'best[height<=1080]',  // Best quality up to 1080p
       'best',                 // Best available
     ];
     
-    for (const format of formats) {
+    // Try all formats in parallel for speed, return first success
+    const formatPromises = formats.map(async (format) => {
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 10000); // 10s timeout
-        
-        const { stdout, stderr } = await Promise.race([
-          execAsync(`yt-dlp -f "${format}" -g --no-warnings "${youtubeUrl}"`, {
-            signal: controller.signal,
-            timeout: 10000
+        const { stdout } = await Promise.race([
+          execAsync(`yt-dlp -f "${format}" -g --no-warnings --no-playlist "${youtubeUrl}"`, {
+            timeout: 8000 // Reduced timeout for speed
           }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10000))
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 8000))
         ]);
-        
-        clearTimeout(timeout);
         
         const url = stdout.trim();
         if (url && url.startsWith('http')) {
           console.log(`  ✓ yt-dlp: got URL (format: ${format})`);
-          return url;
+          return { url, format };
         }
       } catch (e) {
-        // Try next format
-        continue;
+        return null;
       }
+    });
+    
+    const results = await Promise.all(formatPromises);
+    const success = results.find(r => r !== null);
+    
+    if (success) {
+      return success.url;
     }
     
     console.log(`  yt-dlp: failed to extract URL`);
