@@ -741,43 +741,36 @@ async function extractViaPiped(youtubeKey: string): Promise<string | null> {
       if (!response.ok) return null;
       const data = await response.json();
       
-      // Quality priority: highest first
-      const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
-      const getQualityRank = (q: string | undefined): number => {
-        if (!q) return 999;
-        const idx = qualityPriority.findIndex(p => q.includes(p));
-        return idx === -1 ? 998 : idx;
-      };
+      // PRIORITY 1: Use DASH manifest if available (adaptive streaming with high quality + audio)
+      if (data.dash) {
+        console.log(`  ✓ Piped ${instance}: got DASH manifest (adaptive quality + audio)`);
+        return data.dash;
+      }
       
+      // PRIORITY 2: Fall back to individual streams
       if (data.videoStreams?.length > 0) {
-        // Sort all streams by quality (highest first)
+        // Quality priority: highest first
+        const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
+        const getQualityRank = (q: string | undefined): number => {
+          if (!q) return 999;
+          const idx = qualityPriority.findIndex(p => q.includes(p));
+          return idx === -1 ? 998 : idx;
+        };
+        
+        // Sort streams by quality (highest first)
         const sorted = [...data.videoStreams]
           .filter((s: any) => s.mimeType?.startsWith('video/') && s.url)
           .sort((a: any, b: any) => getQualityRank(a.quality) - getQualityRank(b.quality));
         
-        // Get best combined (video+audio) stream
+        // Prefer combined streams (have audio) for guaranteed playback
         const bestCombined = sorted.find((s: any) => !s.videoOnly);
-        const bestVideoOnly = sorted.find((s: any) => s.videoOnly);
-        
-        // Choose highest quality: prefer video-only if significantly better
-        // Combined 360p = rank 5, Video-only 1080p = rank 2 -> prefer video-only
-        const combinedRank = bestCombined ? getQualityRank(bestCombined.quality) : 999;
-        const videoOnlyRank = bestVideoOnly ? getQualityRank(bestVideoOnly.quality) : 999;
-        
-        // Use video-only if it's at least 2 quality levels better (e.g., 1080p vs 360p)
-        // Stremio handles video-only streams fine
-        if (bestVideoOnly && videoOnlyRank < combinedRank - 1) {
-          console.log(`  ✓ Piped ${instance}: got ${bestVideoOnly.quality || 'unknown'} (video-only, higher quality)`);
-          return bestVideoOnly.url;
-        }
-        
-        // Otherwise prefer combined for guaranteed audio
         if (bestCombined?.url) {
           console.log(`  ✓ Piped ${instance}: got ${bestCombined.quality || 'unknown'} (combined)`);
           return bestCombined.url;
         }
         
-        // Last resort: any video stream
+        // Last resort: video-only stream (may not have audio)
+        const bestVideoOnly = sorted.find((s: any) => s.videoOnly);
         if (bestVideoOnly?.url) {
           console.log(`  ✓ Piped ${instance}: got ${bestVideoOnly.quality || 'unknown'} (video-only)`);
           return bestVideoOnly.url;
