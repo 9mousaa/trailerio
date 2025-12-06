@@ -667,18 +667,17 @@ async function extractViaPiped(youtubeKey) {
             return rankA - rankB;
           });
         
-        // Find best quality available (sorted[0] is highest quality)
-        const bestQuality = sorted[0]?.quality;
-        
-        // Prefer combined streams (video + audio) of the best quality
-        const bestCombinedStreams = sorted.filter(s => !s.videoOnly && s.quality === bestQuality);
-        if (bestCombinedStreams.length > 0) {
-          const best = bestCombinedStreams[0];
-          console.log(`  ✓ [Piped] ${instance}: selected ${best.quality || 'unknown'} (combined)`);
+        // PRIORITY: Prefer ANY combined stream (even lower quality) over video-only + muxing
+        // Combined streams work directly in AVPlayer, muxed streams are unreliable
+        const allCombinedStreams = sorted.filter(s => !s.videoOnly);
+        if (allCombinedStreams.length > 0) {
+          // Get highest quality combined stream
+          const best = allCombinedStreams[0];
+          console.log(`  ✓ [Piped] ${instance}: selected ${best.quality || 'unknown'} (combined, AVPlayer compatible)`);
           return { url: best.url, quality: best.quality, isDash: false };
         }
         
-        // If only video-only available, try to find matching audio stream for muxing
+        // Only use muxing as last resort if NO combined streams available
         if (sorted.length > 0) {
           const bestVideo = sorted[0];
           // Check if there's a matching audio stream we can mux
@@ -694,7 +693,7 @@ async function extractViaPiped(youtubeKey) {
               })[0];
             
             if (bestAudio) {
-              console.log(`  ✓ [Piped] ${instance}: selected ${bestVideo.quality || 'unknown'} (video-only) + audio (will mux)`);
+              console.log(`  ⚠️ [Piped] ${instance}: selected ${bestVideo.quality || 'unknown'} (video-only) + audio (will mux, last resort)`);
               return { 
                 url: bestVideo.url, 
                 audioUrl: bestAudio.url,
@@ -1289,6 +1288,7 @@ app.options('/proxy-video', (req, res) => {
 });
 
 // Mux video + audio endpoint (minimal server effort - streams directly with ffmpeg)
+// NOTE: This is a last resort - combined streams are preferred for AVPlayer compatibility
 app.get('/mux-video', async (req, res) => {
   const videoUrl = req.query.video;
   const audioUrl = req.query.audio;
@@ -1299,16 +1299,29 @@ app.get('/mux-video', async (req, res) => {
   
   console.log(`Muxing video+audio: ${videoUrl.substring(0, 60)}... + ${audioUrl.substring(0, 60)}...`);
   
+  // Set timeout to prevent blocking (30 seconds max)
+  const MUX_TIMEOUT = 30000;
+  let timeoutFired = false;
+  const timeout = setTimeout(() => {
+    timeoutFired = true;
+    console.log(`  ⚠️ [mux] Timeout after ${MUX_TIMEOUT / 1000}s`);
+    if (!res.headersSent) {
+      res.status(504).json({ error: 'Muxing timeout' });
+    }
+  }, MUX_TIMEOUT);
+  
   try {
     // Use ffmpeg to mux video and audio streams on-the-fly
-    // Minimal effort: stream directly without saving to disk
+    // AVPlayer compatible: use faststart to put moov atom at beginning (required for seeking)
     const ffmpegArgs = [
       '-i', videoUrl,           // Video input (can be URL)
       '-i', audioUrl,           // Audio input (can be URL)
       '-c:v', 'copy',           // Copy video codec (no re-encoding = fast)
       '-c:a', 'aac',            // Encode audio to AAC (AVPlayer compatible)
+      '-b:a', '128k',           // Audio bitrate (AVPlayer compatible)
       '-f', 'mp4',              // Output format
-      '-movflags', 'frag_keyframe+empty_moov', // Streaming-friendly
+      '-movflags', 'faststart', // Put moov atom at beginning (AVPlayer requirement)
+      '-preset', 'ultrafast',   // Fast encoding
       '-',                      // Output to stdout
     ];
     
@@ -1327,6 +1340,12 @@ app.get('/mux-video', async (req, res) => {
       stdio: ['ignore', 'pipe', 'pipe'] // stdin: ignore, stdout: pipe, stderr: pipe
     });
     
+    // Handle timeout
+    if (timeoutFired) {
+      ffmpeg.kill('SIGTERM');
+      return;
+    }
+    
     // Pipe ffmpeg output directly to response
     ffmpeg.stdout.pipe(res);
     
@@ -1341,6 +1360,9 @@ app.get('/mux-video', async (req, res) => {
     
     // Handle process exit
     ffmpeg.on('close', (code) => {
+      clearTimeout(timeout);
+      if (timeoutFired) return; // Already handled by timeout
+      
       if (code !== 0 && !res.headersSent) {
         console.error(`  ✗ [ffmpeg] Process exited with code ${code}`);
         if (!res.headersSent) {
@@ -1353,10 +1375,12 @@ app.get('/mux-video', async (req, res) => {
     
     // Handle client disconnect
     req.on('close', () => {
+      clearTimeout(timeout);
       ffmpeg.kill('SIGTERM');
     });
     
   } catch (error) {
+    clearTimeout(timeout);
     console.error(`  ✗ [mux] Error: ${error.message}`);
     if (!res.headersSent) {
       res.status(500).json({ error: error.message });
