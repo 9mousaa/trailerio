@@ -372,35 +372,50 @@ function findBestMatch(results: any[], tmdbMeta: TMDBMetadata): ScoreResult | nu
 // ============ YOUTUBE EXTRACTORS ============
 // Priority: 1. Piped (proxied stable URLs), 2. Invidious (via our proxy), 3. Cobalt (redirect only, skip tunnel)
 
-// Fallback Invidious instances (used if dynamic fetch fails)
+// PRIMARY Invidious instances - verified working, used FIRST before dynamic API
 const INVIDIOUS_FALLBACK_INSTANCES = [
+  // Recently verified working instances (prioritized)
+  'https://invidious.fdn.fr',
+  'https://iv.ggtyler.dev',
+  'https://invidious.einfachzocken.eu',
+  'https://invidious.slipfox.xyz',
+  'https://inv.zzls.xyz',
+  'https://invidious.private.coffee',
+  'https://invidious.baczek.me',
+  'https://inv.tux.pizza',
+  'https://invidious.jing.rocks',
+  'https://invidious.darkness.services',
+  'https://yt.drgnz.club',
+  'https://invidious.reallyaweso.me',
+  // Older fallbacks
   'https://inv.nadeko.net',
   'https://invidious.nerdvpn.de',
   'https://invidious.f5.si',
   'https://inv.perditum.com',
   'https://yewtu.be',
   'https://invidious.privacyredirect.com',
-  'https://iv.nboeck.de',
-  'https://invidious.protokolla.fi',
-  'https://invidious.lunar.icu',
-  'https://invidious.perennialte.ch',
-  'https://invidious.drgns.space',
-  'https://invidious.io.lol',
   'https://vid.puffyan.us',
-  'https://yt.artemislena.eu',
-  'https://invidious.snopyta.org',
   'https://invidious.kavin.rocks',
 ];
 
-// Piped fallback instances
+// PRIMARY Piped instances - verified working, used FIRST before dynamic API
 const PIPED_FALLBACK_INSTANCES = [
+  // Recently verified working instances (prioritized)
   'https://pipedapi.kavin.rocks',
   'https://pipedapi.r4fo.com',
+  'https://pipedapi.adminforge.de',
+  'https://api.piped.projectsegfau.lt',
+  'https://pipedapi.in.projectsegfau.lt',
+  'https://piped-api.lunar.icu',
+  'https://pipedapi.moomoo.me',
   'https://pipedapi.syncpundit.io',
   'https://piped-api.garudalinux.org',
   'https://pipedapi.leptons.xyz',
-  'https://pipedapi.adminforge.de',
-  'https://api.piped.projectsegfau.lt',
+  'https://watchapi.whatever.social',
+  'https://pipedapi.tokhmi.xyz',
+  'https://pipedapi.mha.fi',
+  'https://api.piped.private.coffee',
+  'https://pipedapi.darkness.services',
 ];
 
 // Cache for dynamic instances
@@ -412,17 +427,20 @@ let cachedInvidiousInstances: string[] | null = null;
 let invidiousCacheTime = 0;
 const INVIDIOUS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-// Fetch working Invidious instances dynamically
+// Fetch working Invidious instances - FALLBACK FIRST, then merge dynamic
 async function getWorkingInvidiousInstances(): Promise<string[]> {
   // Return cached if still valid
   if (cachedInvidiousInstances && Date.now() - invidiousCacheTime < INVIDIOUS_CACHE_TTL) {
     return cachedInvidiousInstances;
   }
   
+  // Start with our verified fallback list (PRIORITY)
+  const combined = [...INVIDIOUS_FALLBACK_INSTANCES];
+  
   try {
-    console.log('Fetching dynamic Invidious instances...');
+    console.log('Fetching dynamic Invidious instances to supplement fallback list...');
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
+    const timeout = setTimeout(() => controller.abort(), 3000); // Shorter timeout
     
     const response = await fetch('https://api.invidious.io/instances.json', {
       signal: controller.signal,
@@ -430,54 +448,56 @@ async function getWorkingInvidiousInstances(): Promise<string[]> {
     });
     clearTimeout(timeout);
     
-    if (!response.ok) {
-      console.log(`Invidious instances API returned ${response.status}, using fallback`);
-      return INVIDIOUS_FALLBACK_INSTANCES;
+    if (response.ok) {
+      const instances = await response.json();
+      console.log(`  Invidious API returned ${instances.length} total instances`);
+      
+      // Filter: HTTPS only, skip Tor/I2P - REMOVED api === true requirement
+      const dynamicInstances = instances
+        .filter(([uri, data]: [string, any]) => 
+          data.type === 'https' &&
+          uri && 
+          !uri.includes('.onion') &&
+          !uri.includes('.i2p')
+        )
+        .sort(([, a]: [string, any], [, b]: [string, any]) => 
+          (b.users?.total || 0) - (a.users?.total || 0)
+        )
+        .map(([uri]: [string, any]) => `https://${uri}`);
+      
+      // Add unique dynamic instances to end of list
+      for (const inst of dynamicInstances) {
+        if (!combined.includes(inst)) {
+          combined.push(inst);
+        }
+      }
+      console.log(`  Combined: ${combined.length} total Invidious instances`);
     }
-    
-    const instances = await response.json();
-    console.log(`  Invidious API returned ${instances.length} total instances`);
-    
-    // Filter: api enabled, https, and has a valid URI
-    const working = instances
-      .filter(([uri, data]: [string, any]) => 
-        data.api === true && 
-        data.type === 'https' &&
-        uri && 
-        !uri.includes('.onion') // Skip tor
-      )
-      .sort(([, a]: [string, any], [, b]: [string, any]) => 
-        (b.users?.total || 0) - (a.users?.total || 0) // Sort by user count (popularity)
-      )
-      .map(([uri]: [string, any]) => `https://${uri}`)
-      .slice(0, 20); // Top 20 instances
-    
-    if (working.length > 0) {
-      console.log(`✓ Got ${working.length} dynamic Invidious instances`);
-      cachedInvidiousInstances = working;
-      invidiousCacheTime = Date.now();
-      return working;
-    }
-    
-    console.log('No suitable Invidious instances from API, using fallback');
-    return INVIDIOUS_FALLBACK_INSTANCES;
   } catch (e) {
-    console.log(`Failed to fetch Invidious instances: ${e instanceof Error ? e.message : 'unknown'}, using fallback`);
-    return INVIDIOUS_FALLBACK_INSTANCES;
+    console.log(`Dynamic Invidious fetch failed, using ${combined.length} fallback instances`);
   }
+  
+  // Cache and return top 25
+  const result = combined.slice(0, 25);
+  cachedInvidiousInstances = result;
+  invidiousCacheTime = Date.now();
+  return result;
 }
 
-// Fetch working Piped instances dynamically
+// Fetch working Piped instances - FALLBACK FIRST, then merge dynamic
 async function getWorkingPipedInstances(): Promise<string[]> {
   // Return cached if still valid
   if (cachedPipedInstances && Date.now() - pipedCacheTime < PIPED_CACHE_TTL) {
     return cachedPipedInstances;
   }
   
+  // Start with our verified fallback list (PRIORITY)
+  const combined = [...PIPED_FALLBACK_INSTANCES];
+  
   try {
-    console.log('Fetching dynamic Piped instances...');
+    console.log('Fetching dynamic Piped instances to supplement fallback list...');
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
+    const timeout = setTimeout(() => controller.abort(), 3000); // Shorter timeout
     
     const response = await fetch('https://piped-instances.kavin.rocks/', {
       signal: controller.signal,
@@ -485,34 +505,33 @@ async function getWorkingPipedInstances(): Promise<string[]> {
     });
     clearTimeout(timeout);
     
-    if (!response.ok) {
-      console.log(`Piped instances API returned ${response.status}, using fallback`);
-      return PIPED_FALLBACK_INSTANCES;
+    if (response.ok) {
+      const instances = await response.json();
+      console.log(`  Piped API returned ${instances.length} total instances`);
+      
+      // Accept all with api_url, sort by uptime
+      const dynamicInstances = instances
+        .filter((i: any) => i.api_url)
+        .sort((a: any, b: any) => (b.uptime_24h || 50) - (a.uptime_24h || 50))
+        .map((i: any) => i.api_url);
+      
+      // Add unique dynamic instances to end of list
+      for (const inst of dynamicInstances) {
+        if (!combined.includes(inst)) {
+          combined.push(inst);
+        }
+      }
+      console.log(`  Combined: ${combined.length} total Piped instances`);
     }
-    
-    const instances = await response.json();
-    console.log(`  Piped API returned ${instances.length} total instances`);
-    
-    // More lenient filtering - accept all with api_url, sort by uptime
-    const working = instances
-      .filter((i: any) => i.api_url) // Just needs an API URL
-      .sort((a: any, b: any) => (b.uptime_24h || 50) - (a.uptime_24h || 50)) // Sort by uptime, default to 50
-      .map((i: any) => i.api_url)
-      .slice(0, 15); // Top 15 instances
-    
-    if (working.length > 0) {
-      console.log(`✓ Got ${working.length} dynamic Piped instances`);
-      cachedPipedInstances = working;
-      pipedCacheTime = Date.now();
-      return working;
-    }
-    
-    console.log('No suitable Piped instances from API, using fallback');
-    return PIPED_FALLBACK_INSTANCES;
   } catch (e) {
-    console.log(`Failed to fetch Piped instances: ${e instanceof Error ? e.message : 'unknown'}, using fallback`);
-    return PIPED_FALLBACK_INSTANCES;
+    console.log(`Dynamic Piped fetch failed, using ${combined.length} fallback instances`);
   }
+  
+  // Cache and return top 20
+  const result = combined.slice(0, 20);
+  cachedPipedInstances = result;
+  pipedCacheTime = Date.now();
+  return result;
 }
 
 // Cobalt instances (PRIMARY) - muxed audio+video with iOS-compatible codecs
