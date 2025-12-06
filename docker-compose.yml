@@ -28,7 +28,7 @@ services:
     labels:
       # Traefik configuration
       - "traefik.enable=true"
-      - "traefik.http.routers.trailerio.rule=Host(`trailerio.plaio.cc`)"
+      - "traefik.http.routers.trailerio.rule=Host(`trailerio.your-domain.com`)"
       - "traefik.http.routers.trailerio.entrypoints=web"
       - "traefik.http.routers.trailerio.entrypoints=websecure"
       - "traefik.http.routers.trailerio.tls.certresolver=letsencrypt"

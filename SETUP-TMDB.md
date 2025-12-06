@@ -1,9 +1,11 @@
 # Setting Up TMDB API Key
 
-## Your TMDB API Key
-```
-bfe73358661a995b992ae9a812aa0d2f
-```
+## Get Your TMDB API Key
+
+1. Go to: https://www.themoviedb.org/settings/api
+2. Create a free account
+3. Request an API key
+4. Copy your API key
 
 ## Setup on Your VPS
 
@@ -14,7 +16,7 @@ cd /opt/trailerio
 
 # Create .env file with your TMDB API key
 cat > .env <<EOF
-TMDB_API_KEY=bfe73358661a995b992ae9a812aa0d2f
+TMDB_API_KEY=your_tmdb_api_key_here
 EOF
 
 # Verify it was created
@@ -30,7 +32,7 @@ docker compose up -d --build
 cd /opt/trailerio
 
 # Set as environment variable
-export TMDB_API_KEY=bfe73358661a995b992ae9a812aa0d2f
+export TMDB_API_KEY=your_tmdb_api_key_here
 
 # Rebuild and restart
 docker compose up -d --build
@@ -43,7 +45,7 @@ Edit `/opt/trailerio/docker-compose.yml` and update the backend service:
 ```yaml
 backend:
   environment:
-    - TMDB_API_KEY=bfe73358661a995b992ae9a812aa0d2f
+    - TMDB_API_KEY=your_tmdb_api_key_here
 ```
 
 Then:

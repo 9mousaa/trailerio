@@ -29,11 +29,11 @@ npm run dev
 
 The application will be available at `http://localhost:8080`
 
-## Deployment to DigitalOcean VPS
+## Deployment to VPS
 
 ### Quick Setup (Recommended)
 
-If you have an existing VPS with multiple apps (like plaio.cc), use the automated setup script:
+If you have an existing VPS with multiple apps, use the automated setup script:
 
 1. **SSH into your VPS:**
    ```bash
@@ -110,9 +110,9 @@ If you have an existing VPS with multiple apps (like plaio.cc), use the automate
 
 ### Nginx Configuration Options
 
-Since you have multiple apps on plaio.cc, choose one of these options:
+If you have multiple apps on your domain, choose one of these options:
 
-#### Option 1: Subdomain Setup (trailerio.plaio.cc)
+#### Option 1: Subdomain Setup
 
 1. **Create Nginx config:**
    ```bash
@@ -130,14 +130,14 @@ Since you have multiple apps on plaio.cc, choose one of these options:
 
 3. **Set up SSL:**
    ```bash
-   certbot --nginx -d trailerio.plaio.cc
+   certbot --nginx -d your-subdomain.your-domain.com
    ```
 
-#### Option 2: Path-based Setup (plaio.cc/trailerio)
+#### Option 2: Path-based Setup
 
-1. **Edit your existing plaio.cc nginx config:**
+1. **Edit your existing domain nginx config:**
    ```bash
-   nano /etc/nginx/sites-available/plaio.cc  # or your main config
+   nano /etc/nginx/sites-available/your-domain.com  # or your main config
    ```
 
 2. **Add the location block from `nginx-path.conf`** to your existing server block
@@ -150,9 +150,9 @@ Since you have multiple apps on plaio.cc, choose one of these options:
 
 **Note:** For path-based routing, you may need to configure Vite's base path. See "Path-based Routing" section below.
 
-### Path-based Routing (if using /trailerio path)
+### Path-based Routing (if using a subpath)
 
-If you're using path-based routing (plaio.cc/trailerio), you need to configure Vite's base path:
+If you're using path-based routing (e.g., your-domain.com/trailerio), you need to configure Vite's base path:
 
 1. **Update `vite.config.ts`:**
    ```typescript
@@ -184,11 +184,17 @@ docker compose up -d --build
 
 ### Environment Variables
 
-If you need to set environment variables, create a `.env` file in the project root and update `docker-compose.yml` to include it:
+Create a `.env` file in the project root with your TMDB API key:
+
+```bash
+TMDB_API_KEY=your_tmdb_api_key_here
+```
+
+Then update `docker-compose.yml` to include it:
 
 ```yaml
 services:
-  web:
+  backend:
     # ... existing config ...
     env_file:
       - .env
@@ -207,8 +213,9 @@ services:
 trailerio/
 ├── src/              # Source code
 ├── public/           # Static assets
-├── supabase/         # Supabase functions and migrations
-├── Dockerfile        # Docker build configuration
+├── server/           # Express backend API
+├── Dockerfile        # Frontend Docker build configuration
+├── Dockerfile.backend # Backend Docker build configuration
 ├── docker-compose.yml # Docker Compose configuration
 └── nginx.conf        # Nginx configuration for production
 ```

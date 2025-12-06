@@ -1,6 +1,6 @@
-# Deployment Guide for plaio.cc VPS
+# Deployment Guide
 
-This guide helps you deploy trailerio alongside your existing apps on plaio.cc.
+This guide helps you deploy trailerio on your VPS.
 
 ## Quick Start
 
@@ -24,13 +24,13 @@ This will show you:
 You have two options:
 
 #### A) Subdomain (Recommended)
-- URL: `trailerio.plaio.cc` (or any subdomain you prefer)
+- URL: `trailerio.your-domain.com` (or any subdomain you prefer)
 - Easier to manage
 - Better for SEO
 - Requires DNS A record pointing to your VPS
 
 #### B) Path-based
-- URL: `plaio.cc/trailerio`
+- URL: `your-domain.com/trailerio`
 - No DNS changes needed
 - Requires code changes for base path
 
@@ -56,10 +56,13 @@ cd /opt
 git clone <your-repo-url> trailerio
 cd trailerio
 
-# 2. Build and start
+# 2. Create .env file with TMDB API key
+echo "TMDB_API_KEY=your_tmdb_api_key" > .env
+
+# 3. Build and start
 docker compose up -d --build
 
-# 3. Configure Nginx (see below)
+# 4. Configure Nginx (see below)
 ```
 
 ## Nginx Configuration
@@ -74,7 +77,7 @@ docker compose up -d --build
 2. **Edit if needed:**
    ```bash
    nano /etc/nginx/sites-available/trailerio
-   # Change "trailerio.plaio.cc" to your desired subdomain
+   # Change server_name to your desired subdomain
    ```
 
 3. **Enable:**
@@ -90,7 +93,7 @@ docker compose up -d --build
 
 5. **Enable SSL:**
    ```bash
-   certbot --nginx -d trailerio.plaio.cc
+   certbot --nginx -d trailerio.your-domain.com
    ```
 
 ### Path-based Setup
@@ -98,12 +101,12 @@ docker compose up -d --build
 1. **Find your main nginx config:**
    ```bash
    ls -la /etc/nginx/sites-enabled/
-   # Usually something like "plaio.cc" or "default"
+   # Usually something like "your-domain.com" or "default"
    ```
 
 2. **Edit it:**
    ```bash
-   nano /etc/nginx/sites-enabled/plaio.cc  # or your main config
+   nano /etc/nginx/sites-enabled/your-domain.com  # or your main config
    ```
 
 3. **Add this inside your `server` block:**
@@ -213,26 +216,20 @@ If you have other apps:
 
 ## Environment Variables
 
-If you need environment variables (like Supabase keys), create `.env`:
+Create a `.env` file in the project root:
 
 ```bash
-nano .env
+TMDB_API_KEY=your_tmdb_api_key_here
 ```
 
-Add:
-```
-VITE_SUPABASE_URL=your-url
-VITE_SUPABASE_PUBLISHABLE_KEY=your-key
-```
+Then update `docker-compose.yml` to include it:
 
-Then update `docker-compose.yml`:
 ```yaml
 services:
-  web:
+  backend:
     # ... existing config ...
     env_file:
       - .env
 ```
 
-**Note:** For Vite env vars to work, they must be prefixed with `VITE_` and you need to rebuild the container.
-
+**Note:** Get your free TMDB API key from https://www.themoviedb.org/settings/api
