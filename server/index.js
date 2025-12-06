@@ -1004,6 +1004,11 @@ async function resolvePreview(imdbId, type) {
   return { found: false };
 }
 
+// Initialize free proxies on startup (non-blocking)
+fetchFreeProxies().catch(() => {
+  console.log('Failed to fetch free proxies on startup, will retry on first use');
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', version: '2.0.0' });
 });
