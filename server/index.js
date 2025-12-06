@@ -753,7 +753,7 @@ async function extractViaPiped(youtubeKey) {
   // DASH is always best - return immediately
   if (sortedResults.length > 0 && sortedResults[0].isDash) {
     console.log(`  ✓ [Piped] Selected DASH manifest (highest quality available)`);
-    return sortedResults[0].url;
+    return { url: sortedResults[0].url, isDash: true };
   }
   
   // Return best result (already sorted)
