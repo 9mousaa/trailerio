@@ -14,15 +14,96 @@ const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
 const YT_DLP_TIMEOUT = 4000;
 const STREAM_TIMEOUT = 15000;
 
-// Proxy configuration for yt-dlp (comma-separated list for rotation)
-// Format: http://proxy1:port,http://proxy2:port or socks5://proxy:port
-// Examples:
-//   YT_DLP_PROXIES=http://proxy1.com:8080,http://proxy2.com:8080
-//   YT_DLP_PROXIES=socks5://127.0.0.1:1080
-const YT_DLP_PROXIES = process.env.YT_DLP_PROXIES ? 
+// Proxy configuration for yt-dlp
+// Manual proxies (comma-separated list for rotation)
+const MANUAL_PROXIES = process.env.YT_DLP_PROXIES ? 
   process.env.YT_DLP_PROXIES.split(',').map(p => p.trim()).filter(p => p) : 
   [];
+
+// Free proxy sources (public APIs that provide working proxies)
+const FREE_PROXY_SOURCES = [
+  'https://api.proxyscrape.com/v2/?request=get&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all',
+  'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt',
+  'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt',
+  'https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt',
+];
+
+// Cache for free proxies (refreshed periodically)
+let cachedFreeProxies = [];
+let freeProxyCacheTime = 0;
+const FREE_PROXY_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+const MAX_FREE_PROXIES = 20; // Limit to avoid too many
+
+// Combined proxy list (manual + free)
+let allProxies = [...MANUAL_PROXIES];
 let proxyIndex = 0;
+
+// Fetch and test free proxies
+async function fetchFreeProxies() {
+  // If we have manual proxies, use them only (user preference)
+  if (MANUAL_PROXIES.length > 0) {
+    return MANUAL_PROXIES;
+  }
+
+  // Check cache
+  if (cachedFreeProxies.length > 0 && Date.now() - freeProxyCacheTime < FREE_PROXY_CACHE_TTL) {
+    return cachedFreeProxies;
+  }
+
+  console.log('Fetching free proxies from public APIs...');
+  const workingProxies = [];
+
+  // Try each source
+  for (const source of FREE_PROXY_SOURCES) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      
+      const response = await fetch(source, {
+        signal: controller.signal,
+        headers: { 'User-Agent': 'Mozilla/5.0' }
+      });
+      clearTimeout(timeout);
+
+      if (!response.ok) continue;
+
+      const text = await response.text();
+      const lines = text.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+
+      // Parse proxies (format: ip:port or http://ip:port)
+      for (const line of lines.slice(0, 50)) { // Test first 50
+        let proxy = line.trim();
+        
+        // Add http:// if missing
+        if (!proxy.startsWith('http://') && !proxy.startsWith('https://') && !proxy.startsWith('socks5://')) {
+          proxy = `http://${proxy}`;
+        }
+
+        // Quick test (just check if format is valid, actual testing happens on use)
+        if (proxy.match(/^https?:\/\/[\d\.]+:\d+$/)) {
+          workingProxies.push(proxy);
+          if (workingProxies.length >= MAX_FREE_PROXIES) break;
+        }
+      }
+
+      if (workingProxies.length >= MAX_FREE_PROXIES) break;
+    } catch (e) {
+      console.log(`  Failed to fetch from ${source}: ${e.message}`);
+      continue;
+    }
+  }
+
+  if (workingProxies.length > 0) {
+    console.log(`  ✓ Found ${workingProxies.length} free proxies`);
+    cachedFreeProxies = workingProxies;
+    freeProxyCacheTime = Date.now();
+    allProxies = [...MANUAL_PROXIES, ...workingProxies];
+    return workingProxies;
+  }
+
+  console.log('  ✗ No free proxies found, using manual proxies only');
+  return MANUAL_PROXIES;
+}
 
 const cache = new Map();
 
@@ -378,10 +459,23 @@ function getNextUserAgent() {
   return ua;
 }
 
-function getNextProxy() {
-  if (YT_DLP_PROXIES.length === 0) return null;
-  const proxy = YT_DLP_PROXIES[proxyIndex];
-  proxyIndex = (proxyIndex + 1) % YT_DLP_PROXIES.length;
+async function getNextProxy() {
+  // Refresh free proxies if needed (async, but don't wait)
+  if (MANUAL_PROXIES.length === 0) {
+    fetchFreeProxies().catch(() => {}); // Don't block on errors
+  }
+
+  if (allProxies.length === 0) {
+    // Try to get free proxies synchronously if we have none
+    if (cachedFreeProxies.length > 0) {
+      allProxies = [...MANUAL_PROXIES, ...cachedFreeProxies];
+    }
+  }
+
+  if (allProxies.length === 0) return null;
+  
+  const proxy = allProxies[proxyIndex];
+  proxyIndex = (proxyIndex + 1) % allProxies.length;
   return proxy;
 }
 
@@ -436,7 +530,7 @@ async function extractViaYtDlp(youtubeKey, retryCount = 0) {
     const extractorArgs = `youtube:player-client=${client}`;
     
     // Get proxy for this request (rotate if multiple proxies configured)
-    const proxy = getNextProxy();
+    const proxy = await getNextProxy();
     const proxyArg = proxy ? `--proxy "${proxy}"` : '';
     
     if (proxy) {
