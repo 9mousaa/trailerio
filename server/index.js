@@ -616,6 +616,7 @@ const PIPED_INSTANCES = [
 
 async function extractViaPiped(youtubeKey) {
   console.log(`  [Piped] Trying ${PIPED_INSTANCES.length} instances for ${youtubeKey}...`);
+  console.log(`  [Piped] Why Piped works: Distributed instances across multiple IPs, proper browser-like requests, maintained by communities`);
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
@@ -631,10 +632,10 @@ async function extractViaPiped(youtubeKey) {
       if (!response.ok) return null;
       const data = await response.json();
       
-      // PRIORITY 1: DASH manifest (best for AVPlayer - native support, adaptive streaming)
+      // PRIORITY 1: DASH manifest (best for AVPlayer - native support, adaptive streaming, highest quality)
       if (data.dash) {
-        console.log(`  ✓ [Piped] ${instance}: got DASH manifest (adaptive quality + audio)`);
-        return data.dash;
+        console.log(`  ✓ [Piped] ${instance}: got DASH manifest (adaptive quality up to highest available + audio)`);
+        return { url: data.dash, isDash: true };
       }
       
       // PRIORITY 2: Video streams (fallback if no DASH)
@@ -642,25 +643,41 @@ async function extractViaPiped(youtubeKey) {
         const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
         const getQualityRank = (q) => {
           if (!q) return 999;
-          const idx = qualityPriority.findIndex(p => q.includes(p));
+          // Check if quality string contains any of our priority resolutions
+          const qLower = String(q).toLowerCase();
+          const idx = qualityPriority.findIndex(p => qLower.includes(p));
           return idx === -1 ? 998 : idx;
         };
         
+        // Log available qualities for debugging
+        const availableQualities = data.videoStreams
+          .filter(s => s.mimeType?.startsWith('video/') && s.url)
+          .map(s => s.quality || 'unknown')
+          .join(', ');
+        console.log(`  [Piped] ${instance}: available qualities: ${availableQualities || 'none'}`);
+        
         const sorted = [...data.videoStreams]
           .filter(s => s.mimeType?.startsWith('video/') && s.url)
-          .sort((a, b) => getQualityRank(a.quality) - getQualityRank(b.quality));
+          .sort((a, b) => {
+            const rankA = getQualityRank(a.quality);
+            const rankB = getQualityRank(b.quality);
+            // Lower rank = higher quality, so sort ascending
+            return rankA - rankB;
+          });
         
+        // Prefer combined streams (video + audio) over video-only
         const combinedStreams = sorted.filter(s => !s.videoOnly);
         if (combinedStreams.length > 0) {
           const best = combinedStreams[0];
-          console.log(`  ✓ [Piped] ${instance}: got ${best.quality || 'unknown'}`);
-          return best.url;
+          console.log(`  ✓ [Piped] ${instance}: selected ${best.quality || 'unknown'} (best available: ${sorted[0]?.quality || 'unknown'})`);
+          return { url: best.url, quality: best.quality, isDash: false };
         }
         
+        // Fallback to video-only if no combined streams
         if (sorted.length > 0) {
           const best = sorted[0];
-          console.log(`  ✓ [Piped] ${instance}: got ${best.quality || 'unknown'} (video-only)`);
-          return best.url;
+          console.log(`  ✓ [Piped] ${instance}: selected ${best.quality || 'unknown'} (video-only, best available)`);
+          return { url: best.url, quality: best.quality, isDash: false };
         }
       }
       
@@ -672,11 +689,38 @@ async function extractViaPiped(youtubeKey) {
   };
   
   const results = await Promise.all(PIPED_INSTANCES.map(tryInstance));
-  const validUrl = results.find(r => r !== null);
   
-  if (validUrl) {
-    console.log(`  ✓ [Piped] Got URL from Piped`);
-    return validUrl;
+  // Find best quality result (prefer DASH, then highest quality)
+  let bestResult = null;
+  let bestQuality = -1;
+  const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
+  
+  for (const result of results) {
+    if (!result) continue;
+    
+    // DASH is always best (adaptive quality)
+    if (result.isDash) {
+      console.log(`  ✓ [Piped] Selected DASH manifest (highest quality available)`);
+      return result.url;
+    }
+    
+    // For regular streams, find highest quality
+    if (result.quality) {
+      const qualityLower = String(result.quality).toLowerCase();
+      const qualityIdx = qualityPriority.findIndex(p => qualityLower.includes(p));
+      if (qualityIdx !== -1 && qualityIdx < bestQuality || bestQuality === -1) {
+        bestQuality = qualityIdx;
+        bestResult = result;
+      }
+    } else if (!bestResult) {
+      // Fallback if no quality info
+      bestResult = result;
+    }
+  }
+  
+  if (bestResult) {
+    console.log(`  ✓ [Piped] Got URL from Piped (quality: ${bestResult.quality || 'unknown'})`);
+    return bestResult.url;
   }
   
   return null;
