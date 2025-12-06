@@ -458,21 +458,214 @@ async function extractViaYtDlp(youtubeKey, retryCount = 0) {
   }
 }
 
+// ============ PIPED EXTRACTOR ============
+
+const PIPED_INSTANCES = [
+  'https://pipedapi.kavin.rocks',
+  'https://pipedapi.r4fo.com',
+  'https://pipedapi.adminforge.de',
+  'https://api.piped.projectsegfau.lt',
+  'https://pipedapi.in.projectsegfau.lt',
+  'https://piped-api.lunar.icu',
+  'https://pipedapi.moomoo.me',
+  'https://pipedapi.syncpundit.io',
+  'https://piped-api.garudalinux.org',
+  'https://pipedapi.leptons.xyz',
+  'https://watchapi.whatever.social',
+  'https://pipedapi.tokhmi.xyz',
+  'https://pipedapi.mha.fi',
+  'https://api.piped.private.coffee',
+  'https://pipedapi.darkness.services',
+];
+
+async function extractViaPiped(youtubeKey) {
+  console.log(`  [Piped] Trying ${PIPED_INSTANCES.length} instances for ${youtubeKey}...`);
+  
+  const tryInstance = async (instance) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    
+    try {
+      const response = await fetch(`${instance}/streams/${youtubeKey}`, {
+        headers: { 'Accept': 'application/json' },
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+      
+      if (!response.ok) return null;
+      const data = await response.json();
+      
+      if (data.videoStreams?.length > 0) {
+        const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
+        const getQualityRank = (q) => {
+          if (!q) return 999;
+          const idx = qualityPriority.findIndex(p => q.includes(p));
+          return idx === -1 ? 998 : idx;
+        };
+        
+        const sorted = [...data.videoStreams]
+          .filter(s => s.mimeType?.startsWith('video/') && s.url)
+          .sort((a, b) => getQualityRank(a.quality) - getQualityRank(b.quality));
+        
+        const combinedStreams = sorted.filter(s => !s.videoOnly);
+        if (combinedStreams.length > 0) {
+          const best = combinedStreams[0];
+          console.log(`  ✓ [Piped] ${instance}: got ${best.quality || 'unknown'}`);
+          return best.url;
+        }
+        
+        if (sorted.length > 0) {
+          const best = sorted[0];
+          console.log(`  ✓ [Piped] ${instance}: got ${best.quality || 'unknown'} (video-only)`);
+          return best.url;
+        }
+      }
+      
+      return null;
+    } catch {
+      clearTimeout(timeout);
+      return null;
+    }
+  };
+  
+  const results = await Promise.all(PIPED_INSTANCES.map(tryInstance));
+  const validUrl = results.find(r => r !== null);
+  
+  if (validUrl) {
+    console.log(`  ✓ [Piped] Got URL from Piped`);
+    return validUrl;
+  }
+  
+  return null;
+}
+
+// ============ INVIDIOUS EXTRACTOR ============
+
+const INVIDIOUS_INSTANCES = [
+  'https://invidious.fdn.fr',
+  'https://iv.ggtyler.dev',
+  'https://invidious.einfachzocken.eu',
+  'https://invidious.slipfox.xyz',
+  'https://inv.zzls.xyz',
+  'https://invidious.private.coffee',
+  'https://invidious.baczek.me',
+  'https://inv.tux.pizza',
+  'https://invidious.jing.rocks',
+  'https://invidious.darkness.services',
+  'https://yt.drgnz.club',
+  'https://invidious.reallyaweso.me',
+  'https://inv.nadeko.net',
+  'https://invidious.nerdvpn.de',
+  'https://invidious.f5.si',
+  'https://inv.perditum.com',
+  'https://yewtu.be',
+  'https://invidious.privacyredirect.com',
+  'https://vid.puffyan.us',
+  'https://invidious.kavin.rocks',
+];
+
+async function extractViaInvidious(youtubeKey) {
+  console.log(`  [Invidious] Trying ${INVIDIOUS_INSTANCES.length} instances for ${youtubeKey}...`);
+  
+  const tryInstance = async (instance) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    
+    try {
+      const response = await fetch(`${instance}/api/v1/videos/${youtubeKey}`, {
+        headers: { 'Accept': 'application/json' },
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+      
+      if (!response.ok) return null;
+      const data = await response.json();
+      
+      const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
+      const getQualityRank = (label) => {
+        if (!label) return 999;
+        const idx = qualityPriority.findIndex(q => label.includes(q));
+        return idx === -1 ? 998 : idx;
+      };
+      
+      if (data.formatStreams?.length > 0) {
+        const sorted = [...data.formatStreams]
+          .filter(s => s.container === 'mp4' || s.mimeType?.includes('mp4'))
+          .sort((a, b) => getQualityRank(a.qualityLabel) - getQualityRank(b.qualityLabel));
+        
+        if (sorted.length > 0) {
+          const best = sorted[0];
+          console.log(`  ✓ [Invidious] ${instance}: got ${best.qualityLabel || 'unknown'}`);
+          return best.url;
+        }
+      }
+      
+      if (data.adaptiveFormats?.length > 0) {
+        const videoFormats = data.adaptiveFormats.filter(s => 
+          s.type?.includes('video') || s.mimeType?.startsWith('video/')
+        );
+        
+        const sorted = videoFormats
+          .filter(s => s.container === 'mp4' || s.mimeType?.includes('mp4'))
+          .sort((a, b) => getQualityRank(a.qualityLabel) - getQualityRank(b.qualityLabel));
+        
+        if (sorted.length > 0) {
+          const best = sorted[0];
+          console.log(`  ✓ [Invidious] ${instance}: got ${best.qualityLabel || 'unknown'}`);
+          return best.url;
+        }
+      }
+      
+      return null;
+    } catch {
+      clearTimeout(timeout);
+      return null;
+    }
+  };
+  
+  const results = await Promise.all(INVIDIOUS_INSTANCES.map(tryInstance));
+  const validUrl = results.find(r => r !== null);
+  
+  if (validUrl) {
+    console.log(`  ✓ [Invidious] Got URL from Invidious`);
+    return validUrl;
+  }
+  
+  return null;
+}
+
 async function extractYouTubeDirectUrl(youtubeKey) {
   console.log(`\n========== Extracting YouTube URL for key: ${youtubeKey} ==========`);
   const startTime = Date.now();
   
-  // ONLY yt-dlp - fastest, highest quality, most stable
-  const url = await extractViaYtDlp(youtubeKey);
-  
-  if (url) {
+  // Priority 1: Try yt-dlp first (highest quality)
+  const ytdlpUrl = await extractViaYtDlp(youtubeKey);
+  if (ytdlpUrl) {
     const elapsed = Date.now() - startTime;
     console.log(`✓ Got YouTube URL from yt-dlp in ${elapsed}ms`);
-    return url;
+    return ytdlpUrl;
+  }
+  
+  // Priority 2: Try Piped (stable, good quality)
+  console.log(`  yt-dlp failed, trying Piped...`);
+  const pipedUrl = await extractViaPiped(youtubeKey);
+  if (pipedUrl) {
+    const elapsed = Date.now() - startTime;
+    console.log(`✓ Got YouTube URL from Piped in ${elapsed}ms`);
+    return pipedUrl;
+  }
+  
+  // Priority 3: Try Invidious (fallback)
+  console.log(`  Piped failed, trying Invidious...`);
+  const invidiousUrl = await extractViaInvidious(youtubeKey);
+  if (invidiousUrl) {
+    const elapsed = Date.now() - startTime;
+    console.log(`✓ Got YouTube URL from Invidious in ${elapsed}ms`);
+    return invidiousUrl;
   }
   
   const elapsed = Date.now() - startTime;
-  console.log(`✗ Failed to extract YouTube URL (took ${elapsed}ms)`);
+  console.log(`✗ Failed to extract YouTube URL from all extractors (took ${elapsed}ms)`);
   return null;
 }
 
