@@ -798,7 +798,7 @@ async function extractViaInvidious(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 4000);
+    const timeout = setTimeout(() => controller.abort(), 3000); // 3s timeout per instance (same as Piped)
     
     try {
       const response = await fetch(`${instance}/api/v1/videos/${youtubeKey}`, {
@@ -807,7 +807,10 @@ async function extractViaInvidious(youtubeKey) {
       });
       clearTimeout(timeout);
       
-      if (!response.ok) return null;
+      if (!response.ok) {
+        console.log(`  [Invidious] ${instance}: HTTP ${response.status}`);
+        return null;
+      }
       const data = await response.json();
       
       const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
@@ -845,21 +848,27 @@ async function extractViaInvidious(youtubeKey) {
         }
       }
       
+      console.log(`  [Invidious] ${instance}: no usable streams in response`);
       return null;
-    } catch {
+    } catch (e) {
       clearTimeout(timeout);
+      console.log(`  [Invidious] ${instance}: error - ${e.message || 'unknown'}`);
       return null;
     }
   };
   
-  const results = await Promise.all(INVIDIOUS_INSTANCES.map(tryInstance));
-  const validUrl = results.find(r => r !== null);
+  // Use Promise.allSettled to not block if some instances hang (same as Piped)
+  const results = await Promise.allSettled(INVIDIOUS_INSTANCES.map(tryInstance));
+  const validUrl = results
+    .filter(r => r.status === 'fulfilled' && r.value !== null)
+    .map(r => r.value)[0]; // Get first valid URL
   
   if (validUrl) {
     console.log(`  ✓ [Invidious] Got URL from Invidious`);
     return validUrl;
   }
   
+  console.log(`  ✗ [Invidious] All instances failed or timed out`);
   return null;
 }
 
