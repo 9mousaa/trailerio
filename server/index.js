@@ -731,35 +731,38 @@ async function extractViaPiped(youtubeKey) {
     return null;
   }
   
-  // Find best quality result (prefer DASH, then highest quality)
+  // Find best quality result (prefer DASH, then combined, then muxed, then video-only)
   let bestResult = null;
   let bestQuality = -1;
   const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
   
-  for (const result of successfulResults) {
-    // DASH is always best (adaptive quality)
-    if (result.isDash) {
-      console.log(`  ✓ [Piped] Selected DASH manifest (highest quality available)`);
-      return result.url;
-    }
-    
-    // For regular streams, find highest quality
-    if (result.quality) {
-      const qualityLower = String(result.quality).toLowerCase();
-      const qualityIdx = qualityPriority.findIndex(p => qualityLower.includes(p));
-      if (qualityIdx !== -1 && (qualityIdx < bestQuality || bestQuality === -1)) {
-        bestQuality = qualityIdx;
-        bestResult = result;
-      }
-    } else if (!bestResult) {
-      // Fallback if no quality info
-      bestResult = result;
-    }
+  // Sort results: DASH > combined > muxed > video-only
+  const sortedResults = successfulResults.sort((a, b) => {
+    // DASH is always best
+    if (a.isDash && !b.isDash) return -1;
+    if (!a.isDash && b.isDash) return 1;
+    // Combined streams (no muxing needed) are better than muxed
+    if (!a.needsMuxing && b.needsMuxing) return -1;
+    if (a.needsMuxing && !b.needsMuxing) return 1;
+    // Then by quality
+    const rankA = qualityPriority.findIndex(p => (a.quality || '').toLowerCase().includes(p));
+    const rankB = qualityPriority.findIndex(p => (b.quality || '').toLowerCase().includes(p));
+    return (rankA === -1 ? 999 : rankA) - (rankB === -1 ? 999 : rankB);
+  });
+  
+  // DASH is always best - return immediately
+  if (sortedResults.length > 0 && sortedResults[0].isDash) {
+    console.log(`  ✓ [Piped] Selected DASH manifest (highest quality available)`);
+    return sortedResults[0].url;
   }
   
-  if (bestResult) {
-    console.log(`  ✓ [Piped] Got URL from Piped (quality: ${bestResult.quality || 'unknown'}, from ${successfulResults.length}/${PIPED_INSTANCES.length} instances)`);
-    return bestResult.url;
+  // Return best result (already sorted)
+  if (sortedResults.length > 0) {
+    bestResult = sortedResults[0];
+    const muxInfo = bestResult.needsMuxing ? ' (will mux video+audio)' : '';
+    console.log(`  ✓ [Piped] Got URL from Piped (quality: ${bestResult.quality || 'unknown'}${muxInfo}, from ${successfulResults.length}/${PIPED_INSTANCES.length} instances)`);
+    // Return the result object (not just URL) so we can check for muxing
+    return bestResult;
   }
   
   return null;
@@ -1036,8 +1039,8 @@ async function resolvePreview(imdbId, type) {
     console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
     
     // Try Piped first, then Invidious
-    const pipedUrl = await extractViaPiped(tmdbMeta.youtubeTrailerKey);
-    if (pipedUrl) {
+    const pipedResult = await extractViaPiped(tmdbMeta.youtubeTrailerKey);
+    if (pipedResult) {
       setCache(imdbId, {
         track_id: null,
         preview_url: null,
@@ -1045,10 +1048,14 @@ async function resolvePreview(imdbId, type) {
         youtube_key: tmdbMeta.youtubeTrailerKey
       });
       console.log(`✓ Got URL from Piped`);
+      // Handle both string (URL) and object (with muxing info) formats
+      const pipedUrl = typeof pipedResult === 'string' ? pipedResult : pipedResult.url;
       return {
         found: true,
         source: 'youtube',
         previewUrl: pipedUrl,
+        audioUrl: pipedResult.audioUrl || null,
+        needsMuxing: pipedResult.needsMuxing || false,
         youtubeKey: tmdbMeta.youtubeTrailerKey,
         country: 'yt'
       };
