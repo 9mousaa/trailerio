@@ -9,7 +9,7 @@ A React application for watching trailers and previews directly in Stremio. Auto
 - **React** - UI framework
 - **shadcn-ui** - UI components
 - **Tailwind CSS** - Styling
-- **Supabase** - Backend services
+- **Express** - Backend API server (standalone, no external dependencies)
 
 ## Local Development
 

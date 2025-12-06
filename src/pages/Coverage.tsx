@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, Database, Target, TrendingUp, XCircle, CheckCircle } from "lucide-react";
 
-const ADDON_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/stremio-addon`;
+const ADDON_URL = import.meta.env.VITE_API_URL || '/api';
 
 // Title lookup map
 const TITLE_MAP: Record<string, string> = {
@@ -133,7 +133,11 @@ const Coverage = () => {
   useEffect(() => {
     const fetchStats = async () => {
       try {
-        const response = await fetch(`${ADDON_URL}/stats`);
+        const response = await fetch(`${ADDON_URL}/stats`, {
+          headers: {
+            'Accept': 'application/json'
+          }
+        });
         const data = await response.json();
         setStats(data);
       } catch (err: any) {

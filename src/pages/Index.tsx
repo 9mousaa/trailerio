@@ -6,7 +6,8 @@ import { toast } from "sonner";
 import { Play, Copy, Check, Film, Tv } from "lucide-react";
 import { VideoPlayer } from "@/components/VideoPlayer";
 
-const ADDON_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/stremio-addon`;
+// Use relative URL for API (will be proxied or use same origin)
+const ADDON_URL = import.meta.env.VITE_API_URL || '/api';
 const MANIFEST_URL = `${ADDON_URL}/manifest.json`;
 
 // Title lookup map
@@ -153,7 +154,11 @@ const Index = () => {
     setTestResult(null);
     
     try {
-      const response = await fetch(`${ADDON_URL}/stream/${testType}/${testImdbId}.json`);
+      const response = await fetch(`${ADDON_URL}/stream/${testType}/${testImdbId}.json`, {
+        headers: {
+          'Accept': 'application/json'
+        }
+      });
       const data = await response.json();
       setTestResult(data);
       
