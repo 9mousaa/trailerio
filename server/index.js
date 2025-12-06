@@ -874,13 +874,22 @@ app.get('/proxy-video', async (req, res) => {
   try {
     // Build headers for upstream request, forwarding Range if present
     const rangeHeader = req.headers.range;
+    
+    // Detect if this is a Piped/Invidious proxy URL (they need different headers)
+    const isPipedProxy = videoUrl.includes('pipedproxy') || videoUrl.includes('pipedapi');
+    const isInvidious = videoUrl.includes('invidious') || videoUrl.includes('iv.') || videoUrl.includes('yewtu.be');
+    
     const fetchHeaders = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Accept': '*/*',
       'Accept-Language': 'en-US,en;q=0.9',
-      'Referer': 'https://www.youtube.com/',
-      'Origin': 'https://www.youtube.com',
     };
+    
+    // Piped/Invidious proxy URLs don't need YouTube-specific headers
+    if (!isPipedProxy && !isInvidious) {
+      fetchHeaders['Referer'] = 'https://www.youtube.com/';
+      fetchHeaders['Origin'] = 'https://www.youtube.com';
+    }
     
     if (rangeHeader) {
       fetchHeaders['Range'] = rangeHeader;
@@ -894,19 +903,29 @@ app.get('/proxy-video', async (req, res) => {
         headers: fetchHeaders 
       });
       
-      const contentType = headResponse.headers.get('Content-Type') || 'video/mp4';
+      // For Piped/Invidious, ensure we get proper Content-Type
+      let contentType = headResponse.headers.get('Content-Type') || '';
+      if (!contentType.includes('video/')) {
+        // If Content-Type is missing or wrong, default to mp4 (most common)
+        contentType = 'video/mp4';
+      }
+      
       const contentLength = headResponse.headers.get('Content-Length');
       const acceptRanges = headResponse.headers.get('Accept-Ranges') || 'bytes';
       
+      // Set headers BEFORE sending response (critical for AVPlayer)
       res.set({
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
         'Access-Control-Allow-Headers': 'Range',
         'Content-Type': contentType,
-        'Content-Length': contentLength || '0',
         'Accept-Ranges': acceptRanges,
         'Cache-Control': 'public, max-age=3600',
       });
+      
+      if (contentLength) {
+        res.set('Content-Length', contentLength);
+      }
       
       return res.status(headResponse.ok ? 200 : headResponse.status).end();
     }
@@ -916,25 +935,39 @@ app.get('/proxy-video', async (req, res) => {
     // Handle both 200 (full content) and 206 (partial content) as success
     if (!videoResponse.ok && videoResponse.status !== 206) {
       console.log(`Proxy fetch failed: HTTP ${videoResponse.status}`);
-      return res.status(videoResponse.status).json({ error: `Upstream returned ${videoResponse.status}` });
+      if (!res.headersSent) {
+        return res.status(videoResponse.status).json({ error: `Upstream returned ${videoResponse.status}` });
+      }
+      return;
     }
     
     // AVPlayer requires explicit video/mp4 Content-Type
-    const upstreamContentType = videoResponse.headers.get('Content-Type') || '';
-    const contentType = upstreamContentType.includes('video/') 
-      ? upstreamContentType 
-      : 'video/mp4'; // Default to mp4 for AVPlayer compatibility
+    // Piped/Invidious might return wrong or missing Content-Type
+    let upstreamContentType = videoResponse.headers.get('Content-Type') || '';
+    
+    // If Content-Type is missing or not video, default to mp4 (AVPlayer requirement)
+    if (!upstreamContentType.includes('video/')) {
+      // Check URL extension as fallback
+      if (videoUrl.includes('.m4v') || videoUrl.includes('.mp4')) {
+        upstreamContentType = 'video/mp4';
+      } else if (videoUrl.includes('.webm')) {
+        upstreamContentType = 'video/webm';
+      } else {
+        upstreamContentType = 'video/mp4'; // Default to mp4 for AVPlayer
+      }
+      console.log(`  ⚠️ Content-Type missing/wrong, using: ${upstreamContentType}`);
+    }
     
     const contentLength = videoResponse.headers.get('Content-Length');
     const contentRange = videoResponse.headers.get('Content-Range');
     const acceptRanges = videoResponse.headers.get('Accept-Ranges') || 'bytes';
     
-    // Set headers BEFORE piping (critical for AVPlayer)
+    // Set headers BEFORE piping (critical for AVPlayer - headers must be set before body)
     res.set({
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
       'Access-Control-Allow-Headers': 'Range',
-      'Content-Type': contentType,
+      'Content-Type': upstreamContentType,
       'Accept-Ranges': acceptRanges,
       'Cache-Control': 'public, max-age=3600',
     });
@@ -952,9 +985,9 @@ app.get('/proxy-video', async (req, res) => {
     const responseStatus = videoResponse.status === 206 ? 206 : 200;
     res.status(responseStatus);
     
-    console.log(`✓ Proxying video, status: ${responseStatus}, type: ${contentType}, size: ${contentLength || 'chunked'}, range: ${contentRange || 'none'}`);
+    console.log(`✓ Proxying video, status: ${responseStatus}, type: ${upstreamContentType}, size: ${contentLength || 'chunked'}, range: ${contentRange || 'none'}`);
     
-    // Stream the video
+    // Stream the video - pipe directly without buffering (critical for AVPlayer)
     videoResponse.body.pipe(res);
   } catch (e) {
     console.error('Proxy error:', e);
@@ -1030,11 +1063,22 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         : `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`;
       
       let finalUrl = result.previewUrl;
-      if (isYouTube && result.previewUrl.includes('googlevideo.com') && !result.previewUrl.includes('video-ssl.itunes.apple.com')) {
+      // Wrap YouTube/Piped/Invidious URLs in proxy for AVPlayer compatibility
+      // iTunes URLs work directly, so don't proxy them
+      const needsProxy = isYouTube && (
+        result.previewUrl.includes('googlevideo.com') ||
+        result.previewUrl.includes('pipedproxy') ||
+        result.previewUrl.includes('pipedapi') ||
+        result.previewUrl.includes('invidious') ||
+        result.previewUrl.includes('iv.') ||
+        result.previewUrl.includes('yewtu.be')
+      ) && !result.previewUrl.includes('video-ssl.itunes.apple.com');
+      
+      if (needsProxy) {
         const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
         const host = req.get('x-forwarded-host') || req.get('host') || 'localhost';
         finalUrl = `${protocol}://${host}/api/proxy-video?url=${encodeURIComponent(result.previewUrl)}`;
-        console.log(`Wrapping googlevideo.com URL in proxy: ${finalUrl.substring(0, 80)}...`);
+        console.log(`Wrapping ${isYouTube ? 'YouTube' : 'Piped/Invidious'} URL in proxy: ${finalUrl.substring(0, 80)}...`);
       }
       
       console.log(`  ✓ Returning stream for ${id}: ${finalUrl.substring(0, 80)}...`);
