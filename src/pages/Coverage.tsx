@@ -2,7 +2,15 @@ import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, Database, Target, TrendingUp, XCircle, CheckCircle } from "lucide-react";
 
-const ADDON_URL = import.meta.env.VITE_API_URL || '/api';
+// Use relative URL for API (will be proxied or use same origin)
+const getBaseUrl = () => {
+  if (typeof window !== 'undefined') {
+    return `${window.location.protocol}//${window.location.host}`;
+  }
+  return '';
+};
+
+const ADDON_URL = import.meta.env.VITE_API_URL || `${getBaseUrl()}/api`;
 
 // Title lookup map
 const TITLE_MAP: Record<string, string> = {

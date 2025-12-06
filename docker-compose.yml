@@ -29,10 +29,15 @@ services:
       # Traefik configuration (update Host rule to match your domain)
       - "traefik.enable=true"
       - "traefik.http.routers.trailerio.rule=Host(`trailerio.your-domain.com`)"
-      - "traefik.http.routers.trailerio.entrypoints=web"
       - "traefik.http.routers.trailerio.entrypoints=websecure"
       - "traefik.http.routers.trailerio.tls.certresolver=letsencrypt"
       - "traefik.http.services.trailerio.loadbalancer.server.port=80"
+      # HTTP to HTTPS redirect
+      - "traefik.http.routers.trailerio-http.rule=Host(`trailerio.your-domain.com`)"
+      - "traefik.http.routers.trailerio-http.entrypoints=web"
+      - "traefik.http.routers.trailerio-http.middlewares=trailerio-redirect"
+      - "traefik.http.middlewares.trailerio-redirect.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.trailerio-redirect.redirectscheme.permanent=true"
     networks:
       - trailerio-internal
       - traefik_network

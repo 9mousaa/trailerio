@@ -30,6 +30,7 @@ dist-ssr
 
 # Private deployment scripts
 deploy-private.sh
+ONE-LINER.txt
 
 # Docker
 .dockerignore
