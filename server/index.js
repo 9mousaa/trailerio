@@ -616,6 +616,72 @@ async function extractViaPiped(youtubeKey) {
   return null;
 }
 
+// ============ COBALT EXTRACTOR ============
+
+const COBALT_FALLBACK_INSTANCES = [
+  'https://cobalt-api.kwiatekmiki.com',
+  'https://capi.3kh0.net',
+  'https://cobalt.api.timelessnesses.me',
+  'https://cobalt-backend.canine.tools',
+  'https://cobalt-api.meowing.de',
+  'https://nuko-c.meowing.de',
+  'https://dl.khyernet.xyz',
+  'https://cobalt.lostdusty.dev',
+];
+
+async function extractViaCobalt(youtubeKey) {
+  const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
+  const instances = COBALT_FALLBACK_INSTANCES;
+  
+  console.log(`Trying ${instances.length} Cobalt instances for ${youtubeKey}`);
+  
+  const requestConfigs = [
+    { url: youtubeUrl, videoQuality: '720', youtubeVideoCodec: 'h264', youtubeVideoContainer: 'mp4', downloadMode: 'auto', audioFormat: 'best', alwaysProxy: false },
+    { url: youtubeUrl, videoQuality: '1080', youtubeVideoCodec: 'h264', youtubeVideoContainer: 'mp4', downloadMode: 'auto', audioFormat: 'best', alwaysProxy: false },
+  ];
+  
+  const tryInstance = async (instance, config) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    
+    try {
+      const response = await fetch(instance, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify(config),
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+      
+      if (!response.ok) return null;
+      const data = await response.json();
+      
+      if ((data.status === 'redirect' || data.status === 'tunnel') && data.url) {
+        // Only accept redirect (direct) URLs, skip tunnel
+        if (data.status === 'redirect') {
+          console.log(`  ✓ Cobalt ${instance}: REDIRECT (direct URL)`);
+          return data.url;
+        }
+      }
+      return null;
+    } catch {
+      clearTimeout(timeout);
+      return null;
+    }
+  };
+  
+  for (const config of requestConfigs) {
+    const results = await Promise.all(instances.map(instance => tryInstance(instance, config)));
+    const redirectResult = results.find(r => r !== null);
+    if (redirectResult) {
+      return redirectResult;
+    }
+  }
+  
+  console.log(`  No Cobalt instance returned a direct URL`);
+  return null;
+}
+
 async function extractYouTubeDirectUrl(youtubeKey) {
   console.log(`\n========== Extracting YouTube URL for key: ${youtubeKey} ==========`);
   
@@ -629,6 +695,14 @@ async function extractYouTubeDirectUrl(youtubeKey) {
   if (invidiousUrl) {
     console.log('✓ Got YouTube URL from Invidious');
     return invidiousUrl;
+  }
+  
+  // Try Cobalt as last resort
+  console.log('Trying Cobalt as last resort...');
+  const cobaltUrl = await extractViaCobalt(youtubeKey);
+  if (cobaltUrl) {
+    console.log('✓ Got YouTube direct URL from Cobalt');
+    return cobaltUrl;
   }
   
   console.log('No YouTube URL found from any extractor');
