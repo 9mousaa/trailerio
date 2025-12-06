@@ -9,11 +9,14 @@ COPY package*.json ./
 # Install dependencies
 RUN npm ci
 
-# Copy source code
+# Copy source code (excluding what's in .dockerignore)
 COPY . .
 
 # Build the application
 RUN npm run build
+
+# Verify build output
+RUN ls -la /app/dist && test -f /app/dist/index.html || (echo "Build failed: index.html not found" && exit 1)
 
 # Production stage
 FROM nginx:alpine
