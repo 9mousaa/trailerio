@@ -1133,8 +1133,14 @@ fetchFreeProxies().catch(() => {
   console.log('Failed to fetch free proxies on startup, will retry on first use');
 });
 
+// Health check endpoint (must be early for load balancer checks)
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', version: '2.0.0' });
+});
+
+// Root endpoint for basic connectivity check
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', service: 'trailerio-backend', version: '2.0.0' });
 });
 
 // AVPlayer-compatible video proxy endpoint
