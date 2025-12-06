@@ -616,7 +616,6 @@ const PIPED_INSTANCES = [
 
 async function extractViaPiped(youtubeKey) {
   console.log(`  [Piped] Trying ${PIPED_INSTANCES.length} instances for ${youtubeKey}...`);
-  console.log(`  [Piped] Why Piped works: Distributed instances across multiple IPs, proper browser-like requests, maintained by communities`);
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
@@ -665,18 +664,21 @@ async function extractViaPiped(youtubeKey) {
             return rankA - rankB;
           });
         
-        // Prefer combined streams (video + audio) over video-only
-        const combinedStreams = sorted.filter(s => !s.videoOnly);
-        if (combinedStreams.length > 0) {
-          const best = combinedStreams[0];
-          console.log(`  ✓ [Piped] ${instance}: selected ${best.quality || 'unknown'} (best available: ${sorted[0]?.quality || 'unknown'})`);
+        // Find best quality available (sorted[0] is highest quality)
+        const bestQuality = sorted[0]?.quality;
+        
+        // Prefer combined streams (video + audio) of the best quality
+        const bestCombinedStreams = sorted.filter(s => !s.videoOnly && s.quality === bestQuality);
+        if (bestCombinedStreams.length > 0) {
+          const best = bestCombinedStreams[0];
+          console.log(`  ✓ [Piped] ${instance}: selected ${best.quality || 'unknown'}`);
           return { url: best.url, quality: best.quality, isDash: false };
         }
         
-        // Fallback to video-only if no combined streams
+        // Fallback to best quality video-only if no combined stream of that quality
         if (sorted.length > 0) {
           const best = sorted[0];
-          console.log(`  ✓ [Piped] ${instance}: selected ${best.quality || 'unknown'} (video-only, best available)`);
+          console.log(`  ✓ [Piped] ${instance}: selected ${best.quality || 'unknown'} (video-only)`);
           return { url: best.url, quality: best.quality, isDash: false };
         }
       }
@@ -1000,31 +1002,10 @@ async function resolvePreview(imdbId, type) {
     return { ...itunesResult, source: 'itunes' };
   }
   
-  // PRIORITY 2: Try yt-dlp with proxies (now that we have proxy support)
+  // PRIORITY 2: Try public instances (Piped/Invidious) - more reliable than yt-dlp
   if (tmdbMeta.youtubeTrailerKey) {
-    console.log('\n========== iTunes not found, trying yt-dlp with proxies ==========');
+    console.log('\n========== iTunes not found, trying public instances (Piped/Invidious) ==========');
     console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
-    
-    const ytdlpUrl = await extractViaYtDlp(tmdbMeta.youtubeTrailerKey);
-    if (ytdlpUrl) {
-      setCache(imdbId, {
-        track_id: null,
-        preview_url: null,
-        country: 'yt',
-        youtube_key: tmdbMeta.youtubeTrailerKey
-      });
-      console.log(`✓ Got URL from yt-dlp`);
-      return {
-        found: true,
-        source: 'youtube',
-        previewUrl: ytdlpUrl,
-        youtubeKey: tmdbMeta.youtubeTrailerKey,
-        country: 'yt'
-      };
-    }
-    
-    // PRIORITY 3: Try public instances (Piped/Invidious) as fallback
-    console.log('\n========== yt-dlp failed, trying public instances (Piped/Invidious) ==========');
     
     // Try Piped first, then Invidious
     const pipedUrl = await extractViaPiped(tmdbMeta.youtubeTrailerKey);
@@ -1058,6 +1039,26 @@ async function resolvePreview(imdbId, type) {
         found: true,
         source: 'youtube',
         previewUrl: invidiousUrl,
+        youtubeKey: tmdbMeta.youtubeTrailerKey,
+        country: 'yt'
+      };
+    }
+    
+    // PRIORITY 3: Try yt-dlp as last resort (often blocked)
+    console.log('\n========== Public instances failed, trying yt-dlp (last resort) ==========');
+    const ytdlpUrl = await extractViaYtDlp(tmdbMeta.youtubeTrailerKey);
+    if (ytdlpUrl) {
+      setCache(imdbId, {
+        track_id: null,
+        preview_url: null,
+        country: 'yt',
+        youtube_key: tmdbMeta.youtubeTrailerKey
+      });
+      console.log(`✓ Got URL from yt-dlp`);
+      return {
+        found: true,
+        source: 'youtube',
+        previewUrl: ytdlpUrl,
         youtubeKey: tmdbMeta.youtubeTrailerKey,
         country: 'yt'
       };
