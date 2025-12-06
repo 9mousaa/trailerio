@@ -28,10 +28,8 @@ dist-ssr
 .env.local
 .env.*.local
 
-# Private deployment scripts
-deploy-private.sh
-ONE-LINER.txt
-FIX-SSL.md
+# Environment variables
+.env.local
 
 # Docker
 .dockerignore
