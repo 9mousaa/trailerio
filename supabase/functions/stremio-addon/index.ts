@@ -632,6 +632,22 @@ async function extractViaInvidious(youtubeKey: string): Promise<string | null> {
       
       const data = await response.json();
       
+      // PRIORITY 1: Use DASH manifest if available (adaptive streaming with all quality levels + audio)
+      if (data.dashUrl) {
+        console.log(`  ✓ Invidious ${instance}: got DASH manifest (adaptive quality + audio)`);
+        // Proxy the DASH manifest to handle CORS
+        const proxyUrl = `${baseUrl}/functions/v1/stremio-addon/proxy-video?url=${encodeURIComponent(data.dashUrl)}`;
+        return proxyUrl;
+      }
+      
+      // PRIORITY 2: Use HLS manifest if available (often used for live streams)
+      if (data.hlsUrl) {
+        console.log(`  ✓ Invidious ${instance}: got HLS manifest (adaptive streaming)`);
+        const proxyUrl = `${baseUrl}/functions/v1/stremio-addon/proxy-video?url=${encodeURIComponent(data.hlsUrl)}`;
+        return proxyUrl;
+      }
+      
+      // PRIORITY 3: Fall back to formatStreams (combined video+audio)
       // Quality priority: 4K/2160p > 1440p > 1080p > 720p, HDR preferred
       const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
       
