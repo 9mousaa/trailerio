@@ -495,6 +495,13 @@ async function extractViaPiped(youtubeKey) {
       if (!response.ok) return null;
       const data = await response.json();
       
+      // PRIORITY 1: DASH manifest (best for AVPlayer - native support, adaptive streaming)
+      if (data.dash) {
+        console.log(`  ✓ [Piped] ${instance}: got DASH manifest (adaptive quality + audio)`);
+        return data.dash;
+      }
+      
+      // PRIORITY 2: Video streams (fallback if no DASH)
       if (data.videoStreams?.length > 0) {
         const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
         const getQualityRank = (q) => {
