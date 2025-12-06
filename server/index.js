@@ -206,16 +206,18 @@ async function getWorkingPipedInstances() {
 async function extractViaPiped(youtubeKey) {
   try {
     const instances = await getWorkingPipedInstances();
-    console.log(`Trying ${instances.length} Piped instances for ${youtubeKey}`);
+    // Limit to first 3 instances for faster response
+    const limitedInstances = instances.slice(0, 3);
+    console.log(`Trying ${limitedInstances.length} Piped instances for ${youtubeKey}`);
     
-    if (!instances || instances.length === 0) {
+    if (!limitedInstances || limitedInstances.length === 0) {
       console.log('No Piped instances available');
       return null;
     }
     
     const tryInstance = async (instance) => {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 6000);
+      const timeout = setTimeout(() => controller.abort(), 3000); // Reduced to 3s
       
       try {
         const url = `${instance}/streams/${youtubeKey}`;
@@ -276,7 +278,7 @@ async function extractViaPiped(youtubeKey) {
   };
   
   // Try all instances in parallel, return first success
-  const results = await Promise.all(instances.map(tryInstance));
+  const results = await Promise.all(limitedInstances.map(tryInstance));
   const validUrl = results.find(r => r !== null);
   
   if (validUrl) {
@@ -508,8 +510,17 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     return res.json({ streams: [] });
   }
   
+  // Set overall timeout for the request (10 seconds)
+  const timeout = setTimeout(() => {
+    console.log(`Request timeout for ${id}`);
+    if (!res.headersSent) {
+      res.json({ streams: [] });
+    }
+  }, 10000);
+  
   try {
     const result = await resolvePreview(id, type);
+    clearTimeout(timeout);
     
     if (result.found && result.previewUrl) {
       const streamName = 'Official Trailer';
@@ -528,9 +539,12 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     console.log(`No preview found for ${id}`);
     res.json({ streams: [] });
   } catch (error) {
+    clearTimeout(timeout);
     console.error('Stream error:', error.message || error);
     console.error('Stack:', error.stack);
-    res.json({ streams: [] });
+    if (!res.headersSent) {
+      res.json({ streams: [] });
+    }
   }
 });
 
