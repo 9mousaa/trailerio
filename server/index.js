@@ -654,6 +654,7 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', version: '2.0.0' });
 });
 
+// AVPlayer-compatible video proxy endpoint
 app.get('/proxy-video', async (req, res) => {
   const videoUrl = req.query.url;
   if (!videoUrl) {
@@ -678,6 +679,30 @@ app.get('/proxy-video', async (req, res) => {
       console.log(`  Range request: ${rangeHeader}`);
     }
     
+    // Handle HEAD requests (AVPlayer often sends HEAD first to check availability)
+    if (req.method === 'HEAD') {
+      const headResponse = await fetch(videoUrl, { 
+        method: 'HEAD',
+        headers: fetchHeaders 
+      });
+      
+      const contentType = headResponse.headers.get('Content-Type') || 'video/mp4';
+      const contentLength = headResponse.headers.get('Content-Length');
+      const acceptRanges = headResponse.headers.get('Accept-Ranges') || 'bytes';
+      
+      res.set({
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+        'Access-Control-Allow-Headers': 'Range',
+        'Content-Type': contentType,
+        'Content-Length': contentLength || '0',
+        'Accept-Ranges': acceptRanges,
+        'Cache-Control': 'public, max-age=3600',
+      });
+      
+      return res.status(headResponse.ok ? 200 : headResponse.status).end();
+    }
+    
     const videoResponse = await fetch(videoUrl, { headers: fetchHeaders });
     
     // Handle both 200 (full content) and 206 (partial content) as success
@@ -686,28 +711,38 @@ app.get('/proxy-video', async (req, res) => {
       return res.status(videoResponse.status).json({ error: `Upstream returned ${videoResponse.status}` });
     }
     
-    const contentType = videoResponse.headers.get('Content-Type') || 'video/mp4';
+    // AVPlayer requires explicit video/mp4 Content-Type
+    const upstreamContentType = videoResponse.headers.get('Content-Type') || '';
+    const contentType = upstreamContentType.includes('video/') 
+      ? upstreamContentType 
+      : 'video/mp4'; // Default to mp4 for AVPlayer compatibility
+    
     const contentLength = videoResponse.headers.get('Content-Length');
     const contentRange = videoResponse.headers.get('Content-Range');
+    const acceptRanges = videoResponse.headers.get('Accept-Ranges') || 'bytes';
     
-    const responseHeaders = {
+    // Set headers BEFORE piping (critical for AVPlayer)
+    res.set({
       'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+      'Access-Control-Allow-Headers': 'Range',
       'Content-Type': contentType,
-      'Accept-Ranges': 'bytes',
+      'Accept-Ranges': acceptRanges,
       'Cache-Control': 'public, max-age=3600',
-    };
+    });
     
     if (contentLength) {
-      responseHeaders['Content-Length'] = contentLength;
+      res.set('Content-Length', contentLength);
     }
     
-    // Forward Content-Range for partial content responses
+    // Forward Content-Range for partial content responses (required for AVPlayer seeking)
     if (contentRange) {
-      responseHeaders['Content-Range'] = contentRange;
+      res.set('Content-Range', contentRange);
     }
     
     // Use 206 status if we got partial content, otherwise 200
     const responseStatus = videoResponse.status === 206 ? 206 : 200;
+    res.status(responseStatus);
     
     console.log(`✓ Proxying video, status: ${responseStatus}, type: ${contentType}, size: ${contentLength || 'chunked'}, range: ${contentRange || 'none'}`);
     
@@ -715,8 +750,21 @@ app.get('/proxy-video', async (req, res) => {
     videoResponse.body.pipe(res);
   } catch (e) {
     console.error('Proxy error:', e);
-    res.status(500).json({ error: 'Failed to proxy video' });
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to proxy video' });
+    }
   }
+});
+
+// Handle OPTIONS requests for CORS (AVPlayer may send these)
+app.options('/proxy-video', (req, res) => {
+  res.set({
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+    'Access-Control-Allow-Headers': 'Range',
+    'Access-Control-Max-Age': '86400',
+  });
+  res.status(204).end();
 });
 
 app.get('/manifest.json', (req, res) => {
