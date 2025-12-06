@@ -501,7 +501,7 @@ async function extractViaInvidious(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 6000);
+    const timeout = setTimeout(() => controller.abort(), 4000); // Reduced to 4s
     
     try {
       const response = await fetch(`${instance}/api/v1/videos/${youtubeKey}`, {
@@ -594,7 +594,7 @@ async function extractViaPiped(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 6000);
+    const timeout = setTimeout(() => controller.abort(), 4000); // Reduced to 4s
     
     try {
       const response = await fetch(`${instance}/streams/${youtubeKey}`, {
@@ -684,7 +684,7 @@ async function extractViaCobalt(youtubeKey) {
   
   const tryInstance = async (instance, config) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
+    const timeout = setTimeout(() => controller.abort(), 5000); // Reduced to 5s
     
     try {
       const response = await fetch(instance, {
@@ -728,7 +728,7 @@ async function extractViaCobalt(youtubeKey) {
 
 async function extractViaYtDlp(youtubeKey) {
   const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
-  console.log(`Trying yt-dlp directly for ${youtubeKey}...`);
+  console.log(`  [yt-dlp] Trying ${youtubeKey}...`);
   
   try {
     // Try highest quality FIRST - single request for best available
@@ -737,22 +737,25 @@ async function extractViaYtDlp(youtubeKey) {
     const formatString = 'bestvideo[height<=2160]+bestaudio/bestvideo[height<=1440]+bestaudio/bestvideo[height<=1080]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=2160]/best[height<=1080]/best';
     
     try {
+      const startTime = Date.now();
       const { stdout, stderr } = await Promise.race([
         execAsync(`yt-dlp -f "${formatString}" -g --no-warnings --no-playlist "${youtubeUrl}"`, {
-          timeout: 6000 // 6 seconds
+          timeout: 5000 // 5 seconds - faster timeout
         }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 6000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
       ]);
+      const elapsed = Date.now() - startTime;
       
       const url = stdout.trim();
       if (url && url.startsWith('http')) {
         // Check if we got multiple URLs (video+audio separate)
         const urls = url.split('\n').filter(u => u.trim().startsWith('http'));
         const finalUrl = urls.length > 1 ? urls[0] : url; // Use first URL if multiple
-        console.log(`  ✓ yt-dlp: got URL (${urls.length > 1 ? 'separate streams' : 'combined'})`);
+        console.log(`  ✓ [yt-dlp] Got URL in ${elapsed}ms (${urls.length > 1 ? 'separate streams' : 'combined'})`);
         return finalUrl;
       }
     } catch (e) {
+      console.log(`  [yt-dlp] First attempt failed: ${e.message || e}, trying simpler format...`);
       // Fallback to simpler format if first fails
       try {
         const { stdout } = await Promise.race([
@@ -782,43 +785,41 @@ async function extractViaYtDlp(youtubeKey) {
 
 async function extractYouTubeDirectUrl(youtubeKey) {
   console.log(`\n========== Extracting YouTube URL for key: ${youtubeKey} ==========`);
+  const startTime = Date.now();
   
   // PRIORITY 1: yt-dlp directly (fastest, highest quality, no external dependencies)
-  // Try with short timeout - if it fails quickly, try fallbacks in parallel
+  // Start ALL extractors in parallel for maximum speed
   const ytdlpPromise = extractViaYtDlp(youtubeKey);
+  const pipedPromise = extractViaPiped(youtubeKey);
+  const invidiousPromise = extractViaInvidious(youtubeKey);
   
-  // Start fallbacks in parallel (but yt-dlp should succeed first)
-  const fallbackPromises = Promise.all([
-    extractViaPiped(youtubeKey),
-    extractViaInvidious(youtubeKey)
+  // Wait for first success (race condition - fastest wins)
+  const results = await Promise.allSettled([
+    ytdlpPromise.then(url => ({ source: 'yt-dlp', url })),
+    pipedPromise.then(url => ({ source: 'piped', url })),
+    invidiousPromise.then(url => ({ source: 'invidious', url }))
   ]);
   
-  // Wait for yt-dlp first (fastest)
-  const ytdlpUrl = await ytdlpPromise;
-  if (ytdlpUrl) {
-    console.log('✓ Got YouTube URL from yt-dlp (direct, highest quality)');
-    return ytdlpUrl;
+  // Find first successful result
+  for (const result of results) {
+    if (result.status === 'fulfilled' && result.value.url) {
+      const elapsed = Date.now() - startTime;
+      console.log(`✓ Got YouTube URL from ${result.value.source} in ${elapsed}ms`);
+      return result.value.url;
+    }
   }
   
-  // If yt-dlp failed, check fallbacks
-  const [pipedUrl, invidiousUrl] = await fallbackPromises;
-  if (pipedUrl) {
-    console.log('✓ Got YouTube URL from Piped (stable proxied)');
-    return pipedUrl;
-  }
-  if (invidiousUrl) {
-    console.log('✓ Got YouTube URL from Invidious');
-    return invidiousUrl;
-  }
-  
-  // Last resort: Cobalt (slower)
+  // Last resort: Cobalt (only if all others failed)
+  console.log('  All primary extractors failed, trying Cobalt...');
   const cobaltUrl = await extractViaCobalt(youtubeKey);
   if (cobaltUrl) {
-    console.log('✓ Got YouTube direct URL from Cobalt');
+    const elapsed = Date.now() - startTime;
+    console.log(`✓ Got YouTube direct URL from Cobalt in ${elapsed}ms`);
     return cobaltUrl;
   }
   
-  console.log('No YouTube URL found from any extractor');
+  const elapsed = Date.now() - startTime;
+  console.log(`✗ No YouTube URL found from any extractor (took ${elapsed}ms)`);
   return null;
 }
 
@@ -1092,13 +1093,24 @@ app.get('/manifest.json', (req, res) => {
 app.get('/stream/:type/:id.json', async (req, res) => {
   const { type, id } = req.params;
   
-  console.log(`Stream request: type=${type}, id=${id}`);
+  console.log(`\n========== Stream request: type=${type}, id=${id} ==========`);
   
   if (!id.startsWith('tt')) {
+    console.log(`  Skipping non-IMDB ID: ${id}`);
     return res.json({ streams: [] });
   }
   
-  const result = await resolvePreview(id, type);
+  // Set overall timeout for the request (15 seconds - Traefik default is 60s, but we want to be faster)
+  const timeout = setTimeout(() => {
+    console.log(`  ⚠️ Request timeout for ${id} after 15s`);
+    if (!res.headersSent) {
+      res.json({ streams: [] });
+    }
+  }, 15000);
+  
+  try {
+    const result = await resolvePreview(id, type);
+    clearTimeout(timeout);
   
   if (result.found && result.previewUrl) {
     const isYouTube = result.source === 'youtube';
@@ -1121,6 +1133,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       console.log(`Wrapping googlevideo.com URL in proxy: ${finalUrl.substring(0, 80)}...`);
     }
     
+    console.log(`  ✓ Returning stream for ${id}: ${finalUrl.substring(0, 80)}...`);
     return res.json({
       streams: [{
         name: streamName,
@@ -1130,7 +1143,16 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     });
   }
   
+  console.log(`  ✗ No preview found for ${id}`);
   return res.json({ streams: [] });
+  } catch (error) {
+    clearTimeout(timeout);
+    console.error(`  ✗ Error resolving ${id}:`, error.message || error);
+    console.error('  Stack:', error.stack);
+    if (!res.headersSent) {
+      res.json({ streams: [] });
+    }
+  }
 });
 
 app.get('/stats', (req, res) => {
