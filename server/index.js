@@ -357,428 +357,38 @@ function findBestMatch(results, tmdbMeta) {
   return null;
 }
 
-// ============ YOUTUBE EXTRACTORS ============
-
-const INVIDIOUS_FALLBACK_INSTANCES = [
-  'https://invidious.fdn.fr',
-  'https://iv.ggtyler.dev',
-  'https://invidious.einfachzocken.eu',
-  'https://invidious.slipfox.xyz',
-  'https://inv.zzls.xyz',
-  'https://invidious.private.coffee',
-  'https://invidious.baczek.me',
-  'https://inv.tux.pizza',
-  'https://invidious.jing.rocks',
-  'https://invidious.darkness.services',
-  'https://yt.drgnz.club',
-  'https://invidious.reallyaweso.me',
-  'https://inv.nadeko.net',
-  'https://invidious.nerdvpn.de',
-  'https://invidious.f5.si',
-  'https://inv.perditum.com',
-  'https://yewtu.be',
-  'https://invidious.privacyredirect.com',
-  'https://vid.puffyan.us',
-  'https://invidious.kavin.rocks',
-];
-
-const PIPED_FALLBACK_INSTANCES = [
-  'https://pipedapi.kavin.rocks',
-  'https://pipedapi.r4fo.com',
-  'https://pipedapi.adminforge.de',
-  'https://api.piped.projectsegfau.lt',
-  'https://pipedapi.in.projectsegfau.lt',
-  'https://piped-api.lunar.icu',
-  'https://pipedapi.moomoo.me',
-  'https://pipedapi.syncpundit.io',
-  'https://piped-api.garudalinux.org',
-  'https://pipedapi.leptons.xyz',
-  'https://watchapi.whatever.social',
-  'https://pipedapi.tokhmi.xyz',
-  'https://pipedapi.mha.fi',
-  'https://api.piped.private.coffee',
-  'https://pipedapi.darkness.services',
-];
-
-let cachedPipedInstances = null;
-let pipedCacheTime = 0;
-const PIPED_CACHE_TTL = 5 * 60 * 1000;
-
-let cachedInvidiousInstances = null;
-let invidiousCacheTime = 0;
-const INVIDIOUS_CACHE_TTL = 5 * 60 * 1000;
-
-async function getWorkingInvidiousInstances() {
-  if (cachedInvidiousInstances && Date.now() - invidiousCacheTime < INVIDIOUS_CACHE_TTL) {
-    return cachedInvidiousInstances;
-  }
-  
-  const combined = [...INVIDIOUS_FALLBACK_INSTANCES];
-  
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
-    
-    const response = await fetch('https://api.invidious.io/instances.json', {
-      signal: controller.signal,
-      headers: { 'Accept': 'application/json' }
-    });
-    clearTimeout(timeout);
-    
-    if (response.ok) {
-      const instances = await response.json();
-      const dynamicInstances = instances
-        .filter(([uri, data]) => 
-          data.type === 'https' &&
-          uri && 
-          !uri.includes('.onion') &&
-          !uri.includes('.i2p')
-        )
-        .sort(([, a], [, b]) => 
-          (b.users?.total || 0) - (a.users?.total || 0)
-        )
-        .map(([uri]) => `https://${uri}`);
-      
-      for (const inst of dynamicInstances) {
-        if (!combined.includes(inst)) {
-          combined.push(inst);
-        }
-      }
-    }
-  } catch (e) {
-    // Use fallback
-  }
-  
-  const result = combined.slice(0, 25);
-  cachedInvidiousInstances = result;
-  invidiousCacheTime = Date.now();
-  return result;
-}
-
-async function getWorkingPipedInstances() {
-  if (cachedPipedInstances && Date.now() - pipedCacheTime < PIPED_CACHE_TTL) {
-    return cachedPipedInstances;
-  }
-  
-  const combined = [...PIPED_FALLBACK_INSTANCES];
-  
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
-    
-    const response = await fetch('https://piped-instances.kavin.rocks/', {
-      signal: controller.signal,
-      headers: { 'Accept': 'application/json' }
-    });
-    clearTimeout(timeout);
-    
-    if (response.ok) {
-      const instances = await response.json();
-      const dynamicInstances = instances
-        .filter(i => i.api_url)
-        .sort((a, b) => (b.uptime_24h || 50) - (a.uptime_24h || 50))
-        .map(i => i.api_url);
-      
-      for (const inst of dynamicInstances) {
-        if (!combined.includes(inst)) {
-          combined.push(inst);
-        }
-      }
-    }
-  } catch (e) {
-    // Use fallback
-  }
-  
-  const result = combined.slice(0, 20);
-  cachedPipedInstances = result;
-  pipedCacheTime = Date.now();
-  return result;
-}
-
-async function extractViaInvidious(youtubeKey) {
-  const invidiousInstances = await getWorkingInvidiousInstances();
-  console.log(`Trying ${invidiousInstances.length} Invidious instances for ${youtubeKey}`);
-  
-  const tryInstance = async (instance) => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 4000); // Reduced to 4s
-    
-    try {
-      const response = await fetch(`${instance}/api/v1/videos/${youtubeKey}`, {
-        headers: { 'Accept': 'application/json' },
-        signal: controller.signal
-      });
-      clearTimeout(timeout);
-      
-      if (!response.ok) {
-        console.log(`  ${instance}: HTTP ${response.status}`);
-        return null;
-      }
-      
-      const data = await response.json();
-      
-      const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
-      
-      const getQualityRank = (label) => {
-        if (!label) return 999;
-        const idx = qualityPriority.findIndex(q => label.includes(q));
-        return idx === -1 ? 998 : idx;
-      };
-      
-      const isHDR = (s) => {
-        return s.qualityLabel?.toLowerCase().includes('hdr') || 
-               s.type?.toLowerCase().includes('hdr') ||
-               s.colorInfo?.primaries === 'bt2020';
-      };
-      
-      if (data.formatStreams?.length > 0) {
-        const sorted = [...data.formatStreams].sort((a, b) => {
-          if (isHDR(a) && !isHDR(b)) return -1;
-          if (!isHDR(a) && isHDR(b)) return 1;
-          return getQualityRank(a.qualityLabel) - getQualityRank(b.qualityLabel);
-        });
-        
-        const stream = sorted.find(s => s.container === 'mp4') || sorted[0];
-        
-        if (stream?.url) {
-          const hdrLabel = isHDR(stream) ? ' HDR' : '';
-          console.log(`  ✓ Invidious ${instance}: got ${stream.qualityLabel || 'unknown'}${hdrLabel} ${stream.container || 'video'}`);
-          return stream.url;
-        }
-      }
-      
-      if (data.adaptiveFormats?.length > 0) {
-        const videoFormats = data.adaptiveFormats.filter(s => 
-          s.type?.includes('video') || s.mimeType?.startsWith('video/')
-        );
-        
-        const sorted = videoFormats.sort((a, b) => {
-          if (isHDR(a) && !isHDR(b)) return -1;
-          if (!isHDR(a) && isHDR(b)) return 1;
-          return getQualityRank(a.qualityLabel) - getQualityRank(b.qualityLabel);
-        });
-        
-        const adaptive = sorted.find(s => s.container === 'mp4' || s.mimeType?.includes('mp4')) || sorted[0];
-        
-        if (adaptive?.url) {
-          const hdrLabel = isHDR(adaptive) ? ' HDR' : '';
-          console.log(`  ✓ Invidious ${instance}: got adaptive ${adaptive.qualityLabel || 'unknown'}${hdrLabel}`);
-          return adaptive.url;
-        }
-      }
-      
-      console.log(`  ${instance}: no usable streams in response`);
-      return null;
-    } catch (e) {
-      clearTimeout(timeout);
-      console.log(`  ${instance}: error - ${e.message || 'unknown'}`);
-      return null;
-    }
-  };
-  
-  const results = await Promise.all(invidiousInstances.map(tryInstance));
-  const validUrl = results.find(r => r !== null);
-  
-  if (validUrl) {
-    console.log(`✓ Got URL from Invidious`);
-    return validUrl;
-  }
-  
-  console.log(`  No Invidious instance returned a valid URL`);
-  return null;
-}
-
-async function extractViaPiped(youtubeKey) {
-  const pipedInstances = await getWorkingPipedInstances();
-  console.log(`Trying ${pipedInstances.length} Piped instances for ${youtubeKey}`);
-  
-  const tryInstance = async (instance) => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 4000); // Reduced to 4s
-    
-    try {
-      const response = await fetch(`${instance}/streams/${youtubeKey}`, {
-        headers: { 'Accept': 'application/json' },
-        signal: controller.signal
-      });
-      clearTimeout(timeout);
-      
-      if (!response.ok) return null;
-      const data = await response.json();
-      
-      if (data.dash) {
-        console.log(`  ✓ Piped ${instance}: got DASH manifest (adaptive quality + audio)`);
-        return data.dash;
-      }
-      
-      if (data.videoStreams?.length > 0) {
-        const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
-        const getQualityRank = (q) => {
-          if (!q) return 999;
-          const idx = qualityPriority.findIndex(p => q.includes(p));
-          return idx === -1 ? 998 : idx;
-        };
-        
-        const sorted = [...data.videoStreams]
-          .filter(s => s.mimeType?.startsWith('video/') && s.url)
-          .sort((a, b) => getQualityRank(a.quality) - getQualityRank(b.quality));
-        
-        // Get HIGHEST quality combined stream (already sorted, first is highest)
-        const combinedStreams = sorted.filter(s => !s.videoOnly);
-        if (combinedStreams.length > 0) {
-          const bestCombined = combinedStreams[0]; // Highest quality
-          console.log(`  ✓ Piped ${instance}: got ${bestCombined.quality || 'unknown'} (combined)`);
-          return bestCombined.url;
-        }
-        
-        // Last resort: highest quality video-only
-        if (sorted.length > 0) {
-          const bestVideoOnly = sorted[0]; // Highest quality
-          console.log(`  ✓ Piped ${instance}: got ${bestVideoOnly.quality || 'unknown'} (video-only)`);
-          return bestVideoOnly.url;
-        }
-      }
-      
-      return null;
-    } catch {
-      clearTimeout(timeout);
-      return null;
-    }
-  };
-  
-  const results = await Promise.all(pipedInstances.map(tryInstance));
-  const validUrl = results.find(r => r !== null);
-  
-  if (validUrl) {
-    console.log(`✓ Got URL from Piped (stable proxied URL)`);
-    return validUrl;
-  }
-  
-  console.log(`  No Piped instance returned a valid URL`);
-  return null;
-}
-
-// ============ COBALT EXTRACTOR ============
-
-const COBALT_FALLBACK_INSTANCES = [
-  'https://cobalt-api.kwiatekmiki.com',
-  'https://capi.3kh0.net',
-  'https://cobalt.api.timelessnesses.me',
-  'https://cobalt-backend.canine.tools',
-  'https://cobalt-api.meowing.de',
-  'https://nuko-c.meowing.de',
-  'https://dl.khyernet.xyz',
-  'https://cobalt.lostdusty.dev',
-];
-
-async function extractViaCobalt(youtubeKey) {
-  const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
-  const instances = COBALT_FALLBACK_INSTANCES;
-  
-  console.log(`Trying ${instances.length} Cobalt instances for ${youtubeKey}`);
-  
-  const requestConfigs = [
-    { url: youtubeUrl, videoQuality: '720', youtubeVideoCodec: 'h264', youtubeVideoContainer: 'mp4', downloadMode: 'auto', audioFormat: 'best', alwaysProxy: false },
-    { url: youtubeUrl, videoQuality: '1080', youtubeVideoCodec: 'h264', youtubeVideoContainer: 'mp4', downloadMode: 'auto', audioFormat: 'best', alwaysProxy: false },
-  ];
-  
-  const tryInstance = async (instance, config) => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000); // Reduced to 5s
-    
-    try {
-      const response = await fetch(instance, {
-        method: 'POST',
-        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-        body: JSON.stringify(config),
-        signal: controller.signal
-      });
-      clearTimeout(timeout);
-      
-      if (!response.ok) return null;
-      const data = await response.json();
-      
-      if ((data.status === 'redirect' || data.status === 'tunnel') && data.url) {
-        // Only accept redirect (direct) URLs, skip tunnel
-        if (data.status === 'redirect') {
-          console.log(`  ✓ Cobalt ${instance}: REDIRECT (direct URL)`);
-          return data.url;
-        }
-      }
-      return null;
-    } catch {
-      clearTimeout(timeout);
-      return null;
-    }
-  };
-  
-  for (const config of requestConfigs) {
-    const results = await Promise.all(instances.map(instance => tryInstance(instance, config)));
-    const redirectResult = results.find(r => r !== null);
-    if (redirectResult) {
-      return redirectResult;
-    }
-  }
-  
-  console.log(`  No Cobalt instance returned a direct URL`);
-  return null;
-}
-
-// ============ YT-DLP DIRECT EXTRACTOR (PRIMARY - MOST STABLE) ============
+// ============ YT-DLP DIRECT EXTRACTOR (ONLY EXTRACTOR - FASTEST, HIGHEST QUALITY) ============
 
 async function extractViaYtDlp(youtubeKey) {
   const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
-  console.log(`  [yt-dlp] Trying ${youtubeKey}...`);
+  console.log(`  [yt-dlp] Extracting highest quality for ${youtubeKey}...`);
+  const startTime = Date.now();
   
   try {
-    // Try highest quality FIRST - single request for best available
-    // Format: Try combined streams first (video+audio), then best available
-    // Priority: 4K > 1440p > 1080p > 720p > best
-    const formatString = 'bestvideo[height<=2160]+bestaudio/bestvideo[height<=1440]+bestaudio/bestvideo[height<=1080]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=2160]/best[height<=1080]/best';
+    // OPTIMIZED FOR HIGHEST QUALITY: Try best combined stream first (video+audio in one)
+    // Format priority: 4K combined > 1440p combined > 1080p combined > 720p combined > best combined > best
+    // This ensures we get the highest quality available in a single stream (fastest playback)
+    const formatString = 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160][ext=mp4]+bestaudio/bestvideo[height<=2160]+bestaudio/bestvideo[height<=1440]+bestaudio/bestvideo[height<=1080]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=2160][ext=mp4]/best[height<=1080][ext=mp4]/best[ext=mp4]/best';
     
-    try {
-      const startTime = Date.now();
-      const { stdout, stderr } = await Promise.race([
-        execAsync(`yt-dlp -f "${formatString}" -g --no-warnings --no-playlist "${youtubeUrl}"`, {
-          timeout: 5000 // 5 seconds - faster timeout
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
-      ]);
+    const { stdout } = await Promise.race([
+      execAsync(`yt-dlp -f "${formatString}" -g --no-warnings --no-playlist --no-check-certificate "${youtubeUrl}"`, {
+        timeout: 4000 // 4 seconds - fast timeout for instant response
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 4000))
+    ]);
+    
+    const url = stdout.trim().split('\n')[0]; // Get first URL (best quality)
+    if (url && url.startsWith('http')) {
       const elapsed = Date.now() - startTime;
-      
-      const url = stdout.trim();
-      if (url && url.startsWith('http')) {
-        // Check if we got multiple URLs (video+audio separate)
-        const urls = url.split('\n').filter(u => u.trim().startsWith('http'));
-        const finalUrl = urls.length > 1 ? urls[0] : url; // Use first URL if multiple
-        console.log(`  ✓ [yt-dlp] Got URL in ${elapsed}ms (${urls.length > 1 ? 'separate streams' : 'combined'})`);
-        return finalUrl;
-      }
-    } catch (e) {
-      console.log(`  [yt-dlp] First attempt failed: ${e.message || e}, trying simpler format...`);
-      // Fallback to simpler format if first fails
-      try {
-        const { stdout } = await Promise.race([
-          execAsync(`yt-dlp -f "best" -g --no-warnings --no-playlist "${youtubeUrl}"`, {
-            timeout: 6000
-          }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 6000))
-        ]);
-        
-        const url = stdout.trim().split('\n')[0]; // Get first URL if multiple
-        if (url && url.startsWith('http')) {
-          console.log(`  ✓ yt-dlp: got URL (fallback)`);
-          return url;
-        }
-      } catch (e2) {
-        console.log(`  yt-dlp error: ${e2.message || e2}`);
-      }
+      console.log(`  ✓ [yt-dlp] Got highest quality URL in ${elapsed}ms`);
+      return url;
     }
     
-    console.log(`  yt-dlp: failed to extract URL`);
+    console.log(`  ✗ [yt-dlp] No valid URL extracted`);
     return null;
   } catch (e) {
-    console.log(`  yt-dlp error: ${e.message || e}`);
+    const elapsed = Date.now() - startTime;
+    console.log(`  ✗ [yt-dlp] Failed after ${elapsed}ms: ${e.message || e}`);
     return null;
   }
 }
@@ -787,39 +397,17 @@ async function extractYouTubeDirectUrl(youtubeKey) {
   console.log(`\n========== Extracting YouTube URL for key: ${youtubeKey} ==========`);
   const startTime = Date.now();
   
-  // PRIORITY 1: yt-dlp directly (fastest, highest quality, no external dependencies)
-  // Start ALL extractors in parallel for maximum speed
-  const ytdlpPromise = extractViaYtDlp(youtubeKey);
-  const pipedPromise = extractViaPiped(youtubeKey);
-  const invidiousPromise = extractViaInvidious(youtubeKey);
+  // ONLY yt-dlp - fastest, highest quality, most stable
+  const url = await extractViaYtDlp(youtubeKey);
   
-  // Wait for first success (race condition - fastest wins)
-  const results = await Promise.allSettled([
-    ytdlpPromise.then(url => ({ source: 'yt-dlp', url })),
-    pipedPromise.then(url => ({ source: 'piped', url })),
-    invidiousPromise.then(url => ({ source: 'invidious', url }))
-  ]);
-  
-  // Find first successful result
-  for (const result of results) {
-    if (result.status === 'fulfilled' && result.value.url) {
-      const elapsed = Date.now() - startTime;
-      console.log(`✓ Got YouTube URL from ${result.value.source} in ${elapsed}ms`);
-      return result.value.url;
-    }
-  }
-  
-  // Last resort: Cobalt (only if all others failed)
-  console.log('  All primary extractors failed, trying Cobalt...');
-  const cobaltUrl = await extractViaCobalt(youtubeKey);
-  if (cobaltUrl) {
+  if (url) {
     const elapsed = Date.now() - startTime;
-    console.log(`✓ Got YouTube direct URL from Cobalt in ${elapsed}ms`);
-    return cobaltUrl;
+    console.log(`✓ Got YouTube URL from yt-dlp in ${elapsed}ms`);
+    return url;
   }
   
   const elapsed = Date.now() - startTime;
-  console.log(`✗ No YouTube URL found from any extractor (took ${elapsed}ms)`);
+  console.log(`✗ Failed to extract YouTube URL (took ${elapsed}ms)`);
   return null;
 }
 
