@@ -638,26 +638,32 @@ async function extractYouTubeDirectUrl(youtubeKey) {
   console.log(`\n========== Extracting YouTube URL for key: ${youtubeKey} ==========`);
   const startTime = Date.now();
   
-  // Priority 1: Try yt-dlp first (highest quality)
-  const ytdlpUrl = await extractViaYtDlp(youtubeKey);
+  // Priority 1: Try yt-dlp first (highest quality) - with shorter timeout to fail fast
+  const ytdlpPromise = extractViaYtDlp(youtubeKey);
+  const ytdlpUrl = await Promise.race([
+    ytdlpPromise,
+    new Promise(resolve => setTimeout(() => resolve(null), 8000)) // 8s timeout for yt-dlp
+  ]);
+  
   if (ytdlpUrl) {
     const elapsed = Date.now() - startTime;
     console.log(`✓ Got YouTube URL from yt-dlp in ${elapsed}ms`);
     return ytdlpUrl;
   }
   
-  // Priority 2: Try Piped (stable, good quality)
-  console.log(`  yt-dlp failed, trying Piped...`);
-  const pipedUrl = await extractViaPiped(youtubeKey);
+  // Priority 2: Try Piped and Invidious in parallel (faster)
+  console.log(`  yt-dlp failed, trying Piped and Invidious in parallel...`);
+  const [pipedUrl, invidiousUrl] = await Promise.all([
+    extractViaPiped(youtubeKey),
+    extractViaInvidious(youtubeKey)
+  ]);
+  
   if (pipedUrl) {
     const elapsed = Date.now() - startTime;
     console.log(`✓ Got YouTube URL from Piped in ${elapsed}ms`);
     return pipedUrl;
   }
   
-  // Priority 3: Try Invidious (fallback)
-  console.log(`  Piped failed, trying Invidious...`);
-  const invidiousUrl = await extractViaInvidious(youtubeKey);
   if (invidiousUrl) {
     const elapsed = Date.now() - startTime;
     console.log(`✓ Got YouTube URL from Invidious in ${elapsed}ms`);
@@ -1042,6 +1048,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   console.log(`  ✗ No preview found for ${id}`);
   return res.json({ streams: [] });
   } catch (error) {
+    timeoutCleared = true;
     clearTimeout(timeout);
     console.error(`  ✗ Error resolving ${id}:`, error.message || error);
     console.error('  Stack:', error.stack);
