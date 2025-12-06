@@ -1,25 +1,23 @@
-// Ported from Supabase function - exact same logic, just using in-memory cache instead of Supabase
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
 const { exec } = require('child_process');
 const { promisify } = require('util');
-const execAsync = promisify(exec);
 
+const execAsync = promisify(exec);
 const app = express();
 const PORT = process.env.PORT || 3001;
 const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
 const CACHE_DAYS = 30;
 const MIN_SCORE_THRESHOLD = 0.6;
 const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
+const YT_DLP_TIMEOUT = 4000;
+const STREAM_TIMEOUT = 15000;
 
-// In-memory cache (replaces Supabase)
 const cache = new Map();
 
 app.use(cors());
 app.use(express.json());
-
-// ============ TITLE NORMALIZATION ============
 
 function normalizeTitle(s) {
   return s
@@ -67,8 +65,6 @@ function levenshteinDistance(s1, s2) {
   }
   return costs[s2.length];
 }
-
-// ============ TMDB METADATA ============
 
 async function getTMDBMetadata(imdbId, type) {
   console.log(`Fetching TMDB metadata for ${imdbId}, type: ${type}`);
@@ -207,8 +203,6 @@ async function getTMDBMetadata(imdbId, type) {
   };
 }
 
-// ============ ITUNES SEARCH ============
-
 async function searchITunes(params) {
   const { term, country, type } = params;
   
@@ -258,8 +252,6 @@ async function searchITunes(params) {
   
   return [];
 }
-
-// ============ SCORING LOGIC ============
 
 function scoreItem(tmdbMeta, item) {
   let score = 0;
@@ -357,24 +349,20 @@ function findBestMatch(results, tmdbMeta) {
   return null;
 }
 
-// ============ YT-DLP DIRECT EXTRACTOR (ONLY EXTRACTOR - FASTEST, HIGHEST QUALITY) ============
-
 async function extractViaYtDlp(youtubeKey) {
   const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
   console.log(`  [yt-dlp] Extracting highest quality for ${youtubeKey}...`);
   const startTime = Date.now();
   
   try {
-    // OPTIMIZED FOR HIGHEST QUALITY: Try best combined stream first (video+audio in one)
-    // Format priority: 4K combined > 1440p combined > 1080p combined > 720p combined > best combined > best
-    // This ensures we get the highest quality available in a single stream (fastest playback)
+    // Format priority: 4K > 1440p > 1080p > 720p > best (MP4 preferred)
     const formatString = 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160][ext=mp4]+bestaudio/bestvideo[height<=2160]+bestaudio/bestvideo[height<=1440]+bestaudio/bestvideo[height<=1080]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=2160][ext=mp4]/best[height<=1080][ext=mp4]/best[ext=mp4]/best';
     
     const { stdout } = await Promise.race([
       execAsync(`yt-dlp -f "${formatString}" -g --no-warnings --no-playlist --no-check-certificate "${youtubeUrl}"`, {
-        timeout: 4000 // 4 seconds - fast timeout for instant response
+        timeout: YT_DLP_TIMEOUT
       }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 4000))
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), YT_DLP_TIMEOUT))
     ]);
     
     const url = stdout.trim().split('\n')[0]; // Get first URL (best quality)
@@ -410,8 +398,6 @@ async function extractYouTubeDirectUrl(youtubeKey) {
   console.log(`✗ Failed to extract YouTube URL (took ${elapsed}ms)`);
   return null;
 }
-
-// ============ MULTI-PASS SEARCH ============
 
 async function multiPassSearch(tmdbMeta) {
   const searchType = tmdbMeta.mediaType === 'movie' ? 'movie' : 'tv';
@@ -470,8 +456,6 @@ async function multiPassSearch(tmdbMeta) {
   console.log('No match found across all passes');
   return { found: false };
 }
-
-// ============ MAIN RESOLVER ============
 
 function getCached(imdbId) {
   const cached = cache.get(imdbId);
@@ -534,10 +518,8 @@ async function resolvePreview(imdbId, type) {
     return { found: false };
   }
   
-  // Try YouTube FIRST (fastest, highest quality) if we have a trailer key
-  // Skip iTunes entirely for speed - YouTube is much faster and higher quality
   if (tmdbMeta.youtubeTrailerKey) {
-    console.log(`\n========== Trying YouTube extractors (fastest, highest quality) ==========`);
+    console.log(`\n========== Extracting YouTube trailer (fastest, highest quality) ==========`);
     console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
     const youtubeDirectUrl = await extractYouTubeDirectUrl(tmdbMeta.youtubeTrailerKey);
     
@@ -560,7 +542,6 @@ async function resolvePreview(imdbId, type) {
     }
   }
   
-  // Only try iTunes if no YouTube key available (very rare)
   if (!tmdbMeta.youtubeTrailerKey) {
     console.log('\n========== Trying iTunes (no YouTube trailer available) ==========');
     const itunesResult = await multiPassSearch(tmdbMeta);
@@ -590,13 +571,10 @@ async function resolvePreview(imdbId, type) {
   return { found: false };
 }
 
-// ============ ROUTES ============
-
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', version: '2.0.0' });
 });
 
-// Video proxy endpoint to bypass CORS and IP-binding for googlevideo.com URLs
 app.get('/proxy-video', async (req, res) => {
   const videoUrl = req.query.url;
   if (!videoUrl) {
@@ -688,13 +666,12 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     return res.json({ streams: [] });
   }
   
-  // Set overall timeout for the request (15 seconds - Traefik default is 60s, but we want to be faster)
   const timeout = setTimeout(() => {
-    console.log(`  ⚠️ Request timeout for ${id} after 15s`);
+    console.log(`  ⚠️ Request timeout for ${id} after ${STREAM_TIMEOUT / 1000}s`);
     if (!res.headersSent) {
       res.json({ streams: [] });
     }
-  }, 15000);
+  }, STREAM_TIMEOUT);
   
   try {
     const result = await resolvePreview(id, type);
@@ -709,15 +686,11 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       ? 'Official Trailer' 
       : `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`;
     
-    // For YouTube URLs that might be IP-bound (googlevideo.com), wrap them in our proxy
     let finalUrl = result.previewUrl;
     if (isYouTube && result.previewUrl.includes('googlevideo.com') && !result.previewUrl.includes('video-ssl.itunes.apple.com')) {
-      // This is a googlevideo.com URL - wrap it in our proxy to bypass IP-binding
       const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
       const host = req.get('x-forwarded-host') || req.get('host') || 'localhost';
-      const baseUrl = `${protocol}://${host}`;
-      const proxyPath = `/api/proxy-video?url=${encodeURIComponent(result.previewUrl)}`;
-      finalUrl = `${baseUrl}${proxyPath}`;
+      finalUrl = `${protocol}://${host}/api/proxy-video?url=${encodeURIComponent(result.previewUrl)}`;
       console.log(`Wrapping googlevideo.com URL in proxy: ${finalUrl.substring(0, 80)}...`);
     }
     
