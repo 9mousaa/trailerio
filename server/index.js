@@ -728,43 +728,40 @@ async function extractViaYtDlp(youtubeKey) {
   console.log(`Trying yt-dlp directly for ${youtubeKey}...`);
   
   try {
-    // Try highest quality formats first - prioritize combined streams (video+audio)
-    // Format priority: 4K > 1440p > 1080p > 720p, prefer MP4 container
-    const formats = [
-      'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160][ext=mp4]', // 4K MP4
-      'bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/best[height<=1440][ext=mp4]', // 1440p MP4
-      'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]', // 1080p MP4
-      'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]',  // 720p MP4
-      'best[height<=2160]',  // Best quality up to 4K (any format)
-      'best[height<=1080]',  // Best quality up to 1080p
-      'best',                 // Best available
-    ];
-    
-    // Try all formats in parallel for speed, return first success
-    const formatPromises = formats.map(async (format) => {
+    // Try highest quality FIRST - single request for best available
+    // This is fastest - one request instead of multiple
+    try {
+      // Get best quality (up to 4K) with combined video+audio, prefer MP4
+      const { stdout } = await Promise.race([
+        execAsync(`yt-dlp -f "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/best[height<=2160][ext=mp4]/best[height<=2160]/best" -g --no-warnings --no-playlist "${youtubeUrl}"`, {
+          timeout: 5000 // Fast timeout - 5 seconds
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
+      ]);
+      
+      const url = stdout.trim();
+      if (url && url.startsWith('http')) {
+        console.log(`  ✓ yt-dlp: got highest quality URL`);
+        return url;
+      }
+    } catch (e) {
+      // Fallback to simpler format if first fails
       try {
         const { stdout } = await Promise.race([
-          execAsync(`yt-dlp -f "${format}" -g --no-warnings --no-playlist "${youtubeUrl}"`, {
-            timeout: 8000 // Reduced timeout for speed
+          execAsync(`yt-dlp -f "best" -g --no-warnings --no-playlist "${youtubeUrl}"`, {
+            timeout: 5000
           }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 8000))
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
         ]);
         
         const url = stdout.trim();
         if (url && url.startsWith('http')) {
-          console.log(`  ✓ yt-dlp: got URL (format: ${format})`);
-          return { url, format };
+          console.log(`  ✓ yt-dlp: got URL (fallback)`);
+          return url;
         }
-      } catch (e) {
-        return null;
+      } catch (e2) {
+        // Ignore
       }
-    });
-    
-    const results = await Promise.all(formatPromises);
-    const success = results.find(r => r !== null);
-    
-    if (success) {
-      return success.url;
     }
     
     console.log(`  yt-dlp: failed to extract URL`);
@@ -778,29 +775,35 @@ async function extractViaYtDlp(youtubeKey) {
 async function extractYouTubeDirectUrl(youtubeKey) {
   console.log(`\n========== Extracting YouTube URL for key: ${youtubeKey} ==========`);
   
-  // PRIORITY 1: yt-dlp directly (most stable, highest quality, no external dependencies)
-  const ytdlpUrl = await extractViaYtDlp(youtubeKey);
+  // PRIORITY 1: yt-dlp directly (fastest, highest quality, no external dependencies)
+  // Try with short timeout - if it fails quickly, try fallbacks in parallel
+  const ytdlpPromise = extractViaYtDlp(youtubeKey);
+  
+  // Start fallbacks in parallel (but yt-dlp should succeed first)
+  const fallbackPromises = Promise.all([
+    extractViaPiped(youtubeKey),
+    extractViaInvidious(youtubeKey)
+  ]);
+  
+  // Wait for yt-dlp first (fastest)
+  const ytdlpUrl = await ytdlpPromise;
   if (ytdlpUrl) {
     console.log('✓ Got YouTube URL from yt-dlp (direct, highest quality)');
     return ytdlpUrl;
   }
   
-  // PRIORITY 2: Piped (stable proxied URLs)
-  const pipedUrl = await extractViaPiped(youtubeKey);
+  // If yt-dlp failed, check fallbacks
+  const [pipedUrl, invidiousUrl] = await fallbackPromises;
   if (pipedUrl) {
     console.log('✓ Got YouTube URL from Piped (stable proxied)');
     return pipedUrl;
   }
-  
-  // PRIORITY 3: Invidious (direct googlevideo URLs)
-  const invidiousUrl = await extractViaInvidious(youtubeKey);
   if (invidiousUrl) {
     console.log('✓ Got YouTube URL from Invidious');
     return invidiousUrl;
   }
   
-  // PRIORITY 4: Cobalt (as last resort)
-  console.log('Trying Cobalt as last resort...');
+  // Last resort: Cobalt (slower)
   const cobaltUrl = await extractViaCobalt(youtubeKey);
   if (cobaltUrl) {
     console.log('✓ Got YouTube direct URL from Cobalt');
@@ -934,10 +937,10 @@ async function resolvePreview(imdbId, type) {
     return { found: false };
   }
   
-  // Try YouTube FIRST (faster, higher quality) if we have a trailer key
-  // Then fall back to iTunes if YouTube fails
+  // Try YouTube FIRST (fastest, highest quality) if we have a trailer key
+  // Skip iTunes entirely for speed - YouTube is much faster and higher quality
   if (tmdbMeta.youtubeTrailerKey) {
-    console.log(`\n========== Trying YouTube extractors FIRST (fastest, highest quality) ==========`);
+    console.log(`\n========== Trying YouTube extractors (fastest, highest quality) ==========`);
     console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
     const youtubeDirectUrl = await extractYouTubeDirectUrl(tmdbMeta.youtubeTrailerKey);
     
@@ -958,24 +961,25 @@ async function resolvePreview(imdbId, type) {
         country: 'yt'
       };
     }
-    console.log('YouTube extraction failed, trying iTunes...');
   }
   
-  // Try iTunes as fallback (slower but sometimes has previews YouTube doesn't)
-  console.log('\n========== Trying iTunes multi-pass search (fallback) ==========');
-  const itunesResult = await multiPassSearch(tmdbMeta);
-  console.log(`iTunes search result: ${itunesResult.found ? 'FOUND' : 'NOT FOUND'}`);
-  
-  if (itunesResult.found) {
-    setCache(imdbId, {
-      track_id: itunesResult.trackId,
-      preview_url: itunesResult.previewUrl,
-      country: itunesResult.country || 'us',
-      youtube_key: null
-    });
+  // Only try iTunes if no YouTube key available (very rare)
+  if (!tmdbMeta.youtubeTrailerKey) {
+    console.log('\n========== Trying iTunes (no YouTube trailer available) ==========');
+    const itunesResult = await multiPassSearch(tmdbMeta);
+    console.log(`iTunes search result: ${itunesResult.found ? 'FOUND' : 'NOT FOUND'}`);
     
-    console.log(`✓ Found iTunes preview: ${itunesResult.previewUrl}`);
-    return { ...itunesResult, source: 'itunes' };
+    if (itunesResult.found) {
+      setCache(imdbId, {
+        track_id: itunesResult.trackId,
+        preview_url: itunesResult.previewUrl,
+        country: itunesResult.country || 'us',
+        youtube_key: null
+      });
+      
+      console.log(`✓ Found iTunes preview: ${itunesResult.previewUrl}`);
+      return { ...itunesResult, source: 'itunes' };
+    }
   }
   
   setCache(imdbId, {
