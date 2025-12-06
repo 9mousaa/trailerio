@@ -1103,9 +1103,13 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         : `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`;
       
       let finalUrl = result.previewUrl;
+      
+      // DASH manifests (.mpd) work directly in AVPlayer - don't proxy them
+      const isDashManifest = result.previewUrl.includes('.mpd') || result.previewUrl.endsWith('/dash');
+      
       // Wrap YouTube/Piped/Invidious URLs in proxy for AVPlayer compatibility
-      // iTunes URLs work directly, so don't proxy them
-      const needsProxy = isYouTube && (
+      // iTunes URLs and DASH manifests work directly - don't proxy them
+      const needsProxy = isYouTube && !isDashManifest && (
         result.previewUrl.includes('googlevideo.com') ||
         result.previewUrl.includes('pipedproxy') ||
         result.previewUrl.includes('pipedapi') ||
@@ -1119,6 +1123,8 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         const host = req.get('x-forwarded-host') || req.get('host') || 'localhost';
         finalUrl = `${protocol}://${host}/api/proxy-video?url=${encodeURIComponent(result.previewUrl)}`;
         console.log(`Wrapping ${isYouTube ? 'YouTube' : 'Piped/Invidious'} URL in proxy: ${finalUrl.substring(0, 80)}...`);
+      } else if (isDashManifest) {
+        console.log(`Using DASH manifest directly (AVPlayer native support): ${finalUrl.substring(0, 80)}...`);
       }
       
       console.log(`  ✓ Returning stream for ${id}: ${finalUrl.substring(0, 80)}...`);
