@@ -33,6 +33,9 @@ services:
       - "traefik.http.routers.trailerio.tls.certresolver=le"
       - "traefik.http.routers.trailerio.tls=true"
       - "traefik.http.services.trailerio.loadbalancer.server.port=80"
+      # Health check for Traefik
+      - "traefik.http.services.trailerio.loadbalancer.healthcheck.path=/health"
+      - "traefik.http.services.trailerio.loadbalancer.healthcheck.interval=30s"
       # HTTP to HTTPS redirect
       - "traefik.http.routers.trailerio-http.rule=Host(`trailerio.plaio.cc`)"
       - "traefik.http.routers.trailerio-http.entrypoints=web"
