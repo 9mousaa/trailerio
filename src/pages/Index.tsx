@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import { Play, Copy, Check, Film, Tv } from "lucide-react";
+import { VideoPlayer } from "@/components/VideoPlayer";
 
 const ADDON_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/stremio-addon`;
 const MANIFEST_URL = `${ADDON_URL}/manifest.json`;
@@ -264,22 +265,8 @@ const Index = () => {
                       </a>
                     </div>
                     
-                    {/* Inline Video Player - use src directly, let browser detect format */}
-                    <div className="rounded-lg overflow-hidden bg-black aspect-video">
-                      <video
-                        key={testResult.streams[0].url}
-                        src={testResult.streams[0].url}
-                        controls
-                        autoPlay
-                        playsInline
-                        crossOrigin="anonymous"
-                        className="w-full h-full"
-                        onError={(e) => {
-                          console.error('Video playback error:', e);
-                          toast.error("Video cannot play inline - try the 'Open in new tab' link above");
-                        }}
-                      />
-                    </div>
+                    {/* Inline Video Player with fallback */}
+                    <VideoPlayer url={testResult.streams[0].url} />
                     
                     {/* Stream info */}
                     {(testResult.streams[0].name || testResult.streams[0].title) && (

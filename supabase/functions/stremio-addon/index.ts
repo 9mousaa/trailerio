@@ -607,15 +607,17 @@ async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
   // Muxing strategies for iOS/browser compatibility
   // CRITICAL: downloadMode: 'auto' ensures video + audio are muxed together
   // youtubeVideoContainer: 'mp4' forces MP4 container for browser compatibility
+  // alwaysProxy: false requests DIRECT URLs (redirect) instead of tunnel URLs
   const requestConfigs = [
     // Strategy 1: H.264 4K in MP4 container for maximum browser compatibility
     { 
       url: youtubeUrl, 
-      videoQuality: '2160',              // 4K resolution
-      youtubeVideoCodec: 'h264',         // H.264 codec for iOS compatibility
-      youtubeVideoContainer: 'mp4',      // CRITICAL: Force MP4 container
-      downloadMode: 'auto',              // CRITICAL: mux video + audio together
+      videoQuality: '2160',
+      youtubeVideoCodec: 'h264',
+      youtubeVideoContainer: 'mp4',
+      downloadMode: 'auto',
       audioFormat: 'best',
+      alwaysProxy: false,               // CRITICAL: Request direct URLs, not tunnel
       codec: 'h264-4k-mp4'
     },
     
@@ -624,9 +626,10 @@ async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
       url: youtubeUrl, 
       videoQuality: '1080',
       youtubeVideoCodec: 'h264',
-      youtubeVideoContainer: 'mp4',      // Force MP4 container
+      youtubeVideoContainer: 'mp4',
       downloadMode: 'auto',
       audioFormat: 'best',
+      alwaysProxy: false,
       codec: 'h264-1080p-mp4'
     },
     
@@ -638,6 +641,7 @@ async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
       youtubeVideoContainer: 'mp4',
       downloadMode: 'auto',
       audioFormat: 'best',
+      alwaysProxy: false,
       codec: 'h264-720p-mp4'
     },
     
@@ -648,6 +652,7 @@ async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
       youtubeVideoCodec: 'vp9',
       downloadMode: 'auto',
       audioFormat: 'best',
+      alwaysProxy: false,
       codec: 'vp9-4k'
     },
   ];
@@ -697,18 +702,43 @@ async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
     }
   };
   
+  // Collect ALL results from all configs and instances, then prioritize redirect over tunnel
+  const allResults: CobaltResult[] = [];
+  
   for (const config of requestConfigs) {
-    console.log(`  Trying codec: ${config.codec}, quality: max, muxed: auto`);
+    console.log(`  Trying codec: ${config.codec}, quality: ${config.videoQuality}, alwaysProxy: false`);
     
     const results = await Promise.all(
       COBALT_INSTANCES.map(instance => tryInstance(instance, config))
     );
-    const valid = results.find(r => r !== null);
     
-    if (valid) {
-      console.log(`  ✓ Cobalt ${valid.instance}: ${valid.status} URL, codec: ${valid.codec}, quality: max (muxed audio+video)`);
-      return valid.url;
+    // Add valid results to collection
+    results.forEach(r => {
+      if (r !== null) {
+        allResults.push(r);
+      }
+    });
+    
+    // If we got a REDIRECT (direct URL), use it immediately - best for browser playback
+    const redirectResult = results.find(r => r !== null && r.status === 'redirect');
+    if (redirectResult) {
+      console.log(`  ✓ Cobalt ${redirectResult.instance}: REDIRECT (direct URL, browser-playable), codec: ${redirectResult.codec}`);
+      return redirectResult.url;
     }
+  }
+  
+  // If no redirect URLs found, fall back to tunnel (proxied) URLs
+  const tunnelResult = allResults.find(r => r.status === 'tunnel');
+  if (tunnelResult) {
+    console.log(`  ⚠ Cobalt ${tunnelResult.instance}: TUNNEL (proxied, may have CORS issues), codec: ${tunnelResult.codec}`);
+    return tunnelResult.url;
+  }
+  
+  // Try picker results as last resort
+  const pickerResult = allResults.find(r => r.status === 'picker');
+  if (pickerResult) {
+    console.log(`  ⚠ Cobalt ${pickerResult.instance}: PICKER, codec: ${pickerResult.codec}`);
+    return pickerResult.url;
   }
   
   console.log(`  No Cobalt instance returned a valid URL`);
