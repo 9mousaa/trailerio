@@ -372,8 +372,8 @@ function findBestMatch(results: any[], tmdbMeta: TMDBMetadata): ScoreResult | nu
 // ============ YOUTUBE EXTRACTORS ============
 // Priority: 1. Piped (proxied stable URLs), 2. Invidious (via our proxy), 3. Cobalt (redirect only, skip tunnel)
 
-// Invidious instances - try even if api:false (may still work)
-const INVIDIOUS_INSTANCES = [
+// Fallback Invidious instances (used if dynamic fetch fails)
+const INVIDIOUS_FALLBACK_INSTANCES = [
   'https://inv.nadeko.net',
   'https://invidious.nerdvpn.de',
   'https://invidious.f5.si',
@@ -392,8 +392,7 @@ const INVIDIOUS_INSTANCES = [
   'https://invidious.kavin.rocks',
 ];
 
-// Piped instances - return proxied stream URLs via /streams/:videoId
-// Fallback list - will be replaced by dynamic fetch
+// Piped fallback instances
 const PIPED_FALLBACK_INSTANCES = [
   'https://pipedapi.kavin.rocks',
   'https://pipedapi.r4fo.com',
@@ -404,10 +403,69 @@ const PIPED_FALLBACK_INSTANCES = [
   'https://api.piped.projectsegfau.lt',
 ];
 
-// Cache for dynamic Piped instances
+// Cache for dynamic instances
 let cachedPipedInstances: string[] | null = null;
 let pipedCacheTime = 0;
 const PIPED_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+let cachedInvidiousInstances: string[] | null = null;
+let invidiousCacheTime = 0;
+const INVIDIOUS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+// Fetch working Invidious instances dynamically
+async function getWorkingInvidiousInstances(): Promise<string[]> {
+  // Return cached if still valid
+  if (cachedInvidiousInstances && Date.now() - invidiousCacheTime < INVIDIOUS_CACHE_TTL) {
+    return cachedInvidiousInstances;
+  }
+  
+  try {
+    console.log('Fetching dynamic Invidious instances...');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    
+    const response = await fetch('https://api.invidious.io/instances.json', {
+      signal: controller.signal,
+      headers: { 'Accept': 'application/json' }
+    });
+    clearTimeout(timeout);
+    
+    if (!response.ok) {
+      console.log(`Invidious instances API returned ${response.status}, using fallback`);
+      return INVIDIOUS_FALLBACK_INSTANCES;
+    }
+    
+    const instances = await response.json();
+    console.log(`  Invidious API returned ${instances.length} total instances`);
+    
+    // Filter: api enabled, https, and has a valid URI
+    const working = instances
+      .filter(([uri, data]: [string, any]) => 
+        data.api === true && 
+        data.type === 'https' &&
+        uri && 
+        !uri.includes('.onion') // Skip tor
+      )
+      .sort(([, a]: [string, any], [, b]: [string, any]) => 
+        (b.users?.total || 0) - (a.users?.total || 0) // Sort by user count (popularity)
+      )
+      .map(([uri]: [string, any]) => `https://${uri}`)
+      .slice(0, 20); // Top 20 instances
+    
+    if (working.length > 0) {
+      console.log(`✓ Got ${working.length} dynamic Invidious instances`);
+      cachedInvidiousInstances = working;
+      invidiousCacheTime = Date.now();
+      return working;
+    }
+    
+    console.log('No suitable Invidious instances from API, using fallback');
+    return INVIDIOUS_FALLBACK_INSTANCES;
+  } catch (e) {
+    console.log(`Failed to fetch Invidious instances: ${e instanceof Error ? e.message : 'unknown'}, using fallback`);
+    return INVIDIOUS_FALLBACK_INSTANCES;
+  }
+}
 
 // Fetch working Piped instances dynamically
 async function getWorkingPipedInstances(): Promise<string[]> {
@@ -433,15 +491,14 @@ async function getWorkingPipedInstances(): Promise<string[]> {
     }
     
     const instances = await response.json();
+    console.log(`  Piped API returned ${instances.length} total instances`);
     
-    // Filter: has api_url and good uptime
+    // More lenient filtering - accept all with api_url, sort by uptime
     const working = instances
-      .filter((i: any) => 
-        i.api_url && 
-        (i.uptime_24h === undefined || i.uptime_24h >= 80)
-      )
+      .filter((i: any) => i.api_url) // Just needs an API URL
+      .sort((a: any, b: any) => (b.uptime_24h || 50) - (a.uptime_24h || 50)) // Sort by uptime, default to 50
       .map((i: any) => i.api_url)
-      .slice(0, 10); // Top 10 instances
+      .slice(0, 15); // Top 15 instances
     
     if (working.length > 0) {
       console.log(`✓ Got ${working.length} dynamic Piped instances`);
@@ -532,7 +589,9 @@ async function getWorkingCobaltInstances(): Promise<string[]> {
 // Returns formatStreams with direct googlevideo.com URLs, wrapped in our proxy to bypass IP-binding
 
 async function extractViaInvidious(youtubeKey: string): Promise<string | null> {
-  console.log(`Trying Invidious instances for ${youtubeKey}`);
+  // Fetch dynamic instances first
+  const invidiousInstances = await getWorkingInvidiousInstances();
+  console.log(`Trying ${invidiousInstances.length} Invidious instances for ${youtubeKey}`);
   
   const baseUrl = Deno.env.get('SUPABASE_URL') ?? '';
   
@@ -629,8 +688,8 @@ async function extractViaInvidious(youtubeKey: string): Promise<string | null> {
   };
   
   // Try all instances in parallel
-  const results = await Promise.all(INVIDIOUS_INSTANCES.map(tryInstance));
-  const validUrl = results.find(r => r !== null);
+  const results = await Promise.all(invidiousInstances.map(tryInstance));
+  const validUrl = results.find((r: string | null) => r !== null);
   
   if (validUrl) {
     console.log(`✓ Got URL from Invidious (proxied)`);
