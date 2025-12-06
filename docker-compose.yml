@@ -14,7 +14,7 @@ services:
       - .env
     networks:
       - trailerio-internal
-      - plaio_default
+      - traefik_network
 
   web:
     build:
@@ -26,7 +26,7 @@ services:
     depends_on:
       - backend
     labels:
-      # Traefik configuration
+      # Traefik configuration (update Host rule to match your domain)
       - "traefik.enable=true"
       - "traefik.http.routers.trailerio.rule=Host(`trailerio.your-domain.com`)"
       - "traefik.http.routers.trailerio.entrypoints=web"
@@ -35,11 +35,11 @@ services:
       - "traefik.http.services.trailerio.loadbalancer.server.port=80"
     networks:
       - trailerio-internal
-      - plaio_default
+      - traefik_network
 
 networks:
   trailerio-internal:
     driver: bridge
-  plaio_default:
-    external: true
+  traefik_network:
+    external: true  # Update network name to match your Traefik setup
 
