@@ -953,6 +953,72 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', version: '2.0.0' });
 });
 
+// Video proxy endpoint to bypass CORS and IP-binding for googlevideo.com URLs
+app.get('/proxy-video', async (req, res) => {
+  const videoUrl = req.query.url;
+  if (!videoUrl) {
+    return res.status(400).json({ error: 'Missing url parameter' });
+  }
+  
+  console.log(`Proxying video: ${videoUrl.substring(0, 100)}...`);
+  
+  try {
+    // Build headers for upstream request, forwarding Range if present
+    const rangeHeader = req.headers.range;
+    const fetchHeaders = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Referer': 'https://www.youtube.com/',
+      'Origin': 'https://www.youtube.com',
+    };
+    
+    if (rangeHeader) {
+      fetchHeaders['Range'] = rangeHeader;
+      console.log(`  Range request: ${rangeHeader}`);
+    }
+    
+    const videoResponse = await fetch(videoUrl, { headers: fetchHeaders });
+    
+    // Handle both 200 (full content) and 206 (partial content) as success
+    if (!videoResponse.ok && videoResponse.status !== 206) {
+      console.log(`Proxy fetch failed: HTTP ${videoResponse.status}`);
+      return res.status(videoResponse.status).json({ error: `Upstream returned ${videoResponse.status}` });
+    }
+    
+    const contentType = videoResponse.headers.get('Content-Type') || 'video/mp4';
+    const contentLength = videoResponse.headers.get('Content-Length');
+    const contentRange = videoResponse.headers.get('Content-Range');
+    
+    const responseHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Content-Type': contentType,
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'public, max-age=3600',
+    };
+    
+    if (contentLength) {
+      responseHeaders['Content-Length'] = contentLength;
+    }
+    
+    // Forward Content-Range for partial content responses
+    if (contentRange) {
+      responseHeaders['Content-Range'] = contentRange;
+    }
+    
+    // Use 206 status if we got partial content, otherwise 200
+    const responseStatus = videoResponse.status === 206 ? 206 : 200;
+    
+    console.log(`✓ Proxying video, status: ${responseStatus}, type: ${contentType}, size: ${contentLength || 'chunked'}, range: ${contentRange || 'none'}`);
+    
+    // Stream the video
+    videoResponse.body.pipe(res);
+  } catch (e) {
+    console.error('Proxy error:', e);
+    res.status(500).json({ error: 'Failed to proxy video' });
+  }
+});
+
 app.get('/manifest.json', (req, res) => {
   res.json({
     id: "com.trailer.preview",
@@ -989,11 +1055,23 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       ? 'Official Trailer' 
       : `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`;
     
+    // For YouTube URLs that might be IP-bound (googlevideo.com), wrap them in our proxy
+    let finalUrl = result.previewUrl;
+    if (isYouTube && result.previewUrl.includes('googlevideo.com') && !result.previewUrl.includes('video-ssl.itunes.apple.com')) {
+      // This is a googlevideo.com URL - wrap it in our proxy to bypass IP-binding
+      const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
+      const host = req.get('x-forwarded-host') || req.get('host') || 'localhost';
+      const baseUrl = `${protocol}://${host}`;
+      const proxyPath = `/api/proxy-video?url=${encodeURIComponent(result.previewUrl)}`;
+      finalUrl = `${baseUrl}${proxyPath}`;
+      console.log(`Wrapping googlevideo.com URL in proxy: ${finalUrl.substring(0, 80)}...`);
+    }
+    
     return res.json({
       streams: [{
         name: streamName,
         title: streamTitle,
-        url: result.previewUrl
+        url: finalUrl
       }]
     });
   }
