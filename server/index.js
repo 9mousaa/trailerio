@@ -1054,13 +1054,14 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   }
   
   console.log(`  ✗ No preview found for ${id}`);
-  return res.json({ streams: [] });
+  if (!res.headersSent) {
+    return res.json({ streams: [] });
+  }
   } catch (error) {
-    timeoutCleared = true;
     clearTimeout(timeout);
     console.error(`  ✗ Error resolving ${id}:`, error.message || error);
     console.error('  Stack:', error.stack);
-    if (!res.headersSent) {
+    if (!res.headersSent && !timeoutFired) {
       res.json({ streams: [] });
     }
   }
