@@ -197,22 +197,32 @@ async function getWorkingPipedInstances() {
 }
 
 async function extractViaPiped(youtubeKey) {
-  const instances = await getWorkingPipedInstances();
-  console.log(`Trying ${instances.length} Piped instances for ${youtubeKey}`);
-  
-  const tryInstance = async (instance) => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 6000);
+  try {
+    const instances = await getWorkingPipedInstances();
+    console.log(`Trying ${instances.length} Piped instances for ${youtubeKey}`);
     
-    try {
-      const response = await fetch(`${instance}/streams/${youtubeKey}`, {
-        headers: { 'Accept': 'application/json' },
-        signal: controller.signal
-      });
-      clearTimeout(timeout);
+    if (!instances || instances.length === 0) {
+      console.log('No Piped instances available');
+      return null;
+    }
+    
+    const tryInstance = async (instance) => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 6000);
       
-      if (!response.ok) return null;
-      const data = await response.json();
+      try {
+        const url = `${instance}/streams/${youtubeKey}`;
+        const response = await fetch(url, {
+          headers: { 'Accept': 'application/json' },
+          signal: controller.signal
+        });
+        clearTimeout(timeout);
+        
+        if (!response.ok) {
+          console.log(`  Piped ${instance}: HTTP ${response.status}`);
+          return null;
+        }
+        const data = await response.json();
       
       // PRIORITY 1: Use DASH manifest if available (adaptive streaming with high quality + audio)
       if (data.dash) {
@@ -251,8 +261,9 @@ async function extractViaPiped(youtubeKey) {
       }
       
       return null;
-    } catch {
+    } catch (e) {
       clearTimeout(timeout);
+      console.log(`  Piped ${instance}: error - ${e.message || e}`);
       return null;
     }
   };
@@ -268,6 +279,10 @@ async function extractViaPiped(youtubeKey) {
   
   console.log(`  No Piped instance returned a valid URL`);
   return null;
+  } catch (e) {
+    console.error(`Piped extraction error: ${e.message || e}`);
+    return null;
+  }
 }
 
 async function extractYouTubeDirectUrl(youtubeKey) {
@@ -281,7 +296,7 @@ async function extractYouTubeDirectUrl(youtubeKey) {
   }
   
   // 2. Try Invidious (googlevideo URLs)
-  console.log(`Trying Invidious as fallback for key: ${youtubeKey}`);
+  console.log(`Trying ${invidiousInstances.length} Invidious instances as fallback for key: ${youtubeKey}`);
   const invidiousInstances = [
     'https://invidious.fdn.fr',
     'https://invidious.flokinet.to',
@@ -348,8 +363,9 @@ async function extractYouTubeDirectUrl(youtubeKey) {
       }
       
       return null;
-    } catch {
+    } catch (e) {
       clearTimeout(timeout);
+      console.log(`  Invidious ${instance}: error - ${e.message || e}`);
       return null;
     }
   };
