@@ -750,27 +750,37 @@ async function extractViaPiped(youtubeKey: string): Promise<string | null> {
       };
       
       if (data.videoStreams?.length > 0) {
-        // Sort by quality (highest first)
-        const sorted = [...data.videoStreams].sort((a: any, b: any) => 
-          getQualityRank(a.quality) - getQualityRank(b.quality)
-        );
+        // Sort all streams by quality (highest first)
+        const sorted = [...data.videoStreams]
+          .filter((s: any) => s.mimeType?.startsWith('video/') && s.url)
+          .sort((a: any, b: any) => getQualityRank(a.quality) - getQualityRank(b.quality));
         
-        // Find best combined video+audio stream (preferred for playback)
-        const combined = sorted.find((s: any) => 
-          !s.videoOnly && s.mimeType?.startsWith('video/')
-        );
+        // Get best combined (video+audio) stream
+        const bestCombined = sorted.find((s: any) => !s.videoOnly);
+        const bestVideoOnly = sorted.find((s: any) => s.videoOnly);
         
-        if (combined?.url) {
-          console.log(`  ✓ Piped ${instance}: got ${combined.quality || 'unknown'} (combined)`);
-          return combined.url;
+        // Choose highest quality: prefer video-only if significantly better
+        // Combined 360p = rank 5, Video-only 1080p = rank 2 -> prefer video-only
+        const combinedRank = bestCombined ? getQualityRank(bestCombined.quality) : 999;
+        const videoOnlyRank = bestVideoOnly ? getQualityRank(bestVideoOnly.quality) : 999;
+        
+        // Use video-only if it's at least 2 quality levels better (e.g., 1080p vs 360p)
+        // Stremio handles video-only streams fine
+        if (bestVideoOnly && videoOnlyRank < combinedRank - 1) {
+          console.log(`  ✓ Piped ${instance}: got ${bestVideoOnly.quality || 'unknown'} (video-only, higher quality)`);
+          return bestVideoOnly.url;
         }
         
-        // Fall back to video-only (highest quality available)
-        const videoOnly = sorted.find((s: any) => s.mimeType?.startsWith('video/'));
+        // Otherwise prefer combined for guaranteed audio
+        if (bestCombined?.url) {
+          console.log(`  ✓ Piped ${instance}: got ${bestCombined.quality || 'unknown'} (combined)`);
+          return bestCombined.url;
+        }
         
-        if (videoOnly?.url) {
-          console.log(`  ✓ Piped ${instance}: got video-only ${videoOnly.quality || 'unknown'}`);
-          return videoOnly.url;
+        // Last resort: any video stream
+        if (bestVideoOnly?.url) {
+          console.log(`  ✓ Piped ${instance}: got ${bestVideoOnly.quality || 'unknown'} (video-only)`);
+          return bestVideoOnly.url;
         }
       }
       
