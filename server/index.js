@@ -930,10 +930,31 @@ async function resolvePreview(imdbId, type) {
     return { ...itunesResult, source: 'itunes' };
   }
   
-  // PRIORITY 2: Try public instances (Piped/Invidious) if YouTube trailer exists
+  // PRIORITY 2: Try yt-dlp with proxies (now that we have proxy support)
   if (tmdbMeta.youtubeTrailerKey) {
-    console.log('\n========== iTunes not found, trying public instances (Piped/Invidious) ==========');
+    console.log('\n========== iTunes not found, trying yt-dlp with proxies ==========');
     console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
+    
+    const ytdlpUrl = await extractViaYtDlp(tmdbMeta.youtubeTrailerKey);
+    if (ytdlpUrl) {
+      setCache(imdbId, {
+        track_id: null,
+        preview_url: null,
+        country: 'yt',
+        youtube_key: tmdbMeta.youtubeTrailerKey
+      });
+      console.log(`✓ Got URL from yt-dlp`);
+      return {
+        found: true,
+        source: 'youtube',
+        previewUrl: ytdlpUrl,
+        youtubeKey: tmdbMeta.youtubeTrailerKey,
+        country: 'yt'
+      };
+    }
+    
+    // PRIORITY 3: Try public instances (Piped/Invidious) as fallback
+    console.log('\n========== yt-dlp failed, trying public instances (Piped/Invidious) ==========');
     
     // Try Piped first, then Invidious
     const pipedUrl = await extractViaPiped(tmdbMeta.youtubeTrailerKey);
@@ -967,26 +988,6 @@ async function resolvePreview(imdbId, type) {
         found: true,
         source: 'youtube',
         previewUrl: invidiousUrl,
-        youtubeKey: tmdbMeta.youtubeTrailerKey,
-        country: 'yt'
-      };
-    }
-    
-    // PRIORITY 3: Try yt-dlp as last resort (may be blocked)
-    console.log('\n========== Public instances failed, trying yt-dlp (last resort) ==========');
-    const ytdlpUrl = await extractViaYtDlp(tmdbMeta.youtubeTrailerKey);
-    if (ytdlpUrl) {
-      setCache(imdbId, {
-        track_id: null,
-        preview_url: null,
-        country: 'yt',
-        youtube_key: tmdbMeta.youtubeTrailerKey
-      });
-      console.log(`✓ Got URL from yt-dlp`);
-      return {
-        found: true,
-        source: 'youtube',
-        previewUrl: ytdlpUrl,
         youtubeKey: tmdbMeta.youtubeTrailerKey,
         country: 'yt'
       };
@@ -1231,24 +1232,25 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       // DASH manifests (.mpd) work directly in AVPlayer - don't proxy them
       const isDashManifest = result.previewUrl.includes('.mpd') || result.previewUrl.endsWith('/dash');
       
-      // Wrap YouTube/Piped/Invidious URLs in proxy for AVPlayer compatibility
-      // iTunes URLs and DASH manifests work directly - don't proxy them
-      const needsProxy = isYouTube && !isDashManifest && (
-        result.previewUrl.includes('googlevideo.com') ||
-        result.previewUrl.includes('pipedproxy') ||
-        result.previewUrl.includes('pipedapi') ||
-        result.previewUrl.includes('invidious') ||
-        result.previewUrl.includes('iv.') ||
-        result.previewUrl.includes('yewtu.be')
-      ) && !result.previewUrl.includes('video-ssl.itunes.apple.com');
+      // Piped/Invidious URLs are already proxied and work directly in AVPlayer - don't proxy them again
+      const isPipedProxy = result.previewUrl.includes('pipedproxy') || result.previewUrl.includes('pipedapi');
+      const isInvidiousProxy = result.previewUrl.includes('invidious') || result.previewUrl.includes('iv.') || result.previewUrl.includes('yewtu.be');
+      
+      // Only proxy direct googlevideo.com URLs (from yt-dlp)
+      // Piped/Invidious URLs and DASH manifests work directly - don't proxy them
+      const needsProxy = isYouTube && !isDashManifest && !isPipedProxy && !isInvidiousProxy && 
+        result.previewUrl.includes('googlevideo.com') && 
+        !result.previewUrl.includes('video-ssl.itunes.apple.com');
       
       if (needsProxy) {
         const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
         const host = req.get('x-forwarded-host') || req.get('host') || 'localhost';
         finalUrl = `${protocol}://${host}/api/proxy-video?url=${encodeURIComponent(result.previewUrl)}`;
-        console.log(`Wrapping ${isYouTube ? 'YouTube' : 'Piped/Invidious'} URL in proxy: ${finalUrl.substring(0, 80)}...`);
+        console.log(`Wrapping googlevideo.com URL in proxy: ${finalUrl.substring(0, 80)}...`);
       } else if (isDashManifest) {
         console.log(`Using DASH manifest directly (AVPlayer native support): ${finalUrl.substring(0, 80)}...`);
+      } else if (isPipedProxy || isInvidiousProxy) {
+        console.log(`Using Piped/Invidious URL directly (already proxied, AVPlayer compatible): ${finalUrl.substring(0, 80)}...`);
       }
       
       console.log(`  ✓ Returning stream for ${id}: ${finalUrl.substring(0, 80)}...`);
