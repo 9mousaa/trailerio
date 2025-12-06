@@ -368,92 +368,51 @@ function getNextUserAgent() {
   return ua;
 }
 
-async function extractViaYtDlp(youtubeKey, retryCount = 0) {
+async function extractViaYtDlp(youtubeKey) {
   const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
-  console.log(`  [yt-dlp] Extracting highest quality for ${youtubeKey}${retryCount > 0 ? ` (retry ${retryCount})` : ''}...`);
-  const startTime = Date.now();
-  
-  // Add delay between requests to mimic human behavior (Piped/Cobalt approach)
-  const timeSinceLastExtraction = Date.now() - lastYtDlpExtraction;
-  if (timeSinceLastExtraction < MIN_EXTRACTION_INTERVAL) {
-    const delay = MIN_EXTRACTION_INTERVAL - timeSinceLastExtraction;
-    console.log(`  [yt-dlp] Adding ${delay}ms delay to avoid rate limiting...`);
-    await new Promise(resolve => setTimeout(resolve, delay));
-  }
-  lastYtDlpExtraction = Date.now();
+  console.log(`Trying yt-dlp directly for ${youtubeKey}...`);
   
   try {
-    // Format priority: 4K > 1440p > 1080p > 720p > best (MP4 preferred)
-    const formatString = 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160][ext=mp4]+bestaudio/bestvideo[height<=2160]+bestaudio/bestvideo[height<=1440]+bestaudio/bestvideo[height<=1080]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=2160][ext=mp4]/best[height<=1080][ext=mp4]/best[ext=mp4]/best';
-    
-    // Cobalt/Piped approach: Complete browser headers to mimic real requests
-    const userAgent = getNextUserAgent(); // Rotate user agents
-    const referer = 'https://www.youtube.com/';
-    
-    // Complete header set like Piped/Cobalt use (mimics real browser)
-    const headers = [
-      `User-Agent:${userAgent}`,
-      `Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8`,
-      `Accept-Language:en-US,en;q=0.9`,
-      `Accept-Encoding:gzip, deflate, br`,
-      `Referer:${referer}`,
-      `Origin:https://www.youtube.com`,
-      `DNT:1`,
-      `Connection:keep-alive`,
-      `Upgrade-Insecure-Requests:1`,
-      `Sec-Fetch-Dest:document`,
-      `Sec-Fetch-Mode:navigate`,
-      `Sec-Fetch-Site:same-origin`,
-      `Sec-Fetch-User:?1`
-    ];
-    
-    // Build yt-dlp command with all headers (Cobalt/Piped approach)
-    const headerArgs = headers.map(h => `--add-header "${h}"`).join(' ');
-    
-    // Use mweb client first (most reliable, may not need PO tokens)
-    // Fallback to other clients if mweb fails
-    const clients = ['mweb', 'tv_embedded', 'web_embedded'];
-    const client = clients[retryCount] || 'mweb';
-    
-    // Try with mweb client first (most compatible, less likely to need PO tokens)
-    const extractorArgs = `youtube:player-client=${client}`;
-    
-    const { stdout } = await Promise.race([
-      execAsync(`yt-dlp -f "${formatString}" -g --no-warnings --no-playlist --no-check-certificate --user-agent "${userAgent}" --referer "${referer}" --extractor-args "${extractorArgs}" ${headerArgs} "${youtubeUrl}"`, {
-        timeout: YT_DLP_TIMEOUT
-      }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), YT_DLP_TIMEOUT))
-    ]);
-    
-    const url = stdout.trim().split('\n')[0]; // Get first URL (best quality)
-    if (url && url.startsWith('http')) {
-      const elapsed = Date.now() - startTime;
-      console.log(`  ✓ [yt-dlp] Got highest quality URL in ${elapsed}ms`);
-      return url;
+    // Try highest quality FIRST - single request for best available
+    // This is fastest - one request instead of multiple
+    try {
+      // Get best quality (up to 4K) with combined video+audio, prefer MP4
+      const { stdout } = await Promise.race([
+        execAsync(`yt-dlp -f "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/best[height<=2160][ext=mp4]/best[height<=2160]/best" -g --no-warnings --no-playlist "${youtubeUrl}"`, {
+          timeout: 5000 // Fast timeout - 5 seconds
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
+      ]);
+      
+      const url = stdout.trim();
+      if (url && url.startsWith('http')) {
+        console.log(`  ✓ yt-dlp: got highest quality URL`);
+        return url;
+      }
+    } catch (e) {
+      // Fallback to simpler format if first fails
+      try {
+        const { stdout } = await Promise.race([
+          execAsync(`yt-dlp -f "best" -g --no-warnings --no-playlist "${youtubeUrl}"`, {
+            timeout: 5000
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
+        ]);
+        
+        const url = stdout.trim();
+        if (url && url.startsWith('http')) {
+          console.log(`  ✓ yt-dlp: got URL (fallback)`);
+          return url;
+        }
+      } catch (e2) {
+        // Ignore
+      }
     }
     
-    console.log(`  ✗ [yt-dlp] No valid URL extracted`);
+    console.log(`  yt-dlp: failed to extract URL`);
     return null;
   } catch (e) {
-    const elapsed = Date.now() - startTime;
-    const errorMsg = e.message || e.toString();
-    console.log(`  ✗ [yt-dlp] Failed after ${elapsed}ms: ${errorMsg}`);
-    
-    // Cobalt/Piped approach: Retry with exponential backoff and different clients
-    // Try different YouTube clients (mweb, tv_embedded, web_embedded) to avoid PO token requirements
-    if (retryCount < 2 && (
-      errorMsg.includes('bot') || 
-      errorMsg.includes('Sign in') || 
-      errorMsg.includes('Timeout') ||
-      errorMsg.includes('Failed to extract') ||
-      errorMsg.includes('player response')
-    )) {
-      const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 3000); // Max 3 seconds
-      console.log(`  [yt-dlp] Retrying with different client after ${backoffDelay}ms backoff (attempt ${retryCount + 1}/2)...`);
-      await new Promise(resolve => setTimeout(resolve, backoffDelay));
-      return extractViaYtDlp(youtubeKey, retryCount + 1);
-    }
-    
+    console.log(`  yt-dlp error: ${e.message || e}`);
     return null;
   }
 }
@@ -636,42 +595,36 @@ async function extractViaInvidious(youtubeKey) {
 
 async function extractYouTubeDirectUrl(youtubeKey) {
   console.log(`\n========== Extracting YouTube URL for key: ${youtubeKey} ==========`);
-  const startTime = Date.now();
   
-  // Priority 1: Try yt-dlp first (highest quality) - with shorter timeout to fail fast
+  // PRIORITY 1: yt-dlp directly (fastest, highest quality, no external dependencies)
+  // Try with short timeout - if it fails quickly, try fallbacks in parallel
   const ytdlpPromise = extractViaYtDlp(youtubeKey);
-  const ytdlpUrl = await Promise.race([
-    ytdlpPromise,
-    new Promise(resolve => setTimeout(() => resolve(null), 8000)) // 8s timeout for yt-dlp
-  ]);
   
-  if (ytdlpUrl) {
-    const elapsed = Date.now() - startTime;
-    console.log(`✓ Got YouTube URL from yt-dlp in ${elapsed}ms`);
-    return ytdlpUrl;
-  }
-  
-  // Priority 2: Try Piped and Invidious in parallel (faster)
-  console.log(`  yt-dlp failed, trying Piped and Invidious in parallel...`);
-  const [pipedUrl, invidiousUrl] = await Promise.all([
+  // Start fallbacks in parallel (but yt-dlp should succeed first)
+  const fallbackPromises = Promise.all([
     extractViaPiped(youtubeKey),
     extractViaInvidious(youtubeKey)
   ]);
   
-  if (pipedUrl) {
-    const elapsed = Date.now() - startTime;
-    console.log(`✓ Got YouTube URL from Piped in ${elapsed}ms`);
-    return pipedUrl;
+  // Wait for yt-dlp first (fastest)
+  const ytdlpUrl = await ytdlpPromise;
+  if (ytdlpUrl) {
+    console.log('✓ Got YouTube URL from yt-dlp (direct, highest quality)');
+    return ytdlpUrl;
   }
   
+  // If yt-dlp failed, check fallbacks
+  const [pipedUrl, invidiousUrl] = await fallbackPromises;
+  if (pipedUrl) {
+    console.log('✓ Got YouTube URL from Piped (stable proxied)');
+    return pipedUrl;
+  }
   if (invidiousUrl) {
-    const elapsed = Date.now() - startTime;
-    console.log(`✓ Got YouTube URL from Invidious in ${elapsed}ms`);
+    console.log('✓ Got YouTube URL from Invidious');
     return invidiousUrl;
   }
   
-  const elapsed = Date.now() - startTime;
-  console.log(`✗ Failed to extract YouTube URL from all extractors (took ${elapsed}ms)`);
+  console.log('No YouTube URL found from any extractor');
   return null;
 }
 
