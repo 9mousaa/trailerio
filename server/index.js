@@ -1007,9 +1007,11 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     return res.json({ streams: [] });
   }
   
+  let timeoutFired = false;
   const timeout = setTimeout(() => {
-    console.log(`  ⚠️ Request timeout for ${id} after ${STREAM_TIMEOUT / 1000}s`);
     if (!res.headersSent) {
+      timeoutFired = true;
+      console.log(`  ⚠️ Request timeout for ${id} after ${STREAM_TIMEOUT / 1000}s`);
       res.json({ streams: [] });
     }
   }, STREAM_TIMEOUT);
@@ -1017,6 +1019,12 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   try {
     const result = await resolvePreview(id, type);
     clearTimeout(timeout);
+    
+    // If timeout already fired, don't send another response
+    if (timeoutFired || res.headersSent) {
+      console.log(`  Response already sent (timeout), skipping...`);
+      return;
+    }
   
   if (result.found && result.previewUrl) {
     const isYouTube = result.source === 'youtube';
