@@ -38,8 +38,15 @@ const MAX_FREE_PROXIES = 20; // Limit to avoid too many
 let allProxies = [...MANUAL_PROXIES];
 let proxyIndex = 0;
 
-// Fetch and test free proxies
+// Fetch and test free proxies (disabled by default - free proxies are unreliable)
 async function fetchFreeProxies() {
+  // Only use free proxies if explicitly enabled via environment variable
+  // Free proxies are unreliable and cause timeouts
+  if (process.env.ENABLE_FREE_PROXIES !== 'true') {
+    console.log('Free proxies disabled (set ENABLE_FREE_PROXIES=true to enable)');
+    return MANUAL_PROXIES;
+  }
+
   // If we have manual proxies, use them only (user preference)
   if (MANUAL_PROXIES.length > 0) {
     return MANUAL_PROXIES;
@@ -479,9 +486,10 @@ async function getNextProxy() {
   return proxy;
 }
 
-async function extractViaYtDlp(youtubeKey, retryCount = 0) {
+async function extractViaYtDlp(youtubeKey, retryCount = 0, useProxy = true) {
   const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
-  console.log(`  [yt-dlp] Extracting highest quality for ${youtubeKey}${retryCount > 0 ? ` (retry ${retryCount})` : ''}...`);
+  const proxyStatus = useProxy ? 'with proxy' : 'without proxy';
+  console.log(`  [yt-dlp] Extracting highest quality for ${youtubeKey}${retryCount > 0 ? ` (retry ${retryCount}, ${proxyStatus})` : ` (${proxyStatus})`}...`);
   const startTime = Date.now();
   
   // Add delay between requests to mimic human behavior (Piped/Cobalt approach)
@@ -529,12 +537,15 @@ async function extractViaYtDlp(youtubeKey, retryCount = 0) {
     // Try with mweb client first (most compatible, less likely to need PO tokens)
     const extractorArgs = `youtube:player-client=${client}`;
     
-    // Get proxy for this request (rotate if multiple proxies configured)
-    const proxy = await getNextProxy();
-    const proxyArg = proxy ? `--proxy "${proxy}"` : '';
-    
-    if (proxy) {
-      console.log(`  [yt-dlp] Using proxy: ${proxy.substring(0, 50)}...`);
+    // Only use proxy if enabled and we have manual proxies (free proxies are unreliable)
+    let proxy = null;
+    let proxyArg = '';
+    if (useProxy && MANUAL_PROXIES.length > 0) {
+      proxy = await getNextProxy();
+      proxyArg = proxy ? `--proxy "${proxy}"` : '';
+      if (proxy) {
+        console.log(`  [yt-dlp] Using manual proxy: ${proxy.substring(0, 50)}...`);
+      }
     }
     
     const { stdout } = await Promise.race([
@@ -558,6 +569,12 @@ async function extractViaYtDlp(youtubeKey, retryCount = 0) {
     const errorMsg = e.message || e.toString();
     console.log(`  ✗ [yt-dlp] Failed after ${elapsed}ms: ${errorMsg}`);
     
+    // If proxy failed, retry without proxy (only if we were using proxy)
+    if (useProxy && (errorMsg.includes('Proxy') || errorMsg.includes('Tunnel') || errorMsg.includes('proxy'))) {
+      console.log(`  [yt-dlp] Proxy failed, retrying without proxy...`);
+      return extractViaYtDlp(youtubeKey, retryCount, false);
+    }
+    
     // Cobalt/Piped approach: Retry with exponential backoff and different clients
     // Try different YouTube clients (mweb, tv_embedded, web_embedded) to avoid PO token requirements
     if (retryCount < 2 && (
@@ -570,7 +587,7 @@ async function extractViaYtDlp(youtubeKey, retryCount = 0) {
       const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 3000); // Max 3 seconds
       console.log(`  [yt-dlp] Retrying with different client after ${backoffDelay}ms backoff (attempt ${retryCount + 1}/2)...`);
       await new Promise(resolve => setTimeout(resolve, backoffDelay));
-      return extractViaYtDlp(youtubeKey, retryCount + 1);
+      return extractViaYtDlp(youtubeKey, retryCount + 1, useProxy);
     }
     
     return null;
