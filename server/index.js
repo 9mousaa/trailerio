@@ -729,38 +729,43 @@ async function extractViaYtDlp(youtubeKey) {
   
   try {
     // Try highest quality FIRST - single request for best available
-    // This is fastest - one request instead of multiple
+    // Format: Try combined streams first (video+audio), then best available
+    // Priority: 4K > 1440p > 1080p > 720p > best
+    const formatString = 'bestvideo[height<=2160]+bestaudio/bestvideo[height<=1440]+bestaudio/bestvideo[height<=1080]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=2160]/best[height<=1080]/best';
+    
     try {
-      // Get best quality (up to 4K) with combined video+audio, prefer MP4
-      const { stdout } = await Promise.race([
-        execAsync(`yt-dlp -f "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/best[height<=2160][ext=mp4]/best[height<=2160]/best" -g --no-warnings --no-playlist "${youtubeUrl}"`, {
-          timeout: 5000 // Fast timeout - 5 seconds
+      const { stdout, stderr } = await Promise.race([
+        execAsync(`yt-dlp -f "${formatString}" -g --no-warnings --no-playlist "${youtubeUrl}"`, {
+          timeout: 6000 // 6 seconds
         }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 6000))
       ]);
       
       const url = stdout.trim();
       if (url && url.startsWith('http')) {
-        console.log(`  ✓ yt-dlp: got highest quality URL`);
-        return url;
+        // Check if we got multiple URLs (video+audio separate)
+        const urls = url.split('\n').filter(u => u.trim().startsWith('http'));
+        const finalUrl = urls.length > 1 ? urls[0] : url; // Use first URL if multiple
+        console.log(`  ✓ yt-dlp: got URL (${urls.length > 1 ? 'separate streams' : 'combined'})`);
+        return finalUrl;
       }
     } catch (e) {
       // Fallback to simpler format if first fails
       try {
         const { stdout } = await Promise.race([
           execAsync(`yt-dlp -f "best" -g --no-warnings --no-playlist "${youtubeUrl}"`, {
-            timeout: 5000
+            timeout: 6000
           }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 6000))
         ]);
         
-        const url = stdout.trim();
+        const url = stdout.trim().split('\n')[0]; // Get first URL if multiple
         if (url && url.startsWith('http')) {
           console.log(`  ✓ yt-dlp: got URL (fallback)`);
           return url;
         }
       } catch (e2) {
-        // Ignore
+        console.log(`  yt-dlp error: ${e2.message || e2}`);
       }
     }
     
