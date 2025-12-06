@@ -32,8 +32,6 @@ services:
       - "traefik.http.routers.trailerio.tls.certresolver=le"
       - "traefik.http.routers.trailerio.tls=true"
       - "traefik.http.services.trailerio.loadbalancer.server.port=80"
-      # Timeouts to prevent 504 errors
-      - "traefik.http.services.trailerio.loadbalancer.server.timeout=60s"
       # HTTP to HTTPS redirect
       - "traefik.http.routers.trailerio-http.rule=Host(`trailerio.plaio.cc`)"
       - "traefik.http.routers.trailerio-http.entrypoints=web"
