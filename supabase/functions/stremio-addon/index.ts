@@ -370,7 +370,7 @@ function findBestMatch(results: any[], tmdbMeta: TMDBMetadata): ScoreResult | nu
 }
 
 // ============ YOUTUBE EXTRACTORS ============
-// Priority: 1. Invidious (direct URLs), 2. Piped (proxied URLs), 3. Cobalt (fallback)
+// Priority: 1. Cobalt (muxed audio+video, iOS compatible), 2. Invidious (direct URLs), 3. Piped (proxied URLs)
 
 // Invidious instances - try even if api:false (may still work)
 const INVIDIOUS_INSTANCES = [
@@ -403,7 +403,7 @@ const PIPED_INSTANCES = [
   'https://api.piped.projectsegfau.lt',
 ];
 
-// Cobalt instances (fallback) - may return tunnel URLs
+// Cobalt instances (PRIMARY) - muxed audio+video with iOS-compatible codecs
 const COBALT_INSTANCES = [
   'https://cobalt-backend.canine.tools',
   'https://cobalt-api.kwiatekmiki.com',
@@ -591,23 +591,51 @@ async function extractViaPiped(youtubeKey: string): Promise<string | null> {
   return null;
 }
 
-// ============ COBALT EXTRACTOR (FALLBACK) ============
+// ============ COBALT EXTRACTOR (PRIMARY - iOS COMPATIBLE) ============
 
 interface CobaltResult {
   url: string;
   instance: string;
   status: 'redirect' | 'tunnel' | 'picker';
+  codec: string;
 }
 
 async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
-  console.log(`Trying Cobalt instances (fallback) for ${youtubeKey}`);
+  console.log(`Trying Cobalt instances (primary) for ${youtubeKey}`);
   const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
   
-  // Request highest quality: max = 4K/2160p, prefer h264 for compatibility
+  // Three muxing strategies for iOS compatibility
+  // CRITICAL: downloadMode: 'auto' ensures video + audio are muxed together
   const requestConfigs = [
-    { url: youtubeUrl, videoQuality: 'max', youtubeVideoCodec: 'h264', downloadMode: 'mute' },
-    { url: youtubeUrl, videoQuality: 'max', youtubeVideoCodec: 'h264' },
-    { url: youtubeUrl, videoQuality: 'max' }, // Allow VP9/AV1 as fallback for HDR
+    // Strategy 1: H.264 for maximum iOS/Safari compatibility (muxed video+audio)
+    { 
+      url: youtubeUrl, 
+      videoQuality: 'max',           // Request 4K if available
+      youtubeVideoCodec: 'h264',     // H.264/MP4 for iOS compatibility
+      downloadMode: 'auto',          // CRITICAL: mux video + audio together
+      audioFormat: 'best',           // Keep best audio format
+      codec: 'h264'                  // For logging
+    },
+    
+    // Strategy 2: VP9 for higher quality + HDR support (muxed)
+    { 
+      url: youtubeUrl, 
+      videoQuality: 'max',
+      youtubeVideoCodec: 'vp9',      // VP9/WebM for 4K/HDR
+      downloadMode: 'auto',
+      audioFormat: 'best',
+      codec: 'vp9'
+    },
+    
+    // Strategy 3: AV1 for best efficiency (muxed)
+    { 
+      url: youtubeUrl, 
+      videoQuality: 'max',
+      youtubeVideoCodec: 'av1',      // AV1/WebM for best quality
+      downloadMode: 'auto',
+      audioFormat: 'best',
+      codec: 'av1'
+    },
   ];
   
   const tryInstance = async (
@@ -618,40 +646,53 @@ async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
     const timeout = setTimeout(() => controller.abort(), 8000);
     
     try {
+      // Remove codec from request body (it's just for logging)
+      const { codec, ...requestBody } = config;
+      
       const response = await fetch(instance, {
         method: 'POST',
         headers: {
           'Accept': 'application/json',
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(config),
+        body: JSON.stringify(requestBody),
         signal: controller.signal
       });
       clearTimeout(timeout);
       
-      if (!response.ok) return null;
+      if (!response.ok) {
+        console.log(`  Cobalt ${instance}: HTTP ${response.status}`);
+        return null;
+      }
+      
       const data = await response.json();
       
       if ((data.status === 'redirect' || data.status === 'tunnel') && data.url) {
-        return { url: data.url, instance, status: data.status };
+        return { url: data.url, instance, status: data.status, codec: config.codec };
       }
       if (data.status === 'picker' && data.picker?.[0]?.url) {
-        return { url: data.picker[0].url, instance, status: 'picker' };
+        return { url: data.picker[0].url, instance, status: 'picker', codec: config.codec };
       }
+      
+      console.log(`  Cobalt ${instance}: status=${data.status}, no valid URL`);
       return null;
-    } catch {
+    } catch (e) {
       clearTimeout(timeout);
+      console.log(`  Cobalt ${instance}: error - ${e instanceof Error ? e.message : 'unknown'}`);
       return null;
     }
   };
   
   for (const config of requestConfigs) {
+    console.log(`  Trying codec: ${config.codec}, quality: max, muxed: auto`);
+    
     const results = await Promise.all(
       COBALT_INSTANCES.map(instance => tryInstance(instance, config))
     );
     const valid = results.find(r => r !== null);
+    
     if (valid) {
-      console.log(`  ✓ Cobalt ${valid.instance}: got ${valid.status} URL`);
+      console.log(`  ✓ Cobalt ${valid.instance}: ${valid.status} URL, codec: ${valid.codec}, quality: max (muxed audio+video)`);
       return valid.url;
     }
   }
@@ -661,22 +702,31 @@ async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
 }
 
 // ============ MAIN YOUTUBE EXTRACTOR ============
-// Tries: 1. Invidious (direct URLs), 2. Piped (proxied URLs), 3. Cobalt (fallback)
+// Priority: 1. Cobalt (best for muxed streams + iOS), 2. Invidious (direct URLs), 3. Piped (proxied URLs)
 
 async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | null> {
   console.log(`\nExtracting YouTube URL for key: ${youtubeKey}`);
   
-  // 1. Try Invidious first (direct googlevideo URLs)
-  const invidiousUrl = await extractViaInvidious(youtubeKey);
-  if (invidiousUrl) return invidiousUrl;
-  
-  // 2. Try Piped (proxied URLs)
-  const pipedUrl = await extractViaPiped(youtubeKey);
-  if (pipedUrl) return pipedUrl;
-  
-  // 3. Fall back to Cobalt (may return tunnel URLs that expire)
+  // 1. Try Cobalt FIRST (best for muxed audio+video, iOS compatible)
   const cobaltUrl = await extractViaCobalt(youtubeKey);
-  if (cobaltUrl) return cobaltUrl;
+  if (cobaltUrl) {
+    console.log('✓ Got YouTube direct URL from Cobalt (muxed audio+video)');
+    return cobaltUrl;
+  }
+  
+  // 2. Try Invidious (direct googlevideo URLs)
+  const invidiousUrl = await extractViaInvidious(youtubeKey);
+  if (invidiousUrl) {
+    console.log('✓ Got YouTube direct URL from Invidious');
+    return invidiousUrl;
+  }
+  
+  // 3. Try Piped (proxied URLs)
+  const pipedUrl = await extractViaPiped(youtubeKey);
+  if (pipedUrl) {
+    console.log('✓ Got YouTube direct URL from Piped');
+    return pipedUrl;
+  }
   
   console.log('No YouTube URL found from any extractor');
   return null;
