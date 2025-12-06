@@ -158,10 +158,12 @@ const PIPED_CACHE_TTL = 3600000; // 1 hour
 
 async function getWorkingPipedInstances() {
   if (cachedPipedInstances && Date.now() - pipedCacheTime < PIPED_CACHE_TTL) {
+    console.log(`Using cached Piped instances (${cachedPipedInstances.length} instances)`);
     return cachedPipedInstances;
   }
   
   const combined = [...PIPED_FALLBACK_INSTANCES];
+  console.log(`Starting with ${combined.length} fallback Piped instances`);
   
   try {
     const controller = new AbortController();
@@ -180,17 +182,22 @@ async function getWorkingPipedInstances() {
         .sort((a, b) => (b.uptime_24h || 50) - (a.uptime_24h || 50))
         .map(i => i.api_url);
       
+      console.log(`Fetched ${dynamicInstances.length} dynamic Piped instances`);
+      
       for (const inst of dynamicInstances) {
         if (!combined.includes(inst)) {
           combined.push(inst);
         }
       }
+    } else {
+      console.log(`Dynamic Piped API returned ${response.status}, using fallback only`);
     }
   } catch (e) {
-    console.log('Dynamic Piped fetch failed, using fallback instances');
+    console.log(`Dynamic Piped fetch failed: ${e.message || e}, using fallback instances`);
   }
   
   const result = combined.slice(0, 20);
+  console.log(`Total Piped instances: ${result.length}`);
   cachedPipedInstances = result;
   pipedCacheTime = Date.now();
   return result;
