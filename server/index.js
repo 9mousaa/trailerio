@@ -617,7 +617,7 @@ async function extractViaPiped(youtubeKey) {
 }
 
 async function extractYouTubeDirectUrl(youtubeKey) {
-  console.log(`\nExtracting YouTube URL for key: ${youtubeKey}`);
+  console.log(`\n========== Extracting YouTube URL for key: ${youtubeKey} ==========`);
   
   const pipedUrl = await extractViaPiped(youtubeKey);
   if (pipedUrl) {
@@ -758,7 +758,10 @@ async function resolvePreview(imdbId, type) {
     return { found: false };
   }
   
+  // Try 1: iTunes multi-pass search
+  console.log('\n========== Trying iTunes multi-pass search ==========');
   const itunesResult = await multiPassSearch(tmdbMeta);
+  console.log(`iTunes search result: ${itunesResult.found ? 'FOUND' : 'NOT FOUND'}`);
   
   if (itunesResult.found) {
     setCache(imdbId, {
