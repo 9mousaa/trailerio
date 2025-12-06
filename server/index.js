@@ -310,26 +310,15 @@ async function extractYouTubeDirectUrl(youtubeKey) {
     console.error(`Piped extraction error: ${e.message || e}`);
   }
   
-  // 2. Try Invidious (googlevideo URLs)
+  // 2. Try Invidious (googlevideo URLs) - limit to 2 for speed
   const invidiousInstances = [
-    'https://invidious.fdn.fr',
-    'https://invidious.flokinet.to',
-    'https://invidious.einfachzocken.eu',
-    'https://invidious.slipfox.xyz',
-    'https://invidious.private.coffee',
-    'https://invidious.baczek.me',
-    'https://invidious.jing.rocks',
-    'https://invidious.darkness.services',
-    'https://invidious.reallyaweso.me',
-    'https://invidious.nerdvpn.de',
-    'https://invidious.f5.si',
-    'https://invidious.privacyredirect.com',
     'https://invidious.kavin.rocks',
+    'https://invidious.fdn.fr',
   ];
   
   const tryInvidious = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 6000);
+    const timeout = setTimeout(() => controller.abort(), 3000); // Reduced to 3s
     
     try {
       const response = await fetch(`${instance}/api/v1/videos/${youtubeKey}`, {
