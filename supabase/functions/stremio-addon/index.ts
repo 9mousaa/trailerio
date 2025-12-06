@@ -604,48 +604,51 @@ async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
   console.log(`Trying Cobalt instances (primary) for ${youtubeKey}`);
   const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
   
-  // Three muxing strategies for iOS compatibility
+  // Muxing strategies for iOS/browser compatibility
   // CRITICAL: downloadMode: 'auto' ensures video + audio are muxed together
-  // videoQuality must be a specific resolution (not 'max') - using 2160 for 4K
+  // youtubeVideoContainer: 'mp4' forces MP4 container for browser compatibility
   const requestConfigs = [
-    // Strategy 1: H.264 4K for maximum iOS/Safari compatibility (muxed video+audio)
+    // Strategy 1: H.264 4K in MP4 container for maximum browser compatibility
     { 
       url: youtubeUrl, 
-      videoQuality: '2160',          // 4K resolution
-      youtubeVideoCodec: 'h264',     // H.264/MP4 for iOS compatibility
-      downloadMode: 'auto',          // CRITICAL: mux video + audio together
-      audioFormat: 'best',           // Keep best audio format
-      codec: 'h264-4k'               // For logging
+      videoQuality: '2160',              // 4K resolution
+      youtubeVideoCodec: 'h264',         // H.264 codec for iOS compatibility
+      youtubeVideoContainer: 'mp4',      // CRITICAL: Force MP4 container
+      downloadMode: 'auto',              // CRITICAL: mux video + audio together
+      audioFormat: 'best',
+      codec: 'h264-4k-mp4'
     },
     
-    // Strategy 2: H.264 1080p fallback for iOS compatibility
+    // Strategy 2: H.264 1080p in MP4 container fallback
     { 
       url: youtubeUrl, 
-      videoQuality: '1080',          // 1080p fallback
-      youtubeVideoCodec: 'h264',     // H.264/MP4 for iOS compatibility
+      videoQuality: '1080',
+      youtubeVideoCodec: 'h264',
+      youtubeVideoContainer: 'mp4',      // Force MP4 container
       downloadMode: 'auto',
       audioFormat: 'best',
-      codec: 'h264-1080p'
+      codec: 'h264-1080p-mp4'
     },
     
-    // Strategy 3: VP9 4K for higher quality + HDR support (muxed)
+    // Strategy 3: H.264 720p in MP4 container (most compatible)
+    { 
+      url: youtubeUrl, 
+      videoQuality: '720',
+      youtubeVideoCodec: 'h264',
+      youtubeVideoContainer: 'mp4',
+      downloadMode: 'auto',
+      audioFormat: 'best',
+      codec: 'h264-720p-mp4'
+    },
+    
+    // Strategy 4: VP9 4K for higher quality (WebM container)
     { 
       url: youtubeUrl, 
       videoQuality: '2160',
-      youtubeVideoCodec: 'vp9',      // VP9/WebM for 4K/HDR
+      youtubeVideoCodec: 'vp9',
       downloadMode: 'auto',
       audioFormat: 'best',
       codec: 'vp9-4k'
-    },
-    
-    // Strategy 4: AV1 4K for best efficiency (muxed)
-    { 
-      url: youtubeUrl, 
-      videoQuality: '2160',
-      youtubeVideoCodec: 'av1',      // AV1/WebM for best quality
-      downloadMode: 'auto',
-      audioFormat: 'best',
-      codec: 'av1-4k'
     },
   ];
   

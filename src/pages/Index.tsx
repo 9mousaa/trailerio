@@ -264,24 +264,21 @@ const Index = () => {
                       </a>
                     </div>
                     
-                    {/* Inline Video Player */}
+                    {/* Inline Video Player - use src directly, let browser detect format */}
                     <div className="rounded-lg overflow-hidden bg-black aspect-video">
                       <video
                         key={testResult.streams[0].url}
+                        src={testResult.streams[0].url}
                         controls
                         autoPlay
                         playsInline
+                        crossOrigin="anonymous"
                         className="w-full h-full"
-                        onError={() => {
-                          toast.error("Video playback failed");
+                        onError={(e) => {
+                          console.error('Video playback error:', e);
+                          toast.error("Video cannot play inline - try the 'Open in new tab' link above");
                         }}
-                        onLoadedData={() => {
-                          toast.success("Video loaded successfully");
-                        }}
-                      >
-                        <source src={testResult.streams[0].url} type="video/mp4" />
-                        Your browser does not support video playback.
-                      </video>
+                      />
                     </div>
                     
                     {/* Stream info */}
