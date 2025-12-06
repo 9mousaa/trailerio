@@ -3,6 +3,10 @@ FROM node:20-alpine
 
 WORKDIR /app
 
+# Install Python and yt-dlp for direct YouTube extraction
+RUN apk add --no-cache python3 py3-pip && \
+    pip3 install --no-cache-dir yt-dlp
+
 # Copy server package files
 COPY server/package*.json ./
 

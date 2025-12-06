@@ -2,6 +2,9 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const execAsync = promisify(exec);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -682,22 +685,82 @@ async function extractViaCobalt(youtubeKey) {
   return null;
 }
 
+// ============ YT-DLP DIRECT EXTRACTOR (PRIMARY - MOST STABLE) ============
+
+async function extractViaYtDlp(youtubeKey) {
+  const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
+  console.log(`Trying yt-dlp directly for ${youtubeKey}...`);
+  
+  try {
+    // Try highest quality first (1080p or best available)
+    // Format: bestvideo[height<=1080]+bestaudio/best[height<=1080] for combined stream
+    // Fallback to just best if combined not available
+    const formats = [
+      'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]', // 1080p MP4
+      'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]',   // 720p MP4
+      'best[height<=1080]',  // Best quality up to 1080p
+      'best',                 // Best available
+    ];
+    
+    for (const format of formats) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000); // 10s timeout
+        
+        const { stdout, stderr } = await Promise.race([
+          execAsync(`yt-dlp -f "${format}" -g --no-warnings "${youtubeUrl}"`, {
+            signal: controller.signal,
+            timeout: 10000
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10000))
+        ]);
+        
+        clearTimeout(timeout);
+        
+        const url = stdout.trim();
+        if (url && url.startsWith('http')) {
+          console.log(`  ✓ yt-dlp: got URL (format: ${format})`);
+          return url;
+        }
+      } catch (e) {
+        // Try next format
+        continue;
+      }
+    }
+    
+    console.log(`  yt-dlp: failed to extract URL`);
+    return null;
+  } catch (e) {
+    console.log(`  yt-dlp error: ${e.message || e}`);
+    return null;
+  }
+}
+
 async function extractYouTubeDirectUrl(youtubeKey) {
   console.log(`\n========== Extracting YouTube URL for key: ${youtubeKey} ==========`);
   
+  // PRIORITY 1: yt-dlp directly (most stable, highest quality, no external dependencies)
+  const ytdlpUrl = await extractViaYtDlp(youtubeKey);
+  if (ytdlpUrl) {
+    console.log('✓ Got YouTube URL from yt-dlp (direct, highest quality)');
+    return ytdlpUrl;
+  }
+  
+  // PRIORITY 2: Piped (stable proxied URLs)
   const pipedUrl = await extractViaPiped(youtubeKey);
   if (pipedUrl) {
     console.log('✓ Got YouTube URL from Piped (stable proxied)');
     return pipedUrl;
   }
   
+  // PRIORITY 3: Invidious (direct googlevideo URLs)
   const invidiousUrl = await extractViaInvidious(youtubeKey);
   if (invidiousUrl) {
     console.log('✓ Got YouTube URL from Invidious');
     return invidiousUrl;
   }
   
-  // Try Cobalt as last resort
+  // PRIORITY 4: Cobalt (as last resort)
   console.log('Trying Cobalt as last resort...');
   const cobaltUrl = await extractViaCobalt(youtubeKey);
   if (cobaltUrl) {
