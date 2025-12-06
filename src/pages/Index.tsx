@@ -249,19 +249,47 @@ const Index = () => {
             </Button>
 
             {testResult && (
-              <div className="p-4 rounded-lg bg-muted">
+              <div className="p-4 rounded-lg bg-muted space-y-4">
                 {testResult.streams?.[0]?.url ? (
-                  <div className="space-y-3">
-                    <div className="text-sm text-muted-foreground">Preview found</div>
-                    <a
-                      href={testResult.streams[0].url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-2 text-foreground hover:underline"
-                    >
-                      <Play className="w-4 h-4" />
-                      Play Preview
-                    </a>
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm text-muted-foreground">Preview found</div>
+                      <a
+                        href={testResult.streams[0].url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs text-muted-foreground hover:underline"
+                      >
+                        Open in new tab ↗
+                      </a>
+                    </div>
+                    
+                    {/* Inline Video Player */}
+                    <div className="rounded-lg overflow-hidden bg-black aspect-video">
+                      <video
+                        key={testResult.streams[0].url}
+                        controls
+                        autoPlay
+                        playsInline
+                        className="w-full h-full"
+                        onError={() => {
+                          toast.error("Video playback failed");
+                        }}
+                        onLoadedData={() => {
+                          toast.success("Video loaded successfully");
+                        }}
+                      >
+                        <source src={testResult.streams[0].url} type="video/mp4" />
+                        Your browser does not support video playback.
+                      </video>
+                    </div>
+                    
+                    {/* Stream info */}
+                    {(testResult.streams[0].name || testResult.streams[0].title) && (
+                      <div className="text-xs text-muted-foreground">
+                        {testResult.streams[0].name || testResult.streams[0].title}
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="text-sm text-muted-foreground">No preview available</div>
