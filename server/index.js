@@ -137,10 +137,19 @@ async function getTMDBMetadata(imdbId, type) {
 
 const PIPED_FALLBACK_INSTANCES = [
   'https://pipedapi.kavin.rocks',
-  'https://pipedapi.tokhmi.xyz',
-  'https://pipedapi.syncpundit.io',
+  'https://pipedapi.r4fo.com',
   'https://pipedapi.adminforge.de',
-  'https://pipedapi.movire.xyz',
+  'https://api.piped.projectsegfau.lt',
+  'https://pipedapi.in.projectsegfau.lt',
+  'https://piped-api.lunar.icu',
+  'https://pipedapi.moomoo.me',
+  'https://pipedapi.syncpundit.io',
+  'https://piped-api.garudalinux.org',
+  'https://pipedapi.leptons.xyz',
+  'https://pipedapi.tokhmi.xyz',
+  'https://pipedapi.mha.fi',
+  'https://api.piped.private.coffee',
+  'https://pipedapi.darkness.services',
 ];
 
 let cachedPipedInstances = null;
@@ -189,106 +198,171 @@ async function getWorkingPipedInstances() {
 
 async function extractViaPiped(youtubeKey) {
   const instances = await getWorkingPipedInstances();
-  console.log(`Trying ${instances.length} Piped instances for key: ${youtubeKey}`);
+  console.log(`Trying ${instances.length} Piped instances for ${youtubeKey}`);
   
-  for (let i = 0; i < instances.length; i++) {
-    const instance = instances[i];
+  const tryInstance = async (instance) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
+    
     try {
-      const url = `${instance}/streams/${youtubeKey}`;
-      console.log(`Trying instance ${i + 1}/${instances.length}: ${instance}`);
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
-      
-      const response = await fetch(url, {
-        signal: controller.signal,
-        headers: { 'Accept': 'application/json' }
+      const response = await fetch(`${instance}/streams/${youtubeKey}`, {
+        headers: { 'Accept': 'application/json' },
+        signal: controller.signal
       });
       clearTimeout(timeout);
       
-      if (response.ok) {
-        const data = await response.json();
-        console.log(`Instance ${instance} returned data, checking streams...`);
-        
-        // Try different possible response formats
-        let videoStreams = data.videoStreams || data.videoStreams || [];
-        
-        // Some Piped instances use different formats
-        if (!videoStreams.length && data.formats) {
-          videoStreams = data.formats;
-        }
-        
-        if (!videoStreams.length && data.streams) {
-          videoStreams = data.streams;
-        }
-        
-        if (videoStreams && videoStreams.length > 0) {
-          const stream = videoStreams.find(s => s.quality === '720p' || s.quality === '1080p') || videoStreams[0];
-          if (stream && stream.url) {
-            console.log(`Successfully extracted URL from ${instance}`);
-            return stream.url;
-          }
-        } else {
-          console.log(`Instance ${instance} returned no video streams`);
-        }
-      } else {
-        console.log(`Instance ${instance} returned status ${response.status}`);
+      if (!response.ok) return null;
+      const data = await response.json();
+      
+      // PRIORITY 1: Use DASH manifest if available (adaptive streaming with high quality + audio)
+      if (data.dash) {
+        console.log(`  ✓ Piped ${instance}: got DASH manifest (adaptive quality + audio)`);
+        return data.dash;
       }
-    } catch (e) {
-      console.log(`Instance ${instance} failed: ${e.message || e}`);
-      continue;
+      
+      // PRIORITY 2: Fall back to individual streams
+      if (data.videoStreams?.length > 0) {
+        // Quality priority: highest first
+        const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
+        const getQualityRank = (q) => {
+          if (!q) return 999;
+          const idx = qualityPriority.findIndex(p => q.includes(p));
+          return idx === -1 ? 998 : idx;
+        };
+        
+        // Sort streams by quality (highest first)
+        const sorted = [...data.videoStreams]
+          .filter(s => s.mimeType?.startsWith('video/') && s.url)
+          .sort((a, b) => getQualityRank(a.quality) - getQualityRank(b.quality));
+        
+        // Prefer combined streams (have audio) for guaranteed playback
+        const bestCombined = sorted.find(s => !s.videoOnly);
+        if (bestCombined?.url) {
+          console.log(`  ✓ Piped ${instance}: got ${bestCombined.quality || 'unknown'} (combined)`);
+          return bestCombined.url;
+        }
+        
+        // Last resort: video-only stream (may not have audio)
+        const bestVideoOnly = sorted.find(s => s.videoOnly);
+        if (bestVideoOnly?.url) {
+          console.log(`  ✓ Piped ${instance}: got ${bestVideoOnly.quality || 'unknown'} (video-only)`);
+          return bestVideoOnly.url;
+        }
+      }
+      
+      return null;
+    } catch {
+      clearTimeout(timeout);
+      return null;
     }
+  };
+  
+  // Try all instances in parallel, return first success
+  const results = await Promise.all(instances.map(tryInstance));
+  const validUrl = results.find(r => r !== null);
+  
+  if (validUrl) {
+    console.log(`✓ Got URL from Piped (stable proxied URL)`);
+    return validUrl;
   }
   
-  console.log(`All Piped instances failed for key: ${youtubeKey}`);
+  console.log(`  No Piped instance returned a valid URL`);
   return null;
 }
 
 async function extractYouTubeDirectUrl(youtubeKey) {
-  // Try Piped first
+  console.log(`\nExtracting YouTube URL for key: ${youtubeKey}`);
+  
+  // 1. Try Piped FIRST (most stable - returns proxied URLs that don't expire)
   const pipedUrl = await extractViaPiped(youtubeKey);
   if (pipedUrl) {
+    console.log('✓ Got YouTube URL from Piped (stable proxied)');
     return pipedUrl;
   }
   
-  // Fallback: Try Invidious API
+  // 2. Try Invidious (googlevideo URLs)
   console.log(`Trying Invidious as fallback for key: ${youtubeKey}`);
   const invidiousInstances = [
-    'https://inv.riverside.rocks',
+    'https://invidious.fdn.fr',
     'https://invidious.flokinet.to',
-    'https://invidious.osi.kr',
-    'https://invidious.io.lol'
+    'https://invidious.einfachzocken.eu',
+    'https://invidious.slipfox.xyz',
+    'https://invidious.private.coffee',
+    'https://invidious.baczek.me',
+    'https://invidious.jing.rocks',
+    'https://invidious.darkness.services',
+    'https://invidious.reallyaweso.me',
+    'https://invidious.nerdvpn.de',
+    'https://invidious.f5.si',
+    'https://invidious.privacyredirect.com',
+    'https://invidious.kavin.rocks',
   ];
   
-  for (const instance of invidiousInstances) {
+  const tryInvidious = async (instance) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
+    
     try {
-      const url = `${instance}/api/v1/videos/${youtubeKey}`;
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
-      
-      const response = await fetch(url, {
-        signal: controller.signal,
-        headers: { 'Accept': 'application/json' }
+      const response = await fetch(`${instance}/api/v1/videos/${youtubeKey}`, {
+        headers: { 'Accept': 'application/json' },
+        signal: controller.signal
       });
       clearTimeout(timeout);
       
-      if (response.ok) {
-        const data = await response.json();
-        // Invidious format: data.formatStreams or data.adaptiveFormats
-        const streams = data.formatStreams || data.adaptiveFormats || [];
-        if (streams.length > 0) {
-          const stream = streams.find(s => s.qualityLabel === '720p' || s.qualityLabel === '1080p') || streams[0];
-          if (stream && stream.url) {
-            console.log(`Successfully extracted URL from Invidious: ${instance}`);
-            return stream.url;
-          }
+      if (!response.ok) return null;
+      const data = await response.json();
+      
+      // Quality priority: 4K/2160p > 1440p > 1080p > 720p
+      const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
+      const getQualityRank = (label) => {
+        if (!label) return 999;
+        const idx = qualityPriority.findIndex(q => label.includes(q));
+        return idx === -1 ? 998 : idx;
+      };
+      
+      // formatStreams has combined video+audio (preferred)
+      if (data.formatStreams?.length > 0) {
+        const sorted = [...data.formatStreams].sort((a, b) => 
+          getQualityRank(a.qualityLabel) - getQualityRank(b.qualityLabel)
+        );
+        const stream = sorted.find(s => s.container === 'mp4') || sorted[0];
+        if (stream?.url) {
+          console.log(`  ✓ Invidious ${instance}: got ${stream.qualityLabel || 'unknown'} ${stream.container || 'video'}`);
+          return stream.url;
         }
       }
-    } catch (e) {
-      continue;
+      
+      // adaptiveFormats as fallback
+      if (data.adaptiveFormats?.length > 0) {
+        const videoFormats = data.adaptiveFormats.filter(s => 
+          s.type?.includes('video') || s.mimeType?.startsWith('video/')
+        );
+        const sorted = videoFormats.sort((a, b) => 
+          getQualityRank(a.qualityLabel) - getQualityRank(b.qualityLabel)
+        );
+        const adaptive = sorted.find(s => s.container === 'mp4' || s.mimeType?.includes('mp4')) || sorted[0];
+        if (adaptive?.url) {
+          console.log(`  ✓ Invidious ${instance}: got adaptive ${adaptive.qualityLabel || 'unknown'}`);
+          return adaptive.url;
+        }
+      }
+      
+      return null;
+    } catch {
+      clearTimeout(timeout);
+      return null;
     }
+  };
+  
+  const invidiousResults = await Promise.all(invidiousInstances.map(tryInvidious));
+  const invidiousUrl = invidiousResults.find(r => r !== null);
+  
+  if (invidiousUrl) {
+    console.log('✓ Got YouTube URL from Invidious');
+    return invidiousUrl;
   }
   
-  console.log(`All extraction methods failed for key: ${youtubeKey}`);
+  console.log('No YouTube URL found from any extractor');
   return null;
 }
 
