@@ -261,7 +261,11 @@ app.get('/health', (req, res) => {
 });
 
 app.get('/manifest.json', (req, res) => {
-  const baseUrl = `${req.protocol}://${req.get('host')}`;
+  // Get the base URL from the request, handling proxy headers
+  const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
+  const host = req.get('x-forwarded-host') || req.get('host') || 'localhost';
+  const baseUrl = `${protocol}://${host}`;
+  
   res.json({
     id: "com.trailer.preview",
     name: "Trailer Preview",

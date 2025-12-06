@@ -7,7 +7,15 @@ import { Play, Copy, Check, Film, Tv } from "lucide-react";
 import { VideoPlayer } from "@/components/VideoPlayer";
 
 // Use relative URL for API (will be proxied or use same origin)
-const ADDON_URL = import.meta.env.VITE_API_URL || '/api';
+// For Stremio, we need the full URL, so we'll construct it from window.location
+const getBaseUrl = () => {
+  if (typeof window !== 'undefined') {
+    return `${window.location.protocol}//${window.location.host}`;
+  }
+  return '';
+};
+
+const ADDON_URL = import.meta.env.VITE_API_URL || `${getBaseUrl()}/api`;
 const MANIFEST_URL = `${ADDON_URL}/manifest.json`;
 
 // Title lookup map
@@ -154,11 +162,23 @@ const Index = () => {
     setTestResult(null);
     
     try {
-      const response = await fetch(`${ADDON_URL}/stream/${testType}/${testImdbId}.json`, {
+      const apiUrl = import.meta.env.VITE_API_URL || `${window.location.origin}/api`;
+      const response = await fetch(`${apiUrl}/stream/${testType}/${testImdbId}.json`, {
         headers: {
           'Accept': 'application/json'
         }
       });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await response.text();
+        throw new Error(`Expected JSON but got: ${contentType}. Response: ${text.substring(0, 100)}`);
+      }
+      
       const data = await response.json();
       setTestResult(data);
       
