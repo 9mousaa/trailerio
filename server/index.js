@@ -1,4 +1,4 @@
-// Standalone Express server for Stremio addon (no Supabase dependency)
+// Ported from Supabase function - exact same logic, just using in-memory cache instead of Supabase
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
@@ -6,14 +6,13 @@ const fetch = require('node-fetch');
 const app = express();
 const PORT = process.env.PORT || 3001;
 const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
-
-// In-memory cache (replace Supabase)
-const cache = new Map();
 const CACHE_DAYS = 30;
 const MIN_SCORE_THRESHOLD = 0.6;
 const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
 
-// CORS headers
+// In-memory cache (replaces Supabase)
+const cache = new Map();
+
 app.use(cors());
 app.use(express.json());
 
@@ -69,71 +68,280 @@ function levenshteinDistance(s1, s2) {
 // ============ TMDB METADATA ============
 
 async function getTMDBMetadata(imdbId, type) {
-  try {
-    if (!TMDB_API_KEY) {
-      console.error('TMDB_API_KEY is not set!');
-      return null;
-    }
-    
-    const findUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
-    const findResponse = await fetch(findUrl);
-    
-    if (!findResponse.ok) {
-      console.error(`TMDB find API error: ${findResponse.status} ${findResponse.statusText}`);
-      return null;
-    }
-    
-    const findData = await findResponse.json();
-    
-    const tmdbId = findData[type === 'movie' ? 'movie_results' : 'tv_results']?.[0]?.id;
-    if (!tmdbId) {
-      console.log(`No TMDB ID found for ${imdbId} (${type})`);
-      return null;
-    }
-    
-    const detailsUrl = `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${TMDB_API_KEY}&append_to_response=alternative_titles`;
-    const detailsResponse = await fetch(detailsUrl);
-    
-    if (!detailsResponse.ok) {
-      console.error(`TMDB details API error: ${detailsResponse.status} ${detailsResponse.statusText}`);
-      return null;
-    }
-    
-    const details = await detailsResponse.json();
-    
-    const videosUrl = `https://api.themoviedb.org/3/${type}/${tmdbId}/videos?api_key=${TMDB_API_KEY}`;
-    const videosResponse = await fetch(videosUrl);
-    
-    if (!videosResponse.ok) {
-      console.error(`TMDB videos API error: ${videosResponse.status} ${videosResponse.statusText}`);
-      return null;
-    }
-    
-    const videos = await videosResponse.json();
-    
-    const trailer = videos.results?.find(v => v.type === 'Trailer' && v.site === 'YouTube');
-    
-    if (!trailer) {
-      console.log(`No YouTube trailer found for ${imdbId} (${type})`);
-    }
-    
-    return {
-      tmdbId,
-      mediaType: type,
-      title: details.title || details.name,
-      originalTitle: details.original_title || details.original_name,
-      year: details.release_date ? new Date(details.release_date).getFullYear() : null,
-      runtime: details.runtime || details.episode_run_time?.[0] || null,
-      altTitles: details.alternative_titles?.titles?.map(t => t.title) || [],
-      youtubeTrailerKey: trailer?.key || null
-    };
-  } catch (error) {
-    console.error('TMDB error:', error.message || error);
+  console.log(`Fetching TMDB metadata for ${imdbId}, type: ${type}`);
+  
+  const findUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
+  const findResponse = await fetch(findUrl);
+  const findData = await findResponse.json();
+  
+  let result = null;
+  let mediaType = type === 'movie' ? 'movie' : 'tv';
+  
+  if (type === 'movie' && findData.movie_results?.length > 0) {
+    result = findData.movie_results[0];
+    mediaType = 'movie';
+  } else if (type === 'series' && findData.tv_results?.length > 0) {
+    result = findData.tv_results[0];
+    mediaType = 'tv';
+  } else if (findData.movie_results?.length > 0) {
+    result = findData.movie_results[0];
+    mediaType = 'movie';
+  } else if (findData.tv_results?.length > 0) {
+    result = findData.tv_results[0];
+    mediaType = 'tv';
+  }
+  
+  if (!result) {
+    console.log('No TMDB results found');
     return null;
   }
+  
+  const tmdbId = result.id;
+  
+  const detailUrl = `https://api.themoviedb.org/3/${mediaType}/${tmdbId}?api_key=${TMDB_API_KEY}&append_to_response=videos`;
+  const altTitlesUrl = `https://api.themoviedb.org/3/${mediaType}/${tmdbId}/alternative_titles?api_key=${TMDB_API_KEY}`;
+  
+  const [detailResponse, altTitlesResponse] = await Promise.all([
+    fetch(detailUrl),
+    fetch(altTitlesUrl)
+  ]);
+  
+  const [detail, altTitlesData] = await Promise.all([
+    detailResponse.json(),
+    altTitlesResponse.json()
+  ]);
+  
+  const mainTitle = mediaType === 'movie' ? detail.title : detail.name;
+  const originalTitle = mediaType === 'movie' ? detail.original_title : detail.original_name;
+  const releaseDate = mediaType === 'movie' ? detail.release_date : detail.first_air_date;
+  const year = releaseDate ? parseInt(releaseDate.substring(0, 4)) : null;
+  const runtime = detail.runtime || null;
+  
+  let youtubeTrailerKey = null;
+  const videos = detail.videos?.results || [];
+  
+  const trailerPriority = ['Trailer', 'Teaser', 'Clip'];
+  for (const priority of trailerPriority) {
+    const trailer = videos.find(v => 
+      v.site === 'YouTube' && 
+      v.type === priority && 
+      v.official === true
+    );
+    if (trailer) {
+      youtubeTrailerKey = trailer.key;
+      break;
+    }
+  }
+  
+  if (!youtubeTrailerKey) {
+    const anyYouTube = videos.find(v => v.site === 'YouTube');
+    if (anyYouTube) {
+      youtubeTrailerKey = anyYouTube.key;
+    }
+  }
+  
+  const altTitlesArray = [];
+  const englishCountries = ['US', 'GB', 'CA', 'AU'];
+  const titles = mediaType === 'movie' ? altTitlesData.titles : altTitlesData.results;
+  
+  if (titles) {
+    for (const t of titles) {
+      const country = t.iso_3166_1;
+      const titleText = t.title;
+      if (englishCountries.includes(country) && titleText && !altTitlesArray.includes(titleText)) {
+        altTitlesArray.push(titleText);
+      }
+    }
+  }
+  
+  console.log(`TMDB: "${mainTitle}" (${year}), YouTube: ${youtubeTrailerKey || 'none'}, altTitles: ${altTitlesArray.length}`);
+  
+  return {
+    tmdbId,
+    mediaType,
+    title: mainTitle,
+    originalTitle: originalTitle || mainTitle,
+    year,
+    runtime,
+    altTitles: altTitlesArray,
+    youtubeTrailerKey
+  };
 }
 
-// ============ YOUTUBE EXTRACTION ============
+// ============ ITUNES SEARCH ============
+
+async function searchITunes(params) {
+  const { term, country, type } = params;
+  
+  const trySearch = async (extraParams, filterKind) => {
+    const queryParams = new URLSearchParams({
+      term,
+      country,
+      limit: '25',
+      ...extraParams
+    });
+    
+    const url = `https://itunes.apple.com/search?${queryParams}`;
+    
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      
+      const response = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeout);
+      
+      const data = await response.json();
+      let results = data.results || [];
+      
+      if (filterKind) {
+        results = results.filter(r => r.kind === filterKind);
+      }
+      
+      return results;
+    } catch {
+      return [];
+    }
+  };
+  
+  if (type === 'movie') {
+    let results = await trySearch({ media: 'movie', entity: 'movie', attribute: 'movieTerm' }, null);
+    if (results.length > 0) return results;
+    
+    results = await trySearch({}, 'feature-movie');
+    if (results.length > 0) return results;
+  } else {
+    let results = await trySearch({ media: 'tvShow', entity: 'tvEpisode', attribute: 'showTerm' }, null);
+    if (results.length > 0) return results;
+    
+    results = await trySearch({ media: 'tvShow' }, 'tv-episode');
+    if (results.length > 0) return results;
+  }
+  
+  return [];
+}
+
+// ============ SCORING LOGIC ============
+
+function scoreItem(tmdbMeta, item) {
+  let score = 0;
+  
+  const nameToMatch = tmdbMeta.mediaType === 'tv' 
+    ? (item.artistName || item.collectionName || '') 
+    : (item.trackName || item.collectionName || '');
+  
+  const normNameToMatch = normalizeTitle(nameToMatch);
+  const normTitle = normalizeTitle(tmdbMeta.title);
+  const normOriginal = normalizeTitle(tmdbMeta.originalTitle);
+  const normAltTitles = tmdbMeta.altTitles.map(t => normalizeTitle(t));
+  
+  if (normNameToMatch === normTitle) {
+    score += 0.5;
+  } else if (normNameToMatch === normOriginal) {
+    score += 0.4;
+  } else if (normAltTitles.includes(normNameToMatch)) {
+    score += 0.4;
+  } else {
+    const fuzzyScore = Math.max(
+      fuzzyMatch(nameToMatch, tmdbMeta.title),
+      fuzzyMatch(nameToMatch, tmdbMeta.originalTitle)
+    );
+    if (fuzzyScore > 0.8) {
+      score += 0.3;
+    } else if (fuzzyScore > 0.6) {
+      score += 0.15;
+    }
+  }
+  
+  const itunesYear = item.releaseDate ? parseInt(item.releaseDate.substring(0, 4)) : null;
+  if (tmdbMeta.year && itunesYear) {
+    const diff = Math.abs(itunesYear - tmdbMeta.year);
+    if (tmdbMeta.mediaType === 'tv') {
+      if (diff === 0) {
+        score += 0.35;
+      } else if (diff <= 2) {
+        score += 0.25;
+      } else if (diff <= 5) {
+        score += 0.15;
+      } else if (diff <= 10) {
+        score += 0.05;
+      }
+    } else {
+      if (diff === 0) {
+        score += 0.35;
+      } else if (diff === 1) {
+        score += 0.2;
+      } else if (diff > 2) {
+        score -= 0.5;
+      }
+    }
+  }
+  
+  if (tmdbMeta.mediaType === 'movie' && tmdbMeta.runtime && item.trackTimeMillis) {
+    const itunesMinutes = Math.round(item.trackTimeMillis / 60000);
+    const runtimeDiff = Math.abs(itunesMinutes - tmdbMeta.runtime);
+    if (runtimeDiff <= 5) {
+      score += 0.15;
+    } else if (runtimeDiff > 15) {
+      score -= 0.2;
+    }
+  }
+  
+  if (!item.previewUrl) {
+    score -= 1.0;
+  }
+  
+  return score;
+}
+
+function findBestMatch(results, tmdbMeta) {
+  let bestScore = -Infinity;
+  let bestItem = null;
+  
+  for (const item of results) {
+    const score = scoreItem(tmdbMeta, item);
+    const trackName = item.trackName || item.collectionName || 'Unknown';
+    const itunesYear = item.releaseDate ? item.releaseDate.substring(0, 4) : 'N/A';
+    
+    console.log(`  Score ${score.toFixed(2)}: "${trackName}" (${itunesYear})`);
+    
+    if (score > bestScore) {
+      bestScore = score;
+      bestItem = item;
+    }
+  }
+  
+  if (bestScore >= MIN_SCORE_THRESHOLD && bestItem) {
+    console.log(`✓ Best match score: ${bestScore.toFixed(2)}`);
+    return { score: bestScore, item: bestItem };
+  }
+  
+  return null;
+}
+
+// ============ YOUTUBE EXTRACTORS ============
+
+const INVIDIOUS_FALLBACK_INSTANCES = [
+  'https://invidious.fdn.fr',
+  'https://iv.ggtyler.dev',
+  'https://invidious.einfachzocken.eu',
+  'https://invidious.slipfox.xyz',
+  'https://inv.zzls.xyz',
+  'https://invidious.private.coffee',
+  'https://invidious.baczek.me',
+  'https://inv.tux.pizza',
+  'https://invidious.jing.rocks',
+  'https://invidious.darkness.services',
+  'https://yt.drgnz.club',
+  'https://invidious.reallyaweso.me',
+  'https://inv.nadeko.net',
+  'https://invidious.nerdvpn.de',
+  'https://invidious.f5.si',
+  'https://inv.perditum.com',
+  'https://yewtu.be',
+  'https://invidious.privacyredirect.com',
+  'https://vid.puffyan.us',
+  'https://invidious.kavin.rocks',
+];
 
 const PIPED_FALLBACK_INSTANCES = [
   'https://pipedapi.kavin.rocks',
@@ -146,6 +354,7 @@ const PIPED_FALLBACK_INSTANCES = [
   'https://pipedapi.syncpundit.io',
   'https://piped-api.garudalinux.org',
   'https://pipedapi.leptons.xyz',
+  'https://watchapi.whatever.social',
   'https://pipedapi.tokhmi.xyz',
   'https://pipedapi.mha.fi',
   'https://api.piped.private.coffee',
@@ -154,16 +363,65 @@ const PIPED_FALLBACK_INSTANCES = [
 
 let cachedPipedInstances = null;
 let pipedCacheTime = 0;
-const PIPED_CACHE_TTL = 3600000; // 1 hour
+const PIPED_CACHE_TTL = 5 * 60 * 1000;
+
+let cachedInvidiousInstances = null;
+let invidiousCacheTime = 0;
+const INVIDIOUS_CACHE_TTL = 5 * 60 * 1000;
+
+async function getWorkingInvidiousInstances() {
+  if (cachedInvidiousInstances && Date.now() - invidiousCacheTime < INVIDIOUS_CACHE_TTL) {
+    return cachedInvidiousInstances;
+  }
+  
+  const combined = [...INVIDIOUS_FALLBACK_INSTANCES];
+  
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    
+    const response = await fetch('https://api.invidious.io/instances.json', {
+      signal: controller.signal,
+      headers: { 'Accept': 'application/json' }
+    });
+    clearTimeout(timeout);
+    
+    if (response.ok) {
+      const instances = await response.json();
+      const dynamicInstances = instances
+        .filter(([uri, data]) => 
+          data.type === 'https' &&
+          uri && 
+          !uri.includes('.onion') &&
+          !uri.includes('.i2p')
+        )
+        .sort(([, a], [, b]) => 
+          (b.users?.total || 0) - (a.users?.total || 0)
+        )
+        .map(([uri]) => `https://${uri}`);
+      
+      for (const inst of dynamicInstances) {
+        if (!combined.includes(inst)) {
+          combined.push(inst);
+        }
+      }
+    }
+  } catch (e) {
+    // Use fallback
+  }
+  
+  const result = combined.slice(0, 25);
+  cachedInvidiousInstances = result;
+  invidiousCacheTime = Date.now();
+  return result;
+}
 
 async function getWorkingPipedInstances() {
   if (cachedPipedInstances && Date.now() - pipedCacheTime < PIPED_CACHE_TTL) {
-    console.log(`Using cached Piped instances (${cachedPipedInstances.length} instances)`);
     return cachedPipedInstances;
   }
   
   const combined = [...PIPED_FALLBACK_INSTANCES];
-  console.log(`Starting with ${combined.length} fallback Piped instances`);
   
   try {
     const controller = new AbortController();
@@ -182,66 +440,139 @@ async function getWorkingPipedInstances() {
         .sort((a, b) => (b.uptime_24h || 50) - (a.uptime_24h || 50))
         .map(i => i.api_url);
       
-      console.log(`Fetched ${dynamicInstances.length} dynamic Piped instances`);
-      
       for (const inst of dynamicInstances) {
         if (!combined.includes(inst)) {
           combined.push(inst);
         }
       }
-    } else {
-      console.log(`Dynamic Piped API returned ${response.status}, using fallback only`);
     }
   } catch (e) {
-    console.log(`Dynamic Piped fetch failed: ${e.message || e}, using fallback instances`);
+    // Use fallback
   }
   
   const result = combined.slice(0, 20);
-  console.log(`Total Piped instances: ${result.length}`);
   cachedPipedInstances = result;
   pipedCacheTime = Date.now();
   return result;
 }
 
-async function extractViaPiped(youtubeKey) {
-  try {
-    const instances = await getWorkingPipedInstances();
-    // Limit to first 3 instances for faster response
-    const limitedInstances = instances.slice(0, 3);
-    console.log(`Trying ${limitedInstances.length} Piped instances for ${youtubeKey}`);
+async function extractViaInvidious(youtubeKey) {
+  const invidiousInstances = await getWorkingInvidiousInstances();
+  console.log(`Trying ${invidiousInstances.length} Invidious instances for ${youtubeKey}`);
+  
+  const tryInstance = async (instance) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
     
-    if (!limitedInstances || limitedInstances.length === 0) {
-      console.log('No Piped instances available');
+    try {
+      const response = await fetch(`${instance}/api/v1/videos/${youtubeKey}`, {
+        headers: { 'Accept': 'application/json' },
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+      
+      if (!response.ok) {
+        console.log(`  ${instance}: HTTP ${response.status}`);
+        return null;
+      }
+      
+      const data = await response.json();
+      
+      const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
+      
+      const getQualityRank = (label) => {
+        if (!label) return 999;
+        const idx = qualityPriority.findIndex(q => label.includes(q));
+        return idx === -1 ? 998 : idx;
+      };
+      
+      const isHDR = (s) => {
+        return s.qualityLabel?.toLowerCase().includes('hdr') || 
+               s.type?.toLowerCase().includes('hdr') ||
+               s.colorInfo?.primaries === 'bt2020';
+      };
+      
+      if (data.formatStreams?.length > 0) {
+        const sorted = [...data.formatStreams].sort((a, b) => {
+          if (isHDR(a) && !isHDR(b)) return -1;
+          if (!isHDR(a) && isHDR(b)) return 1;
+          return getQualityRank(a.qualityLabel) - getQualityRank(b.qualityLabel);
+        });
+        
+        const stream = sorted.find(s => s.container === 'mp4') || sorted[0];
+        
+        if (stream?.url) {
+          const hdrLabel = isHDR(stream) ? ' HDR' : '';
+          console.log(`  ✓ Invidious ${instance}: got ${stream.qualityLabel || 'unknown'}${hdrLabel} ${stream.container || 'video'}`);
+          return stream.url;
+        }
+      }
+      
+      if (data.adaptiveFormats?.length > 0) {
+        const videoFormats = data.adaptiveFormats.filter(s => 
+          s.type?.includes('video') || s.mimeType?.startsWith('video/')
+        );
+        
+        const sorted = videoFormats.sort((a, b) => {
+          if (isHDR(a) && !isHDR(b)) return -1;
+          if (!isHDR(a) && isHDR(b)) return 1;
+          return getQualityRank(a.qualityLabel) - getQualityRank(b.qualityLabel);
+        });
+        
+        const adaptive = sorted.find(s => s.container === 'mp4' || s.mimeType?.includes('mp4')) || sorted[0];
+        
+        if (adaptive?.url) {
+          const hdrLabel = isHDR(adaptive) ? ' HDR' : '';
+          console.log(`  ✓ Invidious ${instance}: got adaptive ${adaptive.qualityLabel || 'unknown'}${hdrLabel}`);
+          return adaptive.url;
+        }
+      }
+      
+      console.log(`  ${instance}: no usable streams in response`);
+      return null;
+    } catch (e) {
+      clearTimeout(timeout);
+      console.log(`  ${instance}: error - ${e.message || 'unknown'}`);
       return null;
     }
+  };
+  
+  const results = await Promise.all(invidiousInstances.map(tryInstance));
+  const validUrl = results.find(r => r !== null);
+  
+  if (validUrl) {
+    console.log(`✓ Got URL from Invidious`);
+    return validUrl;
+  }
+  
+  console.log(`  No Invidious instance returned a valid URL`);
+  return null;
+}
+
+async function extractViaPiped(youtubeKey) {
+  const pipedInstances = await getWorkingPipedInstances();
+  console.log(`Trying ${pipedInstances.length} Piped instances for ${youtubeKey}`);
+  
+  const tryInstance = async (instance) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
     
-    const tryInstance = async (instance) => {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3000); // Reduced to 3s
+    try {
+      const response = await fetch(`${instance}/streams/${youtubeKey}`, {
+        headers: { 'Accept': 'application/json' },
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
       
-      try {
-        const url = `${instance}/streams/${youtubeKey}`;
-        const response = await fetch(url, {
-          headers: { 'Accept': 'application/json' },
-          signal: controller.signal
-        });
-        clearTimeout(timeout);
-        
-        if (!response.ok) {
-          console.log(`  Piped ${instance}: HTTP ${response.status}`);
-          return null;
-        }
-        const data = await response.json();
+      if (!response.ok) return null;
+      const data = await response.json();
       
-      // PRIORITY 1: Use DASH manifest if available (adaptive streaming with high quality + audio)
       if (data.dash) {
         console.log(`  ✓ Piped ${instance}: got DASH manifest (adaptive quality + audio)`);
         return data.dash;
       }
       
-      // PRIORITY 2: Fall back to individual streams
       if (data.videoStreams?.length > 0) {
-        // Quality priority: highest first
         const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
         const getQualityRank = (q) => {
           if (!q) return 999;
@@ -249,19 +580,16 @@ async function extractViaPiped(youtubeKey) {
           return idx === -1 ? 998 : idx;
         };
         
-        // Sort streams by quality (highest first)
         const sorted = [...data.videoStreams]
           .filter(s => s.mimeType?.startsWith('video/') && s.url)
           .sort((a, b) => getQualityRank(a.quality) - getQualityRank(b.quality));
         
-        // Prefer combined streams (have audio) for guaranteed playback
         const bestCombined = sorted.find(s => !s.videoOnly);
         if (bestCombined?.url) {
           console.log(`  ✓ Piped ${instance}: got ${bestCombined.quality || 'unknown'} (combined)`);
           return bestCombined.url;
         }
         
-        // Last resort: video-only stream (may not have audio)
         const bestVideoOnly = sorted.find(s => s.videoOnly);
         if (bestVideoOnly?.url) {
           console.log(`  ✓ Piped ${instance}: got ${bestVideoOnly.quality || 'unknown'} (video-only)`);
@@ -270,15 +598,13 @@ async function extractViaPiped(youtubeKey) {
       }
       
       return null;
-    } catch (e) {
+    } catch {
       clearTimeout(timeout);
-      console.log(`  Piped ${instance}: error - ${e.message || e}`);
       return null;
     }
   };
   
-  // Try all instances in parallel, return first success
-  const results = await Promise.all(limitedInstances.map(tryInstance));
+  const results = await Promise.all(pipedInstances.map(tryInstance));
   const validUrl = results.find(r => r !== null);
   
   if (validUrl) {
@@ -288,178 +614,196 @@ async function extractViaPiped(youtubeKey) {
   
   console.log(`  No Piped instance returned a valid URL`);
   return null;
-  } catch (e) {
-    console.error(`Piped extraction error: ${e.message || e}`);
-    return null;
-  }
 }
 
 async function extractYouTubeDirectUrl(youtubeKey) {
   console.log(`\nExtracting YouTube URL for key: ${youtubeKey}`);
   
-  try {
-    // 1. Try Piped FIRST (most stable - returns proxied URLs that don't expire)
-    console.log('Step 1: Trying Piped...');
-    const pipedUrl = await extractViaPiped(youtubeKey);
-    if (pipedUrl) {
-      console.log('✓ Got YouTube URL from Piped (stable proxied)');
-      return pipedUrl;
-    }
-    console.log('Piped extraction failed, trying Invidious...');
-  } catch (e) {
-    console.error(`Piped extraction error: ${e.message || e}`);
+  const pipedUrl = await extractViaPiped(youtubeKey);
+  if (pipedUrl) {
+    console.log('✓ Got YouTube URL from Piped (stable proxied)');
+    return pipedUrl;
   }
   
-  // 2. Try Invidious (googlevideo URLs) - limit to 2 for speed
-  const invidiousInstances = [
-    'https://invidious.kavin.rocks',
-    'https://invidious.fdn.fr',
-  ];
-  
-  const tryInvidious = async (instance) => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000); // Reduced to 3s
-    
-    try {
-      const response = await fetch(`${instance}/api/v1/videos/${youtubeKey}`, {
-        headers: { 'Accept': 'application/json' },
-        signal: controller.signal
-      });
-      clearTimeout(timeout);
-      
-      if (!response.ok) return null;
-      const data = await response.json();
-      
-      // Quality priority: 4K/2160p > 1440p > 1080p > 720p
-      const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
-      const getQualityRank = (label) => {
-        if (!label) return 999;
-        const idx = qualityPriority.findIndex(q => label.includes(q));
-        return idx === -1 ? 998 : idx;
-      };
-      
-      // formatStreams has combined video+audio (preferred)
-      if (data.formatStreams?.length > 0) {
-        const sorted = [...data.formatStreams].sort((a, b) => 
-          getQualityRank(a.qualityLabel) - getQualityRank(b.qualityLabel)
-        );
-        const stream = sorted.find(s => s.container === 'mp4') || sorted[0];
-        if (stream?.url) {
-          console.log(`  ✓ Invidious ${instance}: got ${stream.qualityLabel || 'unknown'} ${stream.container || 'video'}`);
-          return stream.url;
-        }
-      }
-      
-      // adaptiveFormats as fallback
-      if (data.adaptiveFormats?.length > 0) {
-        const videoFormats = data.adaptiveFormats.filter(s => 
-          s.type?.includes('video') || s.mimeType?.startsWith('video/')
-        );
-        const sorted = videoFormats.sort((a, b) => 
-          getQualityRank(a.qualityLabel) - getQualityRank(b.qualityLabel)
-        );
-        const adaptive = sorted.find(s => s.container === 'mp4' || s.mimeType?.includes('mp4')) || sorted[0];
-        if (adaptive?.url) {
-          console.log(`  ✓ Invidious ${instance}: got adaptive ${adaptive.qualityLabel || 'unknown'}`);
-          return adaptive.url;
-        }
-      }
-      
-      return null;
-    } catch (e) {
-      clearTimeout(timeout);
-      console.log(`  Invidious ${instance}: error - ${e.message || e}`);
-      return null;
-    }
-  };
-  
-  try {
-    console.log(`Step 2: Trying ${invidiousInstances.length} Invidious instances...`);
-    const invidiousResults = await Promise.all(invidiousInstances.map(tryInvidious));
-    const invidiousUrl = invidiousResults.find(r => r !== null);
-    
-    if (invidiousUrl) {
-      console.log('✓ Got YouTube URL from Invidious');
-      return invidiousUrl;
-    }
-    console.log('Invidious extraction failed');
-  } catch (e) {
-    console.error(`Invidious extraction error: ${e.message || e}`);
+  const invidiousUrl = await extractViaInvidious(youtubeKey);
+  if (invidiousUrl) {
+    console.log('✓ Got YouTube URL from Invidious');
+    return invidiousUrl;
   }
   
   console.log('No YouTube URL found from any extractor');
   return null;
 }
 
-// ============ CACHE HELPERS ============
+// ============ MULTI-PASS SEARCH ============
 
-function getCacheKey(imdbId, type) {
-  return `preview:${type}:${imdbId}`;
+async function multiPassSearch(tmdbMeta) {
+  const searchType = tmdbMeta.mediaType === 'movie' ? 'movie' : 'tv';
+  
+  const titlesToTry = [tmdbMeta.title];
+  
+  if (tmdbMeta.originalTitle && tmdbMeta.originalTitle !== tmdbMeta.title) {
+    titlesToTry.push(tmdbMeta.originalTitle);
+  }
+  
+  const firstAlt = tmdbMeta.altTitles.find(t => !titlesToTry.includes(t));
+  if (firstAlt) titlesToTry.push(firstAlt);
+  
+  console.log(`Titles to try: ${titlesToTry.join(', ')}`);
+  
+  const searchWithCountry = async (title, country) => {
+    try {
+      const results = await searchITunes({ term: title, country, type: searchType });
+      return results.length > 0 ? { results, country } : null;
+    } catch {
+      return null;
+    }
+  };
+  
+  for (const title of titlesToTry) {
+    console.log(`\nSearching all countries in parallel for "${title}"`);
+    
+    const countrySearches = COUNTRY_VARIANTS.map(country => 
+      searchWithCountry(title, country)
+    );
+    
+    const allResults = await Promise.all(countrySearches);
+    
+    let bestOverall = null;
+    
+    for (const result of allResults) {
+      if (!result) continue;
+      
+      const match = findBestMatch(result.results, tmdbMeta);
+      if (match && (!bestOverall || match.score > bestOverall.score)) {
+        bestOverall = { ...match, country: result.country };
+      }
+    }
+    
+    if (bestOverall) {
+      console.log(`✓ Best match from ${bestOverall.country.toUpperCase()}, score: ${bestOverall.score.toFixed(2)}`);
+      return {
+        found: true,
+        previewUrl: bestOverall.item.previewUrl,
+        trackId: bestOverall.item.trackId || bestOverall.item.collectionId,
+        country: bestOverall.country
+      };
+    }
+  }
+  
+  console.log('No match found across all passes');
+  return { found: false };
 }
 
-function getCached(imdbId, type) {
-  const key = getCacheKey(imdbId, type);
-  const cached = cache.get(key);
-  if (cached && Date.now() - cached.timestamp < CACHE_DAYS * 24 * 60 * 60 * 1000) {
-    return cached.data;
+// ============ MAIN RESOLVER ============
+
+function getCached(imdbId) {
+  const cached = cache.get(imdbId);
+  if (cached) {
+    const daysSinceCheck = (Date.now() - cached.timestamp) / (1000 * 60 * 60 * 24);
+    if (daysSinceCheck < CACHE_DAYS) {
+      return cached;
+    }
   }
   return null;
 }
 
-function setCache(imdbId, type, data) {
-  const key = getCacheKey(imdbId, type);
-  cache.set(key, {
-    data,
+function setCache(imdbId, data) {
+  cache.set(imdbId, {
+    ...data,
     timestamp: Date.now()
   });
 }
 
-// ============ MAIN RESOLUTION ============
-
 async function resolvePreview(imdbId, type) {
-  console.log(`Resolving preview for ${imdbId} (${type})`);
+  console.log(`\n========== Resolving ${imdbId} (${type}) ==========`);
   
-  // Check cache first
-  const cached = getCached(imdbId, type);
+  const cached = getCached(imdbId);
+  
   if (cached) {
-    console.log(`Cache hit for ${imdbId}`);
-    return cached;
+    if (cached.youtube_key && !cached.preview_url) {
+      console.log(`Cache hit: YouTube key ${cached.youtube_key}, resolving fresh URL...`);
+      const freshUrl = await extractYouTubeDirectUrl(cached.youtube_key);
+      if (freshUrl) {
+        return {
+          found: true,
+          source: 'youtube',
+          previewUrl: freshUrl,
+          youtubeKey: cached.youtube_key,
+          country: 'yt'
+        };
+      }
+      console.log('Fresh YouTube extraction failed, continuing...');
+    }
+    if (cached.preview_url) {
+      console.log('Cache hit: returning cached iTunes preview');
+      return {
+        found: true,
+        source: 'itunes',
+        previewUrl: cached.preview_url,
+        trackId: cached.track_id,
+        country: cached.country
+      };
+    }
+    if (!cached.youtube_key) {
+      console.log('Cache hit: negative cache (no preview found previously)');
+      return { found: false };
+    }
+    console.log('Cache expired, refreshing...');
   }
   
-  // Get TMDB metadata
-  console.log(`Fetching TMDB metadata for ${imdbId}...`);
-  const metadata = await getTMDBMetadata(imdbId, type);
-  if (!metadata) {
-    console.log(`No TMDB metadata found for ${imdbId}`);
-    setCache(imdbId, type, { found: false });
+  const tmdbMeta = await getTMDBMetadata(imdbId, type);
+  if (!tmdbMeta) {
+    setCache(imdbId, { preview_url: null, youtube_key: null, country: 'us' });
     return { found: false };
   }
   
-  if (!metadata.youtubeTrailerKey) {
-    console.log(`No YouTube trailer key found for ${imdbId}`);
-    setCache(imdbId, type, { found: false });
-    return { found: false };
+  const itunesResult = await multiPassSearch(tmdbMeta);
+  
+  if (itunesResult.found) {
+    setCache(imdbId, {
+      track_id: itunesResult.trackId,
+      preview_url: itunesResult.previewUrl,
+      country: itunesResult.country || 'us',
+      youtube_key: null
+    });
+    
+    console.log(`✓ Found iTunes preview: ${itunesResult.previewUrl}`);
+    return { ...itunesResult, source: 'itunes' };
   }
   
-  // Extract YouTube URL
-  console.log(`Extracting YouTube URL for key: ${metadata.youtubeTrailerKey}`);
-  const youtubeUrl = await extractYouTubeDirectUrl(metadata.youtubeTrailerKey);
-  if (!youtubeUrl) {
-    console.log(`Failed to extract YouTube URL for ${imdbId}`);
-    setCache(imdbId, type, { found: false });
-    return { found: false };
+  if (tmdbMeta.youtubeTrailerKey) {
+    console.log(`\nTrying YouTube extractors for key: ${tmdbMeta.youtubeTrailerKey}`);
+    const youtubeDirectUrl = await extractYouTubeDirectUrl(tmdbMeta.youtubeTrailerKey);
+    
+    if (youtubeDirectUrl) {
+      setCache(imdbId, {
+        track_id: null,
+        preview_url: null,
+        country: 'yt',
+        youtube_key: tmdbMeta.youtubeTrailerKey
+      });
+      
+      console.log(`✓ Got YouTube direct URL (not caching URL, only key)`);
+      return {
+        found: true,
+        source: 'youtube',
+        previewUrl: youtubeDirectUrl,
+        youtubeKey: tmdbMeta.youtubeTrailerKey,
+        country: 'yt'
+      };
+    }
   }
   
-  console.log(`Successfully resolved preview for ${imdbId}`);
-  const result = {
-    found: true,
-    previewUrl: youtubeUrl,
-    source: 'youtube',
-    country: 'us'
-  };
+  setCache(imdbId, {
+    track_id: null,
+    preview_url: null,
+    country: 'us',
+    youtube_key: null
+  });
   
-  setCache(imdbId, type, result);
-  return result;
+  console.log('No preview found from iTunes or YouTube');
+  return { found: false };
 }
 
 // ============ ROUTES ============
@@ -469,11 +813,6 @@ app.get('/health', (req, res) => {
 });
 
 app.get('/manifest.json', (req, res) => {
-  // Get the base URL from the request, handling proxy headers
-  const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
-  const host = req.get('x-forwarded-host') || req.get('host') || 'localhost';
-  const baseUrl = `${protocol}://${host}`;
-  
   res.json({
     id: "com.trailer.preview",
     name: "Trailer Preview",
@@ -492,66 +831,70 @@ app.get('/manifest.json', (req, res) => {
 app.get('/stream/:type/:id.json', async (req, res) => {
   const { type, id } = req.params;
   
-  console.log(`Stream request: ${type}/${id}`);
+  console.log(`Stream request: type=${type}, id=${id}`);
   
   if (!id.startsWith('tt')) {
-    console.log(`Invalid ID format: ${id}`);
     return res.json({ streams: [] });
   }
   
-  // Set overall timeout for the request (10 seconds)
-  const timeout = setTimeout(() => {
-    console.log(`Request timeout for ${id}`);
-    if (!res.headersSent) {
-      res.json({ streams: [] });
-    }
-  }, 10000);
+  const result = await resolvePreview(id, type);
   
-  try {
-    const result = await resolvePreview(id, type);
-    clearTimeout(timeout);
+  if (result.found && result.previewUrl) {
+    const isYouTube = result.source === 'youtube';
+    const streamName = isYouTube 
+      ? 'Official Trailer' 
+      : (type === 'movie' ? 'Movie Preview' : 'Episode Preview');
+    const streamTitle = isYouTube 
+      ? 'Official Trailer' 
+      : `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`;
     
-    if (result.found && result.previewUrl) {
-      const streamName = 'Official Trailer';
-      const streamTitle = 'Official Trailer';
-      
-      console.log(`Returning stream for ${id}: ${result.previewUrl.substring(0, 50)}...`);
-      return res.json({
-        streams: [{
-          name: streamName,
-          title: streamTitle,
-          url: result.previewUrl
-        }]
-      });
-    }
-    
-    console.log(`No preview found for ${id}`);
-    res.json({ streams: [] });
-  } catch (error) {
-    clearTimeout(timeout);
-    console.error('Stream error:', error.message || error);
-    console.error('Stack:', error.stack);
-    if (!res.headersSent) {
-      res.json({ streams: [] });
-    }
+    return res.json({
+      streams: [{
+        name: streamName,
+        title: streamTitle,
+        url: result.previewUrl
+      }]
+    });
   }
+  
+  return res.json({ streams: [] });
 });
 
 app.get('/stats', (req, res) => {
-  // Simple stats from cache
-  const totalEntries = cache.size;
-  const hits = totalEntries; // All cached entries are hits
-  const misses = 0; // We don't track misses in this simple version
+  const entries = Array.from(cache.values());
+  const totalEntries = entries.length;
+  const hits = entries.filter(e => e.preview_url !== null || e.youtube_key !== null);
+  const misses = entries.filter(e => !e.preview_url && !e.youtube_key);
+  const hitRate = totalEntries > 0 ? ((hits.length / totalEntries) * 100).toFixed(1) : '0.0';
+  
+  const countryStats = {};
+  for (const hit of hits) {
+    const country = hit.country || 'us';
+    countryStats[country] = (countryStats[country] || 0) + 1;
+  }
+  
+  const recentMisses = misses.slice(0, 20).map(m => ({
+    imdbId: 'cached',
+    lastChecked: new Date(m.timestamp).toISOString()
+  }));
+  
+  const recentHits = hits.slice(0, 10).map(h => ({
+    imdbId: 'cached',
+    country: h.country,
+    lastChecked: new Date(h.timestamp).toISOString()
+  }));
   
   res.json({
     cache: {
       totalEntries,
-      hits,
-      misses,
-      hitRate: totalEntries > 0 ? '100%' : '0%'
+      hits: hits.length,
+      misses: misses.length,
+      hitRate: `${hitRate}%`
     },
-    recentHits: [],
-    recentMisses: []
+    byCountry: countryStats,
+    recentHits,
+    recentMisses,
+    generatedAt: new Date().toISOString()
   });
 });
 
@@ -561,4 +904,3 @@ app.listen(PORT, () => {
     console.warn('⚠️  TMDB_API_KEY not set. Please set it as an environment variable.');
   }
 });
-
