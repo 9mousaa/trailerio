@@ -776,7 +776,8 @@ async function resolvePreview(imdbId, type) {
   }
   
   if (tmdbMeta.youtubeTrailerKey) {
-    console.log(`\nTrying YouTube extractors for key: ${tmdbMeta.youtubeTrailerKey}`);
+    console.log(`\n========== Trying YouTube extractors (iTunes failed) ==========`);
+    console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
     const youtubeDirectUrl = await extractYouTubeDirectUrl(tmdbMeta.youtubeTrailerKey);
     
     if (youtubeDirectUrl) {
