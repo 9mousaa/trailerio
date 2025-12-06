@@ -404,16 +404,74 @@ const PIPED_INSTANCES = [
 ];
 
 // Cobalt instances (PRIMARY) - muxed audio+video with iOS-compatible codecs
-const COBALT_INSTANCES = [
-  'https://capi.3kh0.net',             // Has YouTube support enabled
+// Fallback list in case dynamic fetch fails
+const COBALT_FALLBACK_INSTANCES = [
+  'https://cobalt-api.kwiatekmiki.com',
+  'https://capi.3kh0.net',
   'https://cobalt.api.timelessnesses.me',
   'https://cobalt-backend.canine.tools',
-  'https://cobalt-api.kwiatekmiki.com',
   'https://cobalt-api.meowing.de',
   'https://nuko-c.meowing.de',
   'https://dl.khyernet.xyz',
   'https://cobalt.lostdusty.dev',
 ];
+
+// Cache for dynamic Cobalt instances
+let cachedCobaltInstances: string[] | null = null;
+let cobaltCacheTime = 0;
+const COBALT_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+// Fetch working Cobalt instances dynamically
+async function getWorkingCobaltInstances(): Promise<string[]> {
+  // Return cached if still valid
+  if (cachedCobaltInstances && Date.now() - cobaltCacheTime < COBALT_CACHE_TTL) {
+    return cachedCobaltInstances;
+  }
+  
+  try {
+    console.log('Fetching dynamic Cobalt instances...');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    
+    const response = await fetch('https://instances.cobalt.best/api/instances.json', {
+      signal: controller.signal,
+      headers: { 'Accept': 'application/json' }
+    });
+    clearTimeout(timeout);
+    
+    if (!response.ok) {
+      console.log(`Cobalt instances API returned ${response.status}, using fallback`);
+      return COBALT_FALLBACK_INSTANCES;
+    }
+    
+    const instances = await response.json();
+    
+    // Filter: online, supports YouTube, no auth required, good score
+    const working = instances
+      .filter((i: any) => 
+        i.online === true &&
+        i.services?.youtube === true &&
+        i.info?.auth !== true &&  // No JWT/auth required
+        (i.score || 0) >= 40
+      )
+      .sort((a: any, b: any) => (b.score || 0) - (a.score || 0))
+      .map((i: any) => `${i.protocol}://${i.api}`)
+      .slice(0, 15); // Top 15 instances
+    
+    if (working.length > 0) {
+      console.log(`✓ Got ${working.length} dynamic Cobalt instances`);
+      cachedCobaltInstances = working;
+      cobaltCacheTime = Date.now();
+      return working;
+    }
+    
+    console.log('No suitable instances from API, using fallback');
+    return COBALT_FALLBACK_INSTANCES;
+  } catch (e) {
+    console.log(`Failed to fetch Cobalt instances: ${e instanceof Error ? e.message : 'unknown'}, using fallback`);
+    return COBALT_FALLBACK_INSTANCES;
+  }
+}
 
 // ============ INVIDIOUS EXTRACTOR ============
 // Returns formatStreams with direct googlevideo.com URLs (if API enabled)
@@ -605,7 +663,9 @@ interface CobaltResult {
 }
 
 async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
-  console.log(`Trying Cobalt instances (primary) for ${youtubeKey}`);
+  // Fetch dynamic instances first
+  const cobaltInstances = await getWorkingCobaltInstances();
+  console.log(`Trying ${cobaltInstances.length} Cobalt instances for ${youtubeKey}`);
   const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
   
   // Muxing strategies for iOS/browser compatibility
@@ -685,6 +745,10 @@ async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
       
       if (!response.ok) {
         const errorBody = await response.text().catch(() => 'no body');
+        // Skip auth-required instances silently (common error)
+        if (errorBody.includes('auth.jwt.missing') || errorBody.includes('auth.jwt')) {
+          return null;
+        }
         console.log(`  Cobalt ${instance}: HTTP ${response.status} - ${errorBody.substring(0, 100)}`);
         return null;
       }
@@ -698,11 +762,9 @@ async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
         return { url: data.picker[0].url, instance, status: 'picker', codec: config.codec };
       }
       
-      console.log(`  Cobalt ${instance}: status=${data.status}, no valid URL`);
       return null;
     } catch (e) {
       clearTimeout(timeout);
-      console.log(`  Cobalt ${instance}: error - ${e instanceof Error ? e.message : 'unknown'}`);
       return null;
     }
   };
@@ -711,23 +773,23 @@ async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
   const allResults: CobaltResult[] = [];
   
   for (const config of requestConfigs) {
-    console.log(`  Trying codec: ${config.codec}, quality: ${config.videoQuality}, alwaysProxy: false`);
+    console.log(`  Trying codec: ${config.codec}, quality: ${config.videoQuality}`);
     
     const results = await Promise.all(
-      COBALT_INSTANCES.map(instance => tryInstance(instance, config))
+      cobaltInstances.map((instance: string) => tryInstance(instance, config))
     );
     
     // Add valid results to collection
-    results.forEach(r => {
+    results.forEach((r: CobaltResult | null) => {
       if (r !== null) {
         allResults.push(r);
       }
     });
     
     // If we got a REDIRECT (direct URL), use it immediately - best for browser playback
-    const redirectResult = results.find(r => r !== null && r.status === 'redirect');
+    const redirectResult = results.find((r: CobaltResult | null) => r !== null && r.status === 'redirect');
     if (redirectResult) {
-      console.log(`  ✓ Cobalt ${redirectResult.instance}: REDIRECT (direct URL, browser-playable), codec: ${redirectResult.codec}`);
+      console.log(`  ✓ Cobalt ${redirectResult.instance}: REDIRECT (direct URL), codec: ${redirectResult.codec}`);
       return redirectResult.url;
     }
   }
