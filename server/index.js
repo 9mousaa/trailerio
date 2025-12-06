@@ -349,21 +349,41 @@ function findBestMatch(results, tmdbMeta) {
   return null;
 }
 
+// Track last extraction time to add delays between requests
+let lastYtDlpExtraction = 0;
+const MIN_EXTRACTION_INTERVAL = 1000; // 1 second minimum between extractions
+
 async function extractViaYtDlp(youtubeKey) {
   const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
   console.log(`  [yt-dlp] Extracting highest quality for ${youtubeKey}...`);
   const startTime = Date.now();
   
+  // Add delay between requests to mimic human behavior (best practice)
+  const timeSinceLastExtraction = Date.now() - lastYtDlpExtraction;
+  if (timeSinceLastExtraction < MIN_EXTRACTION_INTERVAL) {
+    const delay = MIN_EXTRACTION_INTERVAL - timeSinceLastExtraction;
+    console.log(`  [yt-dlp] Adding ${delay}ms delay to avoid rate limiting...`);
+    await new Promise(resolve => setTimeout(resolve, delay));
+  }
+  lastYtDlpExtraction = Date.now();
+  
   try {
     // Format priority: 4K > 1440p > 1080p > 720p > best (MP4 preferred)
-    // Added user-agent and referer to reduce bot detection
     const formatString = 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160][ext=mp4]+bestaudio/bestvideo[height<=2160]+bestaudio/bestvideo[height<=1440]+bestaudio/bestvideo[height<=1080]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=2160][ext=mp4]/best[height<=1080][ext=mp4]/best[ext=mp4]/best';
     
+    // Best practices: Use realistic browser headers to reduce bot detection
     const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
     const referer = 'https://www.youtube.com/';
+    const acceptLanguage = 'en-US,en;q=0.9';
     
+    // Best practices from web search:
+    // - User-Agent: Mimic real browser
+    // - Referer: Set to YouTube
+    // - Accept-Language: Add language header
+    // - Sleep interval: Already handled above
+    // - No cookies needed for URL extraction (only for downloads)
     const { stdout } = await Promise.race([
-      execAsync(`yt-dlp -f "${formatString}" -g --no-warnings --no-playlist --no-check-certificate --user-agent "${userAgent}" --referer "${referer}" "${youtubeUrl}"`, {
+      execAsync(`yt-dlp -f "${formatString}" -g --no-warnings --no-playlist --no-check-certificate --user-agent "${userAgent}" --referer "${referer}" --add-header "Accept-Language:${acceptLanguage}" "${youtubeUrl}"`, {
         timeout: YT_DLP_TIMEOUT
       }),
       new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), YT_DLP_TIMEOUT))
