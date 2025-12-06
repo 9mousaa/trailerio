@@ -12,7 +12,7 @@ const CACHE_DAYS = 30;
 const MIN_SCORE_THRESHOLD = 0.6;
 const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
 const YT_DLP_TIMEOUT = 4000;
-const STREAM_TIMEOUT = 15000;
+const STREAM_TIMEOUT = 30000; // 30 seconds - increased for trying multiple Piped instances
 
 // Proxy configuration for yt-dlp
 // Manual proxies (comma-separated list for rotation)
@@ -688,16 +688,25 @@ async function extractViaPiped(youtubeKey) {
     }
   };
   
-  const results = await Promise.all(PIPED_INSTANCES.map(tryInstance));
+  // Use Promise.allSettled to not fail if some instances timeout
+  const results = await Promise.allSettled(PIPED_INSTANCES.map(tryInstance));
+  
+  // Extract successful results
+  const successfulResults = results
+    .map((r, idx) => r.status === 'fulfilled' && r.value ? r.value : null)
+    .filter(r => r !== null);
+  
+  if (successfulResults.length === 0) {
+    console.log(`  ✗ [Piped] All instances failed or timed out`);
+    return null;
+  }
   
   // Find best quality result (prefer DASH, then highest quality)
   let bestResult = null;
   let bestQuality = -1;
   const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
   
-  for (const result of results) {
-    if (!result) continue;
-    
+  for (const result of successfulResults) {
     // DASH is always best (adaptive quality)
     if (result.isDash) {
       console.log(`  ✓ [Piped] Selected DASH manifest (highest quality available)`);
@@ -708,7 +717,7 @@ async function extractViaPiped(youtubeKey) {
     if (result.quality) {
       const qualityLower = String(result.quality).toLowerCase();
       const qualityIdx = qualityPriority.findIndex(p => qualityLower.includes(p));
-      if (qualityIdx !== -1 && qualityIdx < bestQuality || bestQuality === -1) {
+      if (qualityIdx !== -1 && (qualityIdx < bestQuality || bestQuality === -1)) {
         bestQuality = qualityIdx;
         bestResult = result;
       }
@@ -719,7 +728,7 @@ async function extractViaPiped(youtubeKey) {
   }
   
   if (bestResult) {
-    console.log(`  ✓ [Piped] Got URL from Piped (quality: ${bestResult.quality || 'unknown'})`);
+    console.log(`  ✓ [Piped] Got URL from Piped (quality: ${bestResult.quality || 'unknown'}, from ${successfulResults.length}/${PIPED_INSTANCES.length} instances)`);
     return bestResult.url;
   }
   
