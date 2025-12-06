@@ -410,8 +410,16 @@ async function extractViaYtDlp(youtubeKey, retryCount = 0) {
     // Build yt-dlp command with all headers (Cobalt/Piped approach)
     const headerArgs = headers.map(h => `--add-header "${h}"`).join(' ');
     
+    // Use mweb client first (most reliable, may not need PO tokens)
+    // Fallback to other clients if mweb fails
+    const clients = ['mweb', 'tv_embedded', 'web_embedded'];
+    const client = clients[retryCount] || 'mweb';
+    
+    // Try with mweb client first (most compatible, less likely to need PO tokens)
+    const extractorArgs = `youtube:player-client=${client}`;
+    
     const { stdout } = await Promise.race([
-      execAsync(`yt-dlp -f "${formatString}" -g --no-warnings --no-playlist --no-check-certificate --user-agent "${userAgent}" --referer "${referer}" ${headerArgs} "${youtubeUrl}"`, {
+      execAsync(`yt-dlp -f "${formatString}" -g --no-warnings --no-playlist --no-check-certificate --user-agent "${userAgent}" --referer "${referer}" --extractor-args "${extractorArgs}" ${headerArgs} "${youtubeUrl}"`, {
         timeout: YT_DLP_TIMEOUT
       }),
       new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), YT_DLP_TIMEOUT))
@@ -431,10 +439,17 @@ async function extractViaYtDlp(youtubeKey, retryCount = 0) {
     const errorMsg = e.message || e.toString();
     console.log(`  ✗ [yt-dlp] Failed after ${elapsed}ms: ${errorMsg}`);
     
-    // Cobalt/Piped approach: Retry with exponential backoff on bot detection
-    if (retryCount < 2 && (errorMsg.includes('bot') || errorMsg.includes('Sign in') || errorMsg.includes('Timeout'))) {
+    // Cobalt/Piped approach: Retry with exponential backoff and different clients
+    // Try different YouTube clients (mweb, tv_embedded, web_embedded) to avoid PO token requirements
+    if (retryCount < 2 && (
+      errorMsg.includes('bot') || 
+      errorMsg.includes('Sign in') || 
+      errorMsg.includes('Timeout') ||
+      errorMsg.includes('Failed to extract') ||
+      errorMsg.includes('player response')
+    )) {
       const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 3000); // Max 3 seconds
-      console.log(`  [yt-dlp] Retrying after ${backoffDelay}ms backoff (attempt ${retryCount + 1}/2)...`);
+      console.log(`  [yt-dlp] Retrying with different client after ${backoffDelay}ms backoff (attempt ${retryCount + 1}/2)...`);
       await new Promise(resolve => setTimeout(resolve, backoffDelay));
       return extractViaYtDlp(youtubeKey, retryCount + 1);
     }
