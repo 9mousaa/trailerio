@@ -934,25 +934,10 @@ async function resolvePreview(imdbId, type) {
     return { found: false };
   }
   
-  // Try 1: iTunes multi-pass search
-  console.log('\n========== Trying iTunes multi-pass search ==========');
-  const itunesResult = await multiPassSearch(tmdbMeta);
-  console.log(`iTunes search result: ${itunesResult.found ? 'FOUND' : 'NOT FOUND'}`);
-  
-  if (itunesResult.found) {
-    setCache(imdbId, {
-      track_id: itunesResult.trackId,
-      preview_url: itunesResult.previewUrl,
-      country: itunesResult.country || 'us',
-      youtube_key: null
-    });
-    
-    console.log(`✓ Found iTunes preview: ${itunesResult.previewUrl}`);
-    return { ...itunesResult, source: 'itunes' };
-  }
-  
+  // Try YouTube FIRST (faster, higher quality) if we have a trailer key
+  // Then fall back to iTunes if YouTube fails
   if (tmdbMeta.youtubeTrailerKey) {
-    console.log(`\n========== Trying YouTube extractors (iTunes failed) ==========`);
+    console.log(`\n========== Trying YouTube extractors FIRST (fastest, highest quality) ==========`);
     console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
     const youtubeDirectUrl = await extractYouTubeDirectUrl(tmdbMeta.youtubeTrailerKey);
     
@@ -973,6 +958,24 @@ async function resolvePreview(imdbId, type) {
         country: 'yt'
       };
     }
+    console.log('YouTube extraction failed, trying iTunes...');
+  }
+  
+  // Try iTunes as fallback (slower but sometimes has previews YouTube doesn't)
+  console.log('\n========== Trying iTunes multi-pass search (fallback) ==========');
+  const itunesResult = await multiPassSearch(tmdbMeta);
+  console.log(`iTunes search result: ${itunesResult.found ? 'FOUND' : 'NOT FOUND'}`);
+  
+  if (itunesResult.found) {
+    setCache(imdbId, {
+      track_id: itunesResult.trackId,
+      preview_url: itunesResult.previewUrl,
+      country: itunesResult.country || 'us',
+      youtube_key: null
+    });
+    
+    console.log(`✓ Found iTunes preview: ${itunesResult.previewUrl}`);
+    return { ...itunesResult, source: 'itunes' };
   }
   
   setCache(imdbId, {
