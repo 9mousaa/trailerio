@@ -70,22 +70,52 @@ function levenshteinDistance(s1, s2) {
 
 async function getTMDBMetadata(imdbId, type) {
   try {
+    if (!TMDB_API_KEY) {
+      console.error('TMDB_API_KEY is not set!');
+      return null;
+    }
+    
     const findUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
     const findResponse = await fetch(findUrl);
+    
+    if (!findResponse.ok) {
+      console.error(`TMDB find API error: ${findResponse.status} ${findResponse.statusText}`);
+      return null;
+    }
+    
     const findData = await findResponse.json();
     
     const tmdbId = findData[type === 'movie' ? 'movie_results' : 'tv_results']?.[0]?.id;
-    if (!tmdbId) return null;
+    if (!tmdbId) {
+      console.log(`No TMDB ID found for ${imdbId} (${type})`);
+      return null;
+    }
     
     const detailsUrl = `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${TMDB_API_KEY}&append_to_response=alternative_titles`;
     const detailsResponse = await fetch(detailsUrl);
+    
+    if (!detailsResponse.ok) {
+      console.error(`TMDB details API error: ${detailsResponse.status} ${detailsResponse.statusText}`);
+      return null;
+    }
+    
     const details = await detailsResponse.json();
     
     const videosUrl = `https://api.themoviedb.org/3/${type}/${tmdbId}/videos?api_key=${TMDB_API_KEY}`;
     const videosResponse = await fetch(videosUrl);
+    
+    if (!videosResponse.ok) {
+      console.error(`TMDB videos API error: ${videosResponse.status} ${videosResponse.statusText}`);
+      return null;
+    }
+    
     const videos = await videosResponse.json();
     
     const trailer = videos.results?.find(v => v.type === 'Trailer' && v.site === 'YouTube');
+    
+    if (!trailer) {
+      console.log(`No YouTube trailer found for ${imdbId} (${type})`);
+    }
     
     return {
       tmdbId,
@@ -98,7 +128,7 @@ async function getTMDBMetadata(imdbId, type) {
       youtubeTrailerKey: trailer?.key || null
     };
   } catch (error) {
-    console.error('TMDB error:', error);
+    console.error('TMDB error:', error.message || error);
     return null;
   }
 }
@@ -223,26 +253,40 @@ function setCache(imdbId, type, data) {
 // ============ MAIN RESOLUTION ============
 
 async function resolvePreview(imdbId, type) {
+  console.log(`Resolving preview for ${imdbId} (${type})`);
+  
   // Check cache first
   const cached = getCached(imdbId, type);
   if (cached) {
+    console.log(`Cache hit for ${imdbId}`);
     return cached;
   }
   
   // Get TMDB metadata
+  console.log(`Fetching TMDB metadata for ${imdbId}...`);
   const metadata = await getTMDBMetadata(imdbId, type);
-  if (!metadata || !metadata.youtubeTrailerKey) {
+  if (!metadata) {
+    console.log(`No TMDB metadata found for ${imdbId}`);
+    setCache(imdbId, type, { found: false });
+    return { found: false };
+  }
+  
+  if (!metadata.youtubeTrailerKey) {
+    console.log(`No YouTube trailer key found for ${imdbId}`);
     setCache(imdbId, type, { found: false });
     return { found: false };
   }
   
   // Extract YouTube URL
+  console.log(`Extracting YouTube URL for key: ${metadata.youtubeTrailerKey}`);
   const youtubeUrl = await extractYouTubeDirectUrl(metadata.youtubeTrailerKey);
   if (!youtubeUrl) {
+    console.log(`Failed to extract YouTube URL for ${imdbId}`);
     setCache(imdbId, type, { found: false });
     return { found: false };
   }
   
+  console.log(`Successfully resolved preview for ${imdbId}`);
   const result = {
     found: true,
     previewUrl: youtubeUrl,
@@ -284,7 +328,10 @@ app.get('/manifest.json', (req, res) => {
 app.get('/stream/:type/:id.json', async (req, res) => {
   const { type, id } = req.params;
   
+  console.log(`Stream request: ${type}/${id}`);
+  
   if (!id.startsWith('tt')) {
+    console.log(`Invalid ID format: ${id}`);
     return res.json({ streams: [] });
   }
   
@@ -295,6 +342,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       const streamName = 'Official Trailer';
       const streamTitle = 'Official Trailer';
       
+      console.log(`Returning stream for ${id}: ${result.previewUrl.substring(0, 50)}...`);
       return res.json({
         streams: [{
           name: streamName,
@@ -304,9 +352,11 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       });
     }
     
+    console.log(`No preview found for ${id}`);
     res.json({ streams: [] });
   } catch (error) {
-    console.error('Stream error:', error);
+    console.error('Stream error:', error.message || error);
+    console.error('Stack:', error.stack);
     res.json({ streams: [] });
   }
 });
