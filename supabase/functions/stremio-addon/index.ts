@@ -370,7 +370,7 @@ function findBestMatch(results: any[], tmdbMeta: TMDBMetadata): ScoreResult | nu
 }
 
 // ============ YOUTUBE EXTRACTORS ============
-// Priority: 1. Cobalt (muxed audio+video, iOS compatible), 2. Invidious (direct URLs), 3. Piped (proxied URLs)
+// Priority: 1. Piped (proxied stable URLs), 2. Invidious (via our proxy), 3. Cobalt (redirect only, skip tunnel)
 
 // Invidious instances - try even if api:false (may still work)
 const INVIDIOUS_INSTANCES = [
@@ -393,7 +393,8 @@ const INVIDIOUS_INSTANCES = [
 ];
 
 // Piped instances - return proxied stream URLs via /streams/:videoId
-const PIPED_INSTANCES = [
+// Fallback list - will be replaced by dynamic fetch
+const PIPED_FALLBACK_INSTANCES = [
   'https://pipedapi.kavin.rocks',
   'https://pipedapi.r4fo.com',
   'https://pipedapi.syncpundit.io',
@@ -402,6 +403,60 @@ const PIPED_INSTANCES = [
   'https://pipedapi.adminforge.de',
   'https://api.piped.projectsegfau.lt',
 ];
+
+// Cache for dynamic Piped instances
+let cachedPipedInstances: string[] | null = null;
+let pipedCacheTime = 0;
+const PIPED_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+// Fetch working Piped instances dynamically
+async function getWorkingPipedInstances(): Promise<string[]> {
+  // Return cached if still valid
+  if (cachedPipedInstances && Date.now() - pipedCacheTime < PIPED_CACHE_TTL) {
+    return cachedPipedInstances;
+  }
+  
+  try {
+    console.log('Fetching dynamic Piped instances...');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    
+    const response = await fetch('https://piped-instances.kavin.rocks/', {
+      signal: controller.signal,
+      headers: { 'Accept': 'application/json' }
+    });
+    clearTimeout(timeout);
+    
+    if (!response.ok) {
+      console.log(`Piped instances API returned ${response.status}, using fallback`);
+      return PIPED_FALLBACK_INSTANCES;
+    }
+    
+    const instances = await response.json();
+    
+    // Filter: has api_url and good uptime
+    const working = instances
+      .filter((i: any) => 
+        i.api_url && 
+        (i.uptime_24h === undefined || i.uptime_24h >= 80)
+      )
+      .map((i: any) => i.api_url)
+      .slice(0, 10); // Top 10 instances
+    
+    if (working.length > 0) {
+      console.log(`✓ Got ${working.length} dynamic Piped instances`);
+      cachedPipedInstances = working;
+      pipedCacheTime = Date.now();
+      return working;
+    }
+    
+    console.log('No suitable Piped instances from API, using fallback');
+    return PIPED_FALLBACK_INSTANCES;
+  } catch (e) {
+    console.log(`Failed to fetch Piped instances: ${e instanceof Error ? e.message : 'unknown'}, using fallback`);
+    return PIPED_FALLBACK_INSTANCES;
+  }
+}
 
 // Cobalt instances (PRIMARY) - muxed audio+video with iOS-compatible codecs
 // Fallback list in case dynamic fetch fails
@@ -474,10 +529,12 @@ async function getWorkingCobaltInstances(): Promise<string[]> {
 }
 
 // ============ INVIDIOUS EXTRACTOR ============
-// Returns formatStreams with direct googlevideo.com URLs (if API enabled)
+// Returns formatStreams with direct googlevideo.com URLs, wrapped in our proxy to bypass IP-binding
 
 async function extractViaInvidious(youtubeKey: string): Promise<string | null> {
   console.log(`Trying Invidious instances for ${youtubeKey}`);
+  
+  const baseUrl = Deno.env.get('SUPABASE_URL') ?? '';
   
   const tryInstance = async (instance: string): Promise<string | null> => {
     const controller = new AbortController();
@@ -531,7 +588,9 @@ async function extractViaInvidious(youtubeKey: string): Promise<string | null> {
         if (stream?.url) {
           const hdrLabel = isHDR(stream) ? ' HDR' : '';
           console.log(`  ✓ Invidious ${instance}: got ${stream.qualityLabel || 'unknown'}${hdrLabel} ${stream.container || 'video'}`);
-          return stream.url;
+          // Wrap in our proxy to bypass IP-binding issues
+          const proxyUrl = `${baseUrl}/functions/v1/stremio-addon/proxy-video?url=${encodeURIComponent(stream.url)}`;
+          return proxyUrl;
         }
       }
       
@@ -554,7 +613,9 @@ async function extractViaInvidious(youtubeKey: string): Promise<string | null> {
         if (adaptive?.url) {
           const hdrLabel = isHDR(adaptive) ? ' HDR' : '';
           console.log(`  ✓ Invidious ${instance}: got adaptive ${adaptive.qualityLabel || 'unknown'}${hdrLabel}`);
-          return adaptive.url;
+          // Wrap in our proxy to bypass IP-binding issues
+          const proxyUrl = `${baseUrl}/functions/v1/stremio-addon/proxy-video?url=${encodeURIComponent(adaptive.url)}`;
+          return proxyUrl;
         }
       }
       
@@ -572,7 +633,7 @@ async function extractViaInvidious(youtubeKey: string): Promise<string | null> {
   const validUrl = results.find(r => r !== null);
   
   if (validUrl) {
-    console.log(`✓ Got URL from Invidious`);
+    console.log(`✓ Got URL from Invidious (proxied)`);
     return validUrl;
   }
   
@@ -581,10 +642,12 @@ async function extractViaInvidious(youtubeKey: string): Promise<string | null> {
 }
 
 // ============ PIPED EXTRACTOR ============
-// Returns proxied video URLs via Piped's proxy servers (most stable)
+// Returns proxied video URLs via Piped's proxy servers (most stable for playback)
 
 async function extractViaPiped(youtubeKey: string): Promise<string | null> {
-  console.log(`Trying Piped instances for ${youtubeKey}`);
+  // Fetch dynamic instances first
+  const pipedInstances = await getWorkingPipedInstances();
+  console.log(`Trying ${pipedInstances.length} Piped instances for ${youtubeKey}`);
   
   const tryInstance = async (instance: string): Promise<string | null> => {
     const controller = new AbortController();
@@ -614,13 +677,13 @@ async function extractViaPiped(youtubeKey: string): Promise<string | null> {
           getQualityRank(a.quality) - getQualityRank(b.quality)
         );
         
-        // Find best combined video+audio stream
+        // Find best combined video+audio stream (preferred for playback)
         const combined = sorted.find((s: any) => 
           !s.videoOnly && s.mimeType?.startsWith('video/')
         );
         
         if (combined?.url) {
-          console.log(`  ✓ Piped ${instance}: got ${combined.quality || 'unknown'}`);
+          console.log(`  ✓ Piped ${instance}: got ${combined.quality || 'unknown'} (combined)`);
           return combined.url;
         }
         
@@ -641,11 +704,11 @@ async function extractViaPiped(youtubeKey: string): Promise<string | null> {
   };
   
   // Try all instances in parallel, return first success
-  const results = await Promise.all(PIPED_INSTANCES.map(tryInstance));
+  const results = await Promise.all(pipedInstances.map(tryInstance));
   const validUrl = results.find(r => r !== null);
   
   if (validUrl) {
-    console.log(`✓ Got URL from Piped`);
+    console.log(`✓ Got URL from Piped (stable proxied URL)`);
     return validUrl;
   }
   
@@ -794,49 +857,44 @@ async function extractViaCobalt(youtubeKey: string): Promise<string | null> {
     }
   }
   
-  // If no redirect URLs found, fall back to tunnel (proxied) URLs
-  const tunnelResult = allResults.find(r => r.status === 'tunnel');
-  if (tunnelResult) {
-    console.log(`  ⚠ Cobalt ${tunnelResult.instance}: TUNNEL (proxied, may have CORS issues), codec: ${tunnelResult.codec}`);
-    return tunnelResult.url;
+  // SKIP tunnel URLs entirely - they expire too quickly (~30 seconds) causing zero KB errors
+  // Only accept redirect (direct) URLs from Cobalt
+  const tunnelCount = allResults.filter(r => r.status === 'tunnel').length;
+  const pickerCount = allResults.filter(r => r.status === 'picker').length;
+  
+  if (tunnelCount > 0 || pickerCount > 0) {
+    console.log(`  ⚠ Skipping ${tunnelCount} tunnel + ${pickerCount} picker URLs (expire too quickly)`);
   }
   
-  // Try picker results as last resort
-  const pickerResult = allResults.find(r => r.status === 'picker');
-  if (pickerResult) {
-    console.log(`  ⚠ Cobalt ${pickerResult.instance}: PICKER, codec: ${pickerResult.codec}`);
-    return pickerResult.url;
-  }
-  
-  console.log(`  No Cobalt instance returned a valid URL`);
+  console.log(`  No Cobalt instance returned a direct URL`);
   return null;
 }
 
 // ============ MAIN YOUTUBE EXTRACTOR ============
-// Priority: 1. Cobalt (best for muxed streams + iOS), 2. Invidious (direct URLs), 3. Piped (proxied URLs)
+// Priority: 1. Piped (stable proxied URLs), 2. Invidious (via our proxy), 3. Cobalt (redirect only)
 
 async function extractYouTubeDirectUrl(youtubeKey: string): Promise<string | null> {
   console.log(`\nExtracting YouTube URL for key: ${youtubeKey}`);
   
-  // 1. Try Cobalt FIRST (best for muxed audio+video, iOS compatible)
-  const cobaltUrl = await extractViaCobalt(youtubeKey);
-  if (cobaltUrl) {
-    console.log('✓ Got YouTube direct URL from Cobalt (muxed audio+video)');
-    return cobaltUrl;
+  // 1. Try Piped FIRST (most stable - returns proxied URLs that don't expire)
+  const pipedUrl = await extractViaPiped(youtubeKey);
+  if (pipedUrl) {
+    console.log('✓ Got YouTube URL from Piped (stable proxied)');
+    return pipedUrl;
   }
   
-  // 2. Try Invidious (direct googlevideo URLs)
+  // 2. Try Invidious (googlevideo URLs wrapped in our proxy to bypass IP-binding)
   const invidiousUrl = await extractViaInvidious(youtubeKey);
   if (invidiousUrl) {
-    console.log('✓ Got YouTube direct URL from Invidious');
+    console.log('✓ Got YouTube URL from Invidious (proxied)');
     return invidiousUrl;
   }
   
-  // 3. Try Piped (proxied URLs)
-  const pipedUrl = await extractViaPiped(youtubeKey);
-  if (pipedUrl) {
-    console.log('✓ Got YouTube direct URL from Piped');
-    return pipedUrl;
+  // 3. Try Cobalt as last resort (only accept redirect/direct URLs, skip tunnel)
+  const cobaltUrl = await extractViaCobalt(youtubeKey);
+  if (cobaltUrl) {
+    console.log('✓ Got YouTube direct URL from Cobalt');
+    return cobaltUrl;
   }
   
   console.log('No YouTube URL found from any extractor');
