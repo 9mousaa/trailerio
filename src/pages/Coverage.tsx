@@ -68,22 +68,22 @@ const Coverage = () => {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-background text-foreground flex items-center justify-center">
-        <div className="text-muted-foreground">Loading stats...</div>
+      <div className="min-h-screen bg-black text-white flex items-center justify-center">
+        <div className="text-gray-400">Loading stats...</div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="min-h-screen bg-background text-foreground flex items-center justify-center">
-        <div className="text-destructive">Error: {error}</div>
+      <div className="min-h-screen bg-black text-white flex items-center justify-center">
+        <div className="text-red-500">Error: {error}</div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="min-h-screen bg-black text-white">
       <div className="max-w-2xl mx-auto px-6 py-20">
         {/* Header */}
         <header className="mb-16">
@@ -177,10 +177,6 @@ const Coverage = () => {
           </section>
         )}
 
-        {/* Footer */}
-        <footer className="text-sm text-muted-foreground border-t border-border pt-8">
-          Data refreshes on page load
-        </footer>
       </div>
     </div>
   );

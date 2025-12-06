@@ -788,62 +788,82 @@ async function resolvePreview(imdbId, type) {
     return { found: false };
   }
   
+  // PRIORITY 1: Try iTunes first (most reliable, works directly in AVPlayer)
+  console.log('\n========== Trying iTunes first (most reliable) ==========');
+  const itunesResult = await multiPassSearch(tmdbMeta);
+  console.log(`iTunes search result: ${itunesResult.found ? 'FOUND' : 'NOT FOUND'}`);
+  
+  if (itunesResult.found) {
+    setCache(imdbId, {
+      track_id: itunesResult.trackId,
+      preview_url: itunesResult.previewUrl,
+      country: itunesResult.country || 'us',
+      youtube_key: tmdbMeta.youtubeTrailerKey || null
+    });
+    console.log(`✓ Found iTunes preview: ${itunesResult.previewUrl}`);
+    return { ...itunesResult, source: 'itunes' };
+  }
+  
+  // PRIORITY 2: Try public instances (Piped/Invidious) if YouTube trailer exists
   if (tmdbMeta.youtubeTrailerKey) {
-    console.log(`\n========== Extracting YouTube trailer (fastest, highest quality) ==========`);
+    console.log('\n========== iTunes not found, trying public instances (Piped/Invidious) ==========');
     console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
-    const youtubeDirectUrl = await extractYouTubeDirectUrl(tmdbMeta.youtubeTrailerKey);
     
-    if (youtubeDirectUrl) {
+    // Try Piped first, then Invidious
+    const pipedUrl = await extractViaPiped(tmdbMeta.youtubeTrailerKey);
+    if (pipedUrl) {
       setCache(imdbId, {
         track_id: null,
         preview_url: null,
         country: 'yt',
         youtube_key: tmdbMeta.youtubeTrailerKey
       });
-      
-      console.log(`✓ Got YouTube direct URL (not caching URL, only key)`);
+      console.log(`✓ Got URL from Piped`);
       return {
         found: true,
         source: 'youtube',
-        previewUrl: youtubeDirectUrl,
+        previewUrl: pipedUrl,
         youtubeKey: tmdbMeta.youtubeTrailerKey,
         country: 'yt'
       };
     }
     
-    // If YouTube extraction failed (bot detection), fallback to iTunes
-    console.log('\n========== YouTube extraction failed, trying iTunes fallback ==========');
-    const itunesResult = await multiPassSearch(tmdbMeta);
-    console.log(`iTunes search result: ${itunesResult.found ? 'FOUND' : 'NOT FOUND'}`);
-    
-    if (itunesResult.found) {
+    const invidiousUrl = await extractViaInvidious(tmdbMeta.youtubeTrailerKey);
+    if (invidiousUrl) {
       setCache(imdbId, {
-        track_id: itunesResult.trackId,
-        preview_url: itunesResult.previewUrl,
-        country: itunesResult.country || 'us',
-        youtube_key: tmdbMeta.youtubeTrailerKey // Keep the key for future retries
+        track_id: null,
+        preview_url: null,
+        country: 'yt',
+        youtube_key: tmdbMeta.youtubeTrailerKey
       });
-      
-      console.log(`✓ Found iTunes preview: ${itunesResult.previewUrl}`);
-      return { ...itunesResult, source: 'itunes' };
+      console.log(`✓ Got URL from Invidious`);
+      return {
+        found: true,
+        source: 'youtube',
+        previewUrl: invidiousUrl,
+        youtubeKey: tmdbMeta.youtubeTrailerKey,
+        country: 'yt'
+      };
     }
-  }
-  
-  if (!tmdbMeta.youtubeTrailerKey) {
-    console.log('\n========== Trying iTunes (no YouTube trailer available) ==========');
-    const itunesResult = await multiPassSearch(tmdbMeta);
-    console.log(`iTunes search result: ${itunesResult.found ? 'FOUND' : 'NOT FOUND'}`);
     
-    if (itunesResult.found) {
+    // PRIORITY 3: Try yt-dlp as last resort (may be blocked)
+    console.log('\n========== Public instances failed, trying yt-dlp (last resort) ==========');
+    const ytdlpUrl = await extractViaYtDlp(tmdbMeta.youtubeTrailerKey);
+    if (ytdlpUrl) {
       setCache(imdbId, {
-        track_id: itunesResult.trackId,
-        preview_url: itunesResult.previewUrl,
-        country: itunesResult.country || 'us',
-        youtube_key: null
+        track_id: null,
+        preview_url: null,
+        country: 'yt',
+        youtube_key: tmdbMeta.youtubeTrailerKey
       });
-      
-      console.log(`✓ Found iTunes preview: ${itunesResult.previewUrl}`);
-      return { ...itunesResult, source: 'itunes' };
+      console.log(`✓ Got URL from yt-dlp`);
+      return {
+        found: true,
+        source: 'youtube',
+        previewUrl: ytdlpUrl,
+        youtubeKey: tmdbMeta.youtubeTrailerKey,
+        country: 'yt'
+      };
     }
   }
   
@@ -962,7 +982,13 @@ app.get('/proxy-video', async (req, res) => {
     const contentRange = videoResponse.headers.get('Content-Range');
     const acceptRanges = videoResponse.headers.get('Accept-Ranges') || 'bytes';
     
+    // Determine response status - AVPlayer requires 206 for Range requests
+    const isRangeRequest = !!rangeHeader;
+    const isPartialContent = videoResponse.status === 206;
+    const responseStatus = (isRangeRequest || isPartialContent) ? 206 : 200;
+    
     // Set headers BEFORE piping (critical for AVPlayer - headers must be set before body)
+    // AVPlayer is very strict about header order and presence
     res.set({
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
@@ -972,8 +998,15 @@ app.get('/proxy-video', async (req, res) => {
       'Cache-Control': 'public, max-age=3600',
     });
     
+    // Content-Length is required for AVPlayer
     if (contentLength) {
       res.set('Content-Length', contentLength);
+    } else if (isRangeRequest && contentRange) {
+      // If we have Content-Range, extract length from it (format: "bytes 0-1023/2048")
+      const rangeMatch = contentRange.match(/\/(\d+)/);
+      if (rangeMatch) {
+        res.set('Content-Length', rangeMatch[1]);
+      }
     }
     
     // Forward Content-Range for partial content responses (required for AVPlayer seeking)
@@ -981,13 +1014,13 @@ app.get('/proxy-video', async (req, res) => {
       res.set('Content-Range', contentRange);
     }
     
-    // Use 206 status if we got partial content, otherwise 200
-    const responseStatus = videoResponse.status === 206 ? 206 : 200;
+    // Set status BEFORE piping
     res.status(responseStatus);
     
     console.log(`✓ Proxying video, status: ${responseStatus}, type: ${upstreamContentType}, size: ${contentLength || 'chunked'}, range: ${contentRange || 'none'}`);
     
     // Stream the video - pipe directly without buffering (critical for AVPlayer)
+    // Don't use res.pipe() - pipe the response body directly
     videoResponse.body.pipe(res);
   } catch (e) {
     console.error('Proxy error:', e);

@@ -1,5 +1,4 @@
 import { useState, useEffect } from "react";
-import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
@@ -76,7 +75,7 @@ const Index = () => {
   };
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="min-h-screen bg-black text-white">
       <div className="max-w-2xl mx-auto px-6 py-20">
         {/* Header */}
         <header className="mb-16">
@@ -200,13 +199,6 @@ const Index = () => {
           </ol>
         </section>
 
-        {/* Footer */}
-        <footer className="text-sm text-muted-foreground border-t border-border pt-8 flex justify-between items-center">
-          <span>Powered by TMDB</span>
-          <Link to="/coverage" className="hover:text-foreground transition-colors">
-            Coverage Stats
-          </Link>
-        </footer>
       </div>
     </div>
   );
