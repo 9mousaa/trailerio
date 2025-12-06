@@ -667,20 +667,12 @@ async function extractViaPiped(youtubeKey) {
             return rankA - rankB;
           });
         
-        // PRIORITY: Prefer ANY combined stream (even lower quality) over video-only + muxing
-        // Combined streams work directly in AVPlayer, muxed streams are unreliable
-        const allCombinedStreams = sorted.filter(s => !s.videoOnly);
-        if (allCombinedStreams.length > 0) {
-          // Get highest quality combined stream
-          const best = allCombinedStreams[0];
-          console.log(`  ✓ [Piped] ${instance}: selected ${best.quality || 'unknown'} (combined, AVPlayer compatible)`);
-          return { url: best.url, quality: best.quality, isDash: false };
-        }
-        
-        // Only use muxing as last resort if NO combined streams available
+        // PRIORITY 1: Highest quality (even if video-only + needs muxing)
+        // Quality is more important than avoiding muxing
         if (sorted.length > 0) {
-          const bestVideo = sorted[0];
-          // Check if there's a matching audio stream we can mux
+          const bestVideo = sorted[0]; // Highest quality video
+          
+          // Check if there's a matching audio stream for the highest quality video
           if (data.audioStreams?.length > 0) {
             // Find best quality audio stream
             const bestAudio = data.audioStreams
@@ -693,18 +685,34 @@ async function extractViaPiped(youtubeKey) {
               })[0];
             
             if (bestAudio) {
-              console.log(`  ⚠️ [Piped] ${instance}: selected ${bestVideo.quality || 'unknown'} (video-only) + audio (will mux, last resort)`);
-              return { 
-                url: bestVideo.url, 
-                audioUrl: bestAudio.url,
-                quality: bestVideo.quality, 
-                isDash: false,
-                needsMuxing: true
-              };
+              // Check if there's a combined stream of the same quality
+              const combinedOfSameQuality = sorted.find(s => !s.videoOnly && s.quality === bestVideo.quality);
+              if (combinedOfSameQuality) {
+                // Prefer combined if same quality (no muxing needed)
+                console.log(`  ✓ [Piped] ${instance}: selected ${combinedOfSameQuality.quality || 'unknown'} (combined, highest quality)`);
+                return { url: combinedOfSameQuality.url, quality: combinedOfSameQuality.quality, isDash: false };
+              } else {
+                // Use highest quality video-only + audio (will mux)
+                console.log(`  ✓ [Piped] ${instance}: selected ${bestVideo.quality || 'unknown'} (video-only) + audio (will mux, highest quality)`);
+                return { 
+                  url: bestVideo.url, 
+                  audioUrl: bestAudio.url,
+                  quality: bestVideo.quality, 
+                  isDash: false,
+                  needsMuxing: true
+                };
+              }
             }
           }
           
-          // No audio stream available, return video-only as last resort
+          // Check if highest quality has a combined stream
+          const bestCombined = sorted.find(s => !s.videoOnly && s.quality === bestVideo.quality);
+          if (bestCombined) {
+            console.log(`  ✓ [Piped] ${instance}: selected ${bestCombined.quality || 'unknown'} (combined, highest quality)`);
+            return { url: bestCombined.url, quality: bestCombined.quality, isDash: false };
+          }
+          
+          // No audio available, return highest quality video-only as last resort
           console.log(`  ⚠️ [Piped] ${instance}: selected ${bestVideo.quality || 'unknown'} (video-only, no audio available)`);
           return { url: bestVideo.url, quality: bestVideo.quality, isDash: false };
         }
@@ -730,32 +738,33 @@ async function extractViaPiped(youtubeKey) {
     return null;
   }
   
-  // Find best quality result (prefer DASH, then combined, then muxed, then video-only)
+  // Find best quality result (prefer DASH, then highest quality regardless of muxing)
   let bestResult = null;
-  let bestQuality = -1;
   const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
   
-  // Sort results: DASH > combined > muxed > video-only
+  // Sort results: DASH first, then by quality (highest first)
   const sortedResults = successfulResults.sort((a, b) => {
     // DASH is always best
     if (a.isDash && !b.isDash) return -1;
     if (!a.isDash && b.isDash) return 1;
-    // Combined streams (no muxing needed) are better than muxed
-    if (!a.needsMuxing && b.needsMuxing) return -1;
-    if (a.needsMuxing && !b.needsMuxing) return 1;
-    // Then by quality
+    // Then by quality (highest first) - quality matters more than muxing
     const rankA = qualityPriority.findIndex(p => (a.quality || '').toLowerCase().includes(p));
     const rankB = qualityPriority.findIndex(p => (b.quality || '').toLowerCase().includes(p));
-    return (rankA === -1 ? 999 : rankA) - (rankB === -1 ? 999 : rankB);
+    const qualityDiff = (rankA === -1 ? 999 : rankA) - (rankB === -1 ? 999 : rankB);
+    if (qualityDiff !== 0) return qualityDiff;
+    // If same quality, prefer combined over muxed (but quality is priority)
+    if (!a.needsMuxing && b.needsMuxing) return -1;
+    if (a.needsMuxing && !b.needsMuxing) return 1;
+    return 0;
   });
   
   // DASH is always best - return immediately
   if (sortedResults.length > 0 && sortedResults[0].isDash) {
     console.log(`  ✓ [Piped] Selected DASH manifest (highest quality available)`);
-    return { url: sortedResults[0].url, isDash: true };
+    return { url: sortedResults[0].url, isDash: true, quality: 'DASH' };
   }
   
-  // Return best result (already sorted)
+  // Return best result (highest quality, even if needs muxing)
   if (sortedResults.length > 0) {
     bestResult = sortedResults[0];
     const muxInfo = bestResult.needsMuxing ? ' (will mux video+audio)' : '';
