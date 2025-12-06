@@ -1,4 +1,3 @@
-version: '3.8'
 
 services:
   backend:
@@ -14,7 +13,7 @@ services:
       - .env
     networks:
       - trailerio-internal
-      - traefik_network
+      - plaio_default
 
   web:
     build:
@@ -26,28 +25,26 @@ services:
     depends_on:
       - backend
     labels:
-      # Traefik configuration (update Host rule to match your domain)
+      # Traefik configuration
       - "traefik.enable=true"
-      - "traefik.http.routers.trailerio.rule=Host(`trailerio.your-domain.com`)"
+      - "traefik.http.routers.trailerio.rule=Host(`trailerio.plaio.cc`)"
       - "traefik.http.routers.trailerio.entrypoints=websecure"
-      # TLS certificate resolver - update name if your Traefik uses different resolver
-      # Common names: letsencrypt, acme, le
-      # Remove the line below if Traefik doesn't have a cert resolver configured
       - "traefik.http.routers.trailerio.tls.certresolver=le"
+      - "traefik.http.routers.trailerio.tls=true"
       - "traefik.http.services.trailerio.loadbalancer.server.port=80"
       # HTTP to HTTPS redirect
-      - "traefik.http.routers.trailerio-http.rule=Host(`trailerio.your-domain.com`)"
+      - "traefik.http.routers.trailerio-http.rule=Host(`trailerio.plaio.cc`)"
       - "traefik.http.routers.trailerio-http.entrypoints=web"
       - "traefik.http.routers.trailerio-http.middlewares=trailerio-redirect"
       - "traefik.http.middlewares.trailerio-redirect.redirectscheme.scheme=https"
       - "traefik.http.middlewares.trailerio-redirect.redirectscheme.permanent=true"
     networks:
       - trailerio-internal
-      - traefik_network
+      - plaio_default
 
 networks:
   trailerio-internal:
     driver: bridge
-  traefik_network:
-    external: true  # Update network name to match your Traefik setup (e.g., plaio_default)
+  plaio_default:
+    external: true
 
