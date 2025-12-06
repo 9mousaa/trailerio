@@ -14,6 +14,16 @@ const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
 const YT_DLP_TIMEOUT = 4000;
 const STREAM_TIMEOUT = 15000;
 
+// Proxy configuration for yt-dlp (comma-separated list for rotation)
+// Format: http://proxy1:port,http://proxy2:port or socks5://proxy:port
+// Examples:
+//   YT_DLP_PROXIES=http://proxy1.com:8080,http://proxy2.com:8080
+//   YT_DLP_PROXIES=socks5://127.0.0.1:1080
+const YT_DLP_PROXIES = process.env.YT_DLP_PROXIES ? 
+  process.env.YT_DLP_PROXIES.split(',').map(p => p.trim()).filter(p => p) : 
+  [];
+let proxyIndex = 0;
+
 const cache = new Map();
 
 app.use(cors());
@@ -368,6 +378,13 @@ function getNextUserAgent() {
   return ua;
 }
 
+function getNextProxy() {
+  if (YT_DLP_PROXIES.length === 0) return null;
+  const proxy = YT_DLP_PROXIES[proxyIndex];
+  proxyIndex = (proxyIndex + 1) % YT_DLP_PROXIES.length;
+  return proxy;
+}
+
 async function extractViaYtDlp(youtubeKey, retryCount = 0) {
   const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
   console.log(`  [yt-dlp] Extracting highest quality for ${youtubeKey}${retryCount > 0 ? ` (retry ${retryCount})` : ''}...`);
@@ -418,8 +435,16 @@ async function extractViaYtDlp(youtubeKey, retryCount = 0) {
     // Try with mweb client first (most compatible, less likely to need PO tokens)
     const extractorArgs = `youtube:player-client=${client}`;
     
+    // Get proxy for this request (rotate if multiple proxies configured)
+    const proxy = getNextProxy();
+    const proxyArg = proxy ? `--proxy "${proxy}"` : '';
+    
+    if (proxy) {
+      console.log(`  [yt-dlp] Using proxy: ${proxy.substring(0, 50)}...`);
+    }
+    
     const { stdout } = await Promise.race([
-      execAsync(`yt-dlp -f "${formatString}" -g --no-warnings --no-playlist --no-check-certificate --user-agent "${userAgent}" --referer "${referer}" --extractor-args "${extractorArgs}" ${headerArgs} "${youtubeUrl}"`, {
+      execAsync(`yt-dlp -f "${formatString}" -g --no-warnings --no-playlist --no-check-certificate --user-agent "${userAgent}" --referer "${referer}" --extractor-args "${extractorArgs}" ${proxyArg} ${headerArgs} "${youtubeUrl}"`, {
         timeout: YT_DLP_TIMEOUT
       }),
       new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), YT_DLP_TIMEOUT))

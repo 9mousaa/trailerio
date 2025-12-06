@@ -40,6 +40,27 @@ The frontend will be available at `http://localhost:8080` and backend at `http:/
 - Git
 - Traefik (or Nginx) for reverse proxy
 
+### Environment Variables
+
+Create a `.env` file in the project root:
+
+```bash
+TMDB_API_KEY=your_tmdb_api_key_here
+
+# Optional: Proxy configuration for yt-dlp to avoid YouTube blocking
+# Single proxy:
+# YT_DLP_PROXIES=http://proxy.example.com:8080
+
+# Multiple proxies (rotated automatically):
+# YT_DLP_PROXIES=http://proxy1.com:8080,http://proxy2.com:8080,socks5://proxy3.com:1080
+
+# Supported formats:
+# - HTTP: http://proxy:port
+# - HTTPS: https://proxy:port
+# - SOCKS5: socks5://proxy:port
+# - With auth: http://user:pass@proxy:port
+```
+
 ### Quick Deploy
 
 1. **Clone repository:**
