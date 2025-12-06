@@ -623,14 +623,17 @@ async function extractViaPiped(youtubeKey) {
           .filter(s => s.mimeType?.startsWith('video/') && s.url)
           .sort((a, b) => getQualityRank(a.quality) - getQualityRank(b.quality));
         
-        const bestCombined = sorted.find(s => !s.videoOnly);
-        if (bestCombined?.url) {
+        // Get HIGHEST quality combined stream (already sorted, first is highest)
+        const combinedStreams = sorted.filter(s => !s.videoOnly);
+        if (combinedStreams.length > 0) {
+          const bestCombined = combinedStreams[0]; // Highest quality
           console.log(`  ✓ Piped ${instance}: got ${bestCombined.quality || 'unknown'} (combined)`);
           return bestCombined.url;
         }
         
-        const bestVideoOnly = sorted.find(s => s.videoOnly);
-        if (bestVideoOnly?.url) {
+        // Last resort: highest quality video-only
+        if (sorted.length > 0) {
+          const bestVideoOnly = sorted[0]; // Highest quality
           console.log(`  ✓ Piped ${instance}: got ${bestVideoOnly.quality || 'unknown'} (video-only)`);
           return bestVideoOnly.url;
         }
