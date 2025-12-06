@@ -349,16 +349,31 @@ function findBestMatch(results, tmdbMeta) {
   return null;
 }
 
-// Track last extraction time to add delays between requests
+// Track last extraction time to add delays between requests (Piped/Cobalt approach)
 let lastYtDlpExtraction = 0;
-const MIN_EXTRACTION_INTERVAL = 1000; // 1 second minimum between extractions
+const MIN_EXTRACTION_INTERVAL = 1500; // 1.5 seconds minimum between extractions (Piped approach)
 
-async function extractViaYtDlp(youtubeKey) {
+// Rotate user agents to mimic different browsers (Cobalt/Piped approach)
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+];
+
+let userAgentIndex = 0;
+function getNextUserAgent() {
+  const ua = USER_AGENTS[userAgentIndex];
+  userAgentIndex = (userAgentIndex + 1) % USER_AGENTS.length;
+  return ua;
+}
+
+async function extractViaYtDlp(youtubeKey, retryCount = 0) {
   const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
-  console.log(`  [yt-dlp] Extracting highest quality for ${youtubeKey}...`);
+  console.log(`  [yt-dlp] Extracting highest quality for ${youtubeKey}${retryCount > 0 ? ` (retry ${retryCount})` : ''}...`);
   const startTime = Date.now();
   
-  // Add delay between requests to mimic human behavior (best practice)
+  // Add delay between requests to mimic human behavior (Piped/Cobalt approach)
   const timeSinceLastExtraction = Date.now() - lastYtDlpExtraction;
   if (timeSinceLastExtraction < MIN_EXTRACTION_INTERVAL) {
     const delay = MIN_EXTRACTION_INTERVAL - timeSinceLastExtraction;
@@ -371,19 +386,32 @@ async function extractViaYtDlp(youtubeKey) {
     // Format priority: 4K > 1440p > 1080p > 720p > best (MP4 preferred)
     const formatString = 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160][ext=mp4]+bestaudio/bestvideo[height<=2160]+bestaudio/bestvideo[height<=1440]+bestaudio/bestvideo[height<=1080]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=2160][ext=mp4]/best[height<=1080][ext=mp4]/best[ext=mp4]/best';
     
-    // Best practices: Use realistic browser headers to reduce bot detection
-    const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+    // Cobalt/Piped approach: Complete browser headers to mimic real requests
+    const userAgent = getNextUserAgent(); // Rotate user agents
     const referer = 'https://www.youtube.com/';
-    const acceptLanguage = 'en-US,en;q=0.9';
     
-    // Best practices from web search:
-    // - User-Agent: Mimic real browser
-    // - Referer: Set to YouTube
-    // - Accept-Language: Add language header
-    // - Sleep interval: Already handled above
-    // - No cookies needed for URL extraction (only for downloads)
+    // Complete header set like Piped/Cobalt use (mimics real browser)
+    const headers = [
+      `User-Agent:${userAgent}`,
+      `Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8`,
+      `Accept-Language:en-US,en;q=0.9`,
+      `Accept-Encoding:gzip, deflate, br`,
+      `Referer:${referer}`,
+      `Origin:https://www.youtube.com`,
+      `DNT:1`,
+      `Connection:keep-alive`,
+      `Upgrade-Insecure-Requests:1`,
+      `Sec-Fetch-Dest:document`,
+      `Sec-Fetch-Mode:navigate`,
+      `Sec-Fetch-Site:same-origin`,
+      `Sec-Fetch-User:?1`
+    ];
+    
+    // Build yt-dlp command with all headers (Cobalt/Piped approach)
+    const headerArgs = headers.map(h => `--add-header "${h}"`).join(' ');
+    
     const { stdout } = await Promise.race([
-      execAsync(`yt-dlp -f "${formatString}" -g --no-warnings --no-playlist --no-check-certificate --user-agent "${userAgent}" --referer "${referer}" --add-header "Accept-Language:${acceptLanguage}" "${youtubeUrl}"`, {
+      execAsync(`yt-dlp -f "${formatString}" -g --no-warnings --no-playlist --no-check-certificate --user-agent "${userAgent}" --referer "${referer}" ${headerArgs} "${youtubeUrl}"`, {
         timeout: YT_DLP_TIMEOUT
       }),
       new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), YT_DLP_TIMEOUT))
@@ -400,7 +428,17 @@ async function extractViaYtDlp(youtubeKey) {
     return null;
   } catch (e) {
     const elapsed = Date.now() - startTime;
-    console.log(`  ✗ [yt-dlp] Failed after ${elapsed}ms: ${e.message || e}`);
+    const errorMsg = e.message || e.toString();
+    console.log(`  ✗ [yt-dlp] Failed after ${elapsed}ms: ${errorMsg}`);
+    
+    // Cobalt/Piped approach: Retry with exponential backoff on bot detection
+    if (retryCount < 2 && (errorMsg.includes('bot') || errorMsg.includes('Sign in') || errorMsg.includes('Timeout'))) {
+      const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 3000); // Max 3 seconds
+      console.log(`  [yt-dlp] Retrying after ${backoffDelay}ms backoff (attempt ${retryCount + 1}/2)...`);
+      await new Promise(resolve => setTimeout(resolve, backoffDelay));
+      return extractViaYtDlp(youtubeKey, retryCount + 1);
+    }
+    
     return null;
   }
 }
