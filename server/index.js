@@ -21,18 +21,18 @@ const cache = new Map();
 let activeRequests = 0;
 let totalRequests = 0;
 
-// Concurrency limiter to prevent resource exhaustion
-// Limit concurrent source extractions to prevent too many simultaneous fetch requests
-const MAX_CONCURRENT_EXTRACTIONS = 3;
-let activeExtractions = 0;
-const extractionQueue = [];
+// Concurrency limiter for resource-intensive operations (Piped/Invidious with multiple instances)
+// Only limit operations that make many parallel fetch requests, not simple API calls
+const MAX_CONCURRENT_HEAVY_EXTRACTIONS = 8; // Increased from 3 to handle more users
+let activeHeavyExtractions = 0;
+const heavyExtractionQueue = [];
 
-async function withExtractionLimit(fn) {
+async function withHeavyExtractionLimit(fn) {
   return new Promise((resolve, reject) => {
     const execute = async () => {
-      activeExtractions++;
-      if (extractionQueue.length > 0) {
-        console.log(`  [Concurrency] Executing extraction (${activeExtractions}/${MAX_CONCURRENT_EXTRACTIONS} active, ${extractionQueue.length} queued)`);
+      activeHeavyExtractions++;
+      if (heavyExtractionQueue.length > 0) {
+        console.log(`  [Concurrency] Executing heavy extraction (${activeHeavyExtractions}/${MAX_CONCURRENT_HEAVY_EXTRACTIONS} active, ${heavyExtractionQueue.length} queued)`);
       }
       try {
         const result = await fn();
@@ -40,20 +40,20 @@ async function withExtractionLimit(fn) {
       } catch (error) {
         reject(error);
       } finally {
-        activeExtractions--;
+        activeHeavyExtractions--;
         // Process next in queue
-        if (extractionQueue.length > 0) {
-          const next = extractionQueue.shift();
+        if (heavyExtractionQueue.length > 0) {
+          const next = heavyExtractionQueue.shift();
           next();
         }
       }
     };
     
-    if (activeExtractions < MAX_CONCURRENT_EXTRACTIONS) {
+    if (activeHeavyExtractions < MAX_CONCURRENT_HEAVY_EXTRACTIONS) {
       execute();
     } else {
-      console.log(`  [Concurrency] Queuing extraction (${activeExtractions}/${MAX_CONCURRENT_EXTRACTIONS} active, ${extractionQueue.length + 1} queued)`);
-      extractionQueue.push(execute);
+      console.log(`  [Concurrency] Queuing heavy extraction (${activeHeavyExtractions}/${MAX_CONCURRENT_HEAVY_EXTRACTIONS} active, ${heavyExtractionQueue.length + 1} queued)`);
+      heavyExtractionQueue.push(execute);
     }
   });
 }
@@ -1766,16 +1766,24 @@ async function resolvePreview(imdbId, type) {
         return null;
       };
       
-      // Race the source attempt against a timeout, with concurrency limiting
+      // Race the source attempt against a timeout
       const timeoutPromise = new Promise((_, reject) => 
         setTimeout(() => reject(new Error(`Source ${source} timeout after ${SOURCE_TIMEOUT}ms`)), SOURCE_TIMEOUT)
       );
       
-      // Wrap source attempt with concurrency limiter to prevent resource exhaustion
-      // This ensures we don't have too many simultaneous extractions running
-      const limitedAttempt = withExtractionLimit(async () => {
-        return await sourceAttempt();
-      });
+      // Only apply concurrency limiting to resource-intensive operations (Piped/Invidious)
+      // These check multiple instances in parallel, which can exhaust resources
+      // iTunes and Archive are single API calls, so they don't need limiting
+      let limitedAttempt;
+      if (source === 'piped' || source === 'invidious') {
+        limitedAttempt = withHeavyExtractionLimit(async () => {
+          return await sourceAttempt();
+        });
+      } else {
+        // iTunes and Archive can run without limit (they're single API calls)
+        limitedAttempt = sourceAttempt();
+      }
+      
       const result = await Promise.race([limitedAttempt, timeoutPromise]);
       
       if (result && result.found) {
