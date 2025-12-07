@@ -7,8 +7,9 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install dependencies with cache mount (faster rebuilds)
+# Use npm install instead of npm ci for better cache mount performance
 RUN --mount=type=cache,target=/root/.npm \
-    npm ci --prefer-offline --no-audit
+    npm install --prefer-offline --no-audit --no-fund
 
 # Copy source code (excluding what's in .dockerignore)
 COPY . .
