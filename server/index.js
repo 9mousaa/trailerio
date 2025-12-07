@@ -1044,19 +1044,36 @@ async function extractViaInternetArchive(tmdbMeta) {
           const allText = `${title} ${description} ${subject}`.toLowerCase();
           const isVideoGame = /video game|videogame|gameplay|steam|epic games|nintendo|playstation|xbox|pc game|console game|mobile game|game engine|unity|unreal engine/.test(allText);
           
+          // Check for game-specific patterns even when search title has "game" (like "Game of Thrones")
+          // Game trailers often have patterns like: "Title - Location/Mode Trailer" or "Title Game Trailer"
+          // For "Game of Thrones", game trailers often have subtitles like "The Wall", "Telltale", etc.
+          // Check if title has a subtitle after the main title that suggests it's a game (like "Game of Thrones - The Wall")
+          const titleLower = title.toLowerCase();
+          const hasGameSubtitle = /game\s+of\s+thrones\s*-\s*(the\s+wall|telltale|iron\s+from\s+ice|a\s+telltale)/i.test(title) ||
+                                  /\b(telltale|telltale\s+games)\b/i.test(allText);
+          
+          const hasGamePattern = /\b(game|edition|dlc|expansion|pack|bundle)\s+(trailer|teaser|preview)/i.test(title) ||
+                                 /\b(trailer|teaser|preview)\s+(for|of)\s+.*\s+game/i.test(title) ||
+                                 hasGameSubtitle;
+          
           // Check if "game" appears in a way that suggests it's a video game
           // For "Game of Thrones", the search title itself contains "game", so we need to be careful
-          // Only filter if there are clear game indicators OR if "game" appears but title doesn't match well
           const hasGameKeyword = /\bgame\b/.test(allText);
           const searchTitleHasGame = /\bgame\b/.test(normSearchTitle.toLowerCase());
           
-          // If the search title itself has "game" (like "Game of Thrones"), only filter if there are clear game indicators
-          // Otherwise, if "game" appears standalone and title doesn't closely match, it might be a game
+          // If the search title itself has "game" (like "Game of Thrones"), check for:
+          // 1. Clear game indicators (steam, gameplay, etc.)
+          // 2. Game-specific patterns (like "The Wall" which is a game location)
+          // 3. Game-specific subtitles (like "Game of Thrones - The Wall")
+          // 4. Low word match ratio (suggests it's not the same content)
           const isLikelyGame = isVideoGame || 
-            (hasGameKeyword && !searchTitleHasGame && wordMatchRatio < 0.7); // "game" in result but not in search, and low match
+            hasGamePattern ||
+            hasGameSubtitle ||
+            (hasGameKeyword && !searchTitleHasGame && wordMatchRatio < 0.7) || // "game" in result but not in search, and low match
+            (hasGameKeyword && searchTitleHasGame && wordMatchRatio < 0.5); // Both have "game" but very low match (likely different content)
           
           if (isLikelyGame) {
-            console.log(`  [Internet Archive] Skipping video game trailer: "${title}"`);
+            console.log(`  [Internet Archive] Skipping video game trailer: "${title}" (isVideoGame: ${isVideoGame}, hasGamePattern: ${hasGamePattern}, hasGameSubtitle: ${hasGameSubtitle}, wordMatchRatio: ${wordMatchRatio.toFixed(2)})`);
             continue; // Skip video game trailers
           }
           
