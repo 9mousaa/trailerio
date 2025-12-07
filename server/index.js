@@ -1190,28 +1190,72 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       }
       
       console.log(`  ✓ Returning stream for ${id}: ${finalUrl.substring(0, 80)}...`);
+      console.log(`  [DEBUG] Before res.json() - headersSent: ${res.headersSent}, finished: ${res.finished}`);
+      
       if (!res.headersSent) {
-        res.json({
-          streams: [{
-            name: streamName,
-            title: streamTitle,
-            url: finalUrl
-          }]
-        });
-        return;
+        try {
+          const responseData = {
+            streams: [{
+              name: streamName,
+              title: streamTitle,
+              url: finalUrl
+            }]
+          };
+          console.log(`  [DEBUG] Calling res.json() with data:`, JSON.stringify(responseData).substring(0, 100));
+          
+          res.json(responseData);
+          
+          console.log(`  [DEBUG] After res.json() - headersSent: ${res.headersSent}, finished: ${res.finished}`);
+          
+          // Track response completion
+          res.on('finish', () => {
+            console.log(`  [DEBUG] Response finished for ${id}`);
+          });
+          
+          res.on('close', () => {
+            console.log(`  [DEBUG] Response closed for ${id}`);
+          });
+          
+          res.on('error', (err) => {
+            console.error(`  [DEBUG] Response error for ${id}:`, err.message);
+          });
+          
+          return;
+        } catch (jsonError) {
+          console.error(`  [DEBUG] Error in res.json() for ${id}:`, jsonError.message);
+          throw jsonError;
+        }
+      } else {
+        console.log(`  [DEBUG] Headers already sent for ${id}, skipping response`);
       }
     }
     
     console.log(`  ✗ No preview found for ${id}`);
+    console.log(`  [DEBUG] Before sending empty response - headersSent: ${res.headersSent}`);
     if (!res.headersSent) {
-      return res.json({ streams: [] });
+      try {
+        res.json({ streams: [] });
+        console.log(`  [DEBUG] Empty response sent for ${id}`);
+        return;
+      } catch (jsonError) {
+        console.error(`  [DEBUG] Error sending empty response for ${id}:`, jsonError.message);
+      }
+    } else {
+      console.log(`  [DEBUG] Headers already sent, cannot send empty response for ${id}`);
     }
   } catch (error) {
     clearTimeout(timeout);
     const isTimeout = error.message === 'Request timeout';
     console.error(`  ✗ Error resolving ${id}:`, isTimeout ? 'Request timeout' : (error.message || error));
+    console.error(`  [DEBUG] Error stack:`, error.stack);
+    console.log(`  [DEBUG] Before error response - headersSent: ${res.headersSent}, timeoutFired: ${timeoutFired}`);
     if (!res.headersSent && !timeoutFired) {
-      res.json({ streams: [] });
+      try {
+        res.json({ streams: [] });
+        console.log(`  [DEBUG] Error response sent for ${id}`);
+      } catch (jsonError) {
+        console.error(`  [DEBUG] Error sending error response for ${id}:`, jsonError.message);
+      }
     }
   }
 });
