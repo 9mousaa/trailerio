@@ -662,9 +662,11 @@ const PIPED_INSTANCES = [
 ];
 
 async function extractViaPiped(youtubeKey) {
-  // Sort instances by success rate (highest first) and limit to top 3 to prevent resource exhaustion
-  const sortedInstances = successTracker.sortBySuccessRate('piped', PIPED_INSTANCES).slice(0, 3);
-  const top3 = sortedInstances.map(inst => {
+  // Sort instances by success rate (highest first)
+  // Try top 5 instances to improve reliability (increased from 3)
+  const allSortedInstances = successTracker.sortBySuccessRate('piped', PIPED_INSTANCES);
+  const sortedInstances = allSortedInstances.slice(0, 5);
+  const top3 = sortedInstances.slice(0, 3).map(inst => {
     const rate = successTracker.getSuccessRate('piped', inst);
     return `${inst.split('//')[1].split('/')[0]} (${(rate * 100).toFixed(0)}%)`;
   }).join(', ');
@@ -672,7 +674,7 @@ async function extractViaPiped(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000); // 2s timeout - reduced to fail faster and prevent gateway timeouts
+    const timeout = setTimeout(() => controller.abort(), 3000); // 3s timeout - balanced for reliability vs speed
     const startTime = Date.now();
     let response = null;
     
@@ -861,9 +863,11 @@ const INVIDIOUS_INSTANCES = [
 ];
 
 async function extractViaInvidious(youtubeKey) {
-  // Sort instances by success rate (highest first) and limit to top 3 to prevent resource exhaustion
-  const sortedInstances = successTracker.sortBySuccessRate('invidious', INVIDIOUS_INSTANCES).slice(0, 3);
-  const top3 = sortedInstances.map(inst => {
+  // Sort instances by success rate (highest first)
+  // Try top 5 instances to improve reliability (increased from 3)
+  const allSortedInstances = successTracker.sortBySuccessRate('invidious', INVIDIOUS_INSTANCES);
+  const sortedInstances = allSortedInstances.slice(0, 5);
+  const top3 = sortedInstances.slice(0, 3).map(inst => {
     const rate = successTracker.getSuccessRate('invidious', inst);
     return `${inst.split('//')[1].split('/')[0]} (${(rate * 100).toFixed(0)}%)`;
   }).join(', ');
@@ -871,7 +875,7 @@ async function extractViaInvidious(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000); // 2s timeout - reduced to fail faster and prevent gateway timeouts
+    const timeout = setTimeout(() => controller.abort(), 3000); // 3s timeout - balanced for reliability vs speed
     const startTime = Date.now();
     let response = null;
     
@@ -1018,7 +1022,7 @@ async function extractViaInternetArchive(tmdbMeta) {
       const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(strategy.query)}&fl=identifier,title,description,date,downloads,creator,subject&sort[]=downloads+desc&rows=20&output=json`;
       
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000); // Reduced from 8s to 5s to fail faster
+      const timeout = setTimeout(() => controller.abort(), 6000); // 6s timeout - balanced for Archive API reliability
       const startTime = Date.now();
       
       try {
@@ -1295,7 +1299,7 @@ async function extractViaInternetArchive(tmdbMeta) {
           const metadataUrl = `https://archive.org/metadata/${identifier}`;
           
           const metaController = new AbortController();
-          const metaTimeout = setTimeout(() => metaController.abort(), 5000);
+          const metaTimeout = setTimeout(() => metaController.abort(), 6000); // 6s timeout - balanced for Archive API reliability
           
           try {
             const metaResponse = await fetch(metadataUrl, { 
