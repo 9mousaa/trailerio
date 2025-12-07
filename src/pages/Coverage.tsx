@@ -2,15 +2,7 @@ import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, Database, Target, TrendingUp, XCircle, CheckCircle } from "lucide-react";
 import { TITLE_MAP } from "@/lib/constants";
-
-const getBaseUrl = () => {
-  if (typeof window !== 'undefined') {
-    return `${window.location.protocol}//${window.location.host}`;
-  }
-  return '';
-};
-
-const ADDON_URL = import.meta.env.VITE_API_URL || `${getBaseUrl()}/api`;
+import { getApiUrl } from "@/lib/utils";
 
 interface Stats {
   cache: {
@@ -38,7 +30,7 @@ const Coverage = () => {
   useEffect(() => {
     const fetchStats = async () => {
       try {
-        const apiUrl = import.meta.env.VITE_API_URL || `${window.location.origin}/api`;
+        const apiUrl = getApiUrl();
         const response = await fetch(`${apiUrl}/stats`, {
           headers: {
             'Accept': 'application/json'

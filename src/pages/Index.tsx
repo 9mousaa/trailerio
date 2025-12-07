@@ -2,19 +2,12 @@ import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
-import { Play, Copy, Check, Film, Tv } from "lucide-react";
+import { Copy, Check, Film, Tv } from "lucide-react";
 import { VideoPlayer } from "@/components/VideoPlayer";
 import { TITLE_MAP, TEST_TITLES } from "@/lib/constants";
+import { getApiUrl, getBaseUrl } from "@/lib/utils";
 
-const getBaseUrl = () => {
-  if (typeof window !== 'undefined') {
-    return `${window.location.protocol}//${window.location.host}`;
-  }
-  return '';
-};
-
-const ADDON_URL = import.meta.env.VITE_API_URL || `${getBaseUrl()}/api`;
-const MANIFEST_URL = `${ADDON_URL}/manifest.json`;
+const MANIFEST_URL = `${getApiUrl()}/manifest.json`;
 
 const Index = () => {
   const [testImdbId, setTestImdbId] = useState("");
