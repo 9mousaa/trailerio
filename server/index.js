@@ -717,9 +717,17 @@ async function extractViaInternetArchive(tmdbMeta) {
           const metaTimeout = setTimeout(() => metaController.abort(), 5000);
           
           try {
-            const metaResponse = await fetch(metadataUrl, { signal: metaController.signal });
+            const metaResponse = await fetch(metadataUrl, { 
+              signal: metaController.signal,
+              headers: { 'Accept': 'application/json' }
+            });
             clearTimeout(metaTimeout);
-            if (!metaResponse.ok) continue;
+            if (!metaResponse.ok) {
+              if (searchTerms.indexOf(searchTerm) === 0) {
+                console.log(`  [Internet Archive] Metadata fetch failed: HTTP ${metaResponse.status}`);
+              }
+              continue;
+            }
             
             const metadata = await metaResponse.json();
           
