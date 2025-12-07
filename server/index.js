@@ -423,9 +423,8 @@ function findBestMatch(results, tmdbMeta) {
 // ============ PIPED EXTRACTOR ============
 
 const PIPED_INSTANCES = [
-  'https://pipedapi.kavin.rocks',
+  'https://pipedapi.kavin.rocks', // Most reliable
   'https://pipedapi.r4fo.com',
-  'https://api.piped.projectsegfau.lt',
   'https://pipedapi.in.projectsegfau.lt',
   'https://piped-api.lunar.icu',
   'https://pipedapi.moomoo.me',
@@ -438,6 +437,7 @@ const PIPED_INSTANCES = [
   'https://api.piped.private.coffee',
   'https://pipedapi.darkness.services',
   'https://pipedapi.adminforge.de',
+  // Removed: api.piped.projectsegfau.lt (shutdown)
 ];
 
 async function extractViaPiped(youtubeKey) {
@@ -542,8 +542,7 @@ async function extractViaPiped(youtubeKey) {
 // ============ INVIDIOUS EXTRACTOR ============
 
 const INVIDIOUS_INSTANCES = [
-  'https://invidious.fdn.fr',
-  'https://yewtu.be',
+  'https://yewtu.be', // Most reliable
   'https://vid.puffyan.us',
   'https://invidious.kavin.rocks',
   'https://invidious.private.coffee',
@@ -562,6 +561,7 @@ const INVIDIOUS_INSTANCES = [
   'https://invidious.reallyaweso.me',
   'https://inv.nadeko.net',
   'https://invidious.nerdvpn.de',
+  // Removed: invidious.fdn.fr (DNS issues)
 ];
 
 async function extractViaInvidious(youtubeKey) {
@@ -579,6 +579,17 @@ async function extractViaInvidious(youtubeKey) {
       clearTimeout(timeout);
       
       if (!response.ok) return null;
+      
+      // Check if response is actually JSON before parsing
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await response.text();
+        if (INVIDIOUS_INSTANCES.indexOf(instance) < 2) {
+          console.log(`  [Invidious] ${instance} returned non-JSON: ${text.substring(0, 50)}`);
+        }
+        return null;
+      }
+      
       const data = await response.json();
       
       const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
