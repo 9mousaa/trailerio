@@ -909,31 +909,56 @@ async function extractViaInternetArchive(tmdbMeta) {
           const normSearchTitle = normalizeTitle(tmdbMeta.title);
           const normOriginalTitle = normalizeTitle(tmdbMeta.originalTitle);
           
+          // Calculate fuzzy match first to use as a filter
+          const titleFuzzy = fuzzyMatch(normTitle, normSearchTitle);
+          const originalFuzzy = fuzzyMatch(normTitle, normOriginalTitle);
+          const bestFuzzy = Math.max(titleFuzzy, originalFuzzy);
+          
+          // Require minimum fuzzy match (0.5) to even consider this result
+          // This prevents completely unrelated matches like "War" matching "Wire"
+          if (bestFuzzy < 0.5) {
+            continue; // Skip this result entirely
+          }
+          
           let score = 0;
           
-          // Title matching (most important)
+          // Title matching (most important) - be more strict
           if (normTitle === normSearchTitle) {
             score += 1.0; // Exact match
           } else if (normTitle === normOriginalTitle) {
             score += 0.9; // Exact match with original title
           } else {
-            // Fuzzy match
-            const titleFuzzy = fuzzyMatch(normTitle, normSearchTitle);
-            const originalFuzzy = fuzzyMatch(normTitle, normOriginalTitle);
-            const bestFuzzy = Math.max(titleFuzzy, originalFuzzy);
+            // Check if title contains the movie title as a complete word (more strict)
+            const searchWords = normSearchTitle.split(' ').filter(w => w.length > 2); // Ignore short words
+            const titleWords = normTitle.split(' ');
+            const matchingWords = searchWords.filter(word => titleWords.includes(word));
+            const wordMatchRatio = searchWords.length > 0 ? matchingWords.length / searchWords.length : 0;
             
-            if (bestFuzzy > 0.9) {
-              score += 0.8;
-            } else if (bestFuzzy > 0.7) {
-              score += 0.6;
-            } else if (bestFuzzy > 0.5) {
+            if (wordMatchRatio >= 0.8) {
+              // Most words match - likely correct
+              score += 0.7;
+            } else if (wordMatchRatio >= 0.5) {
+              // Half words match - possible match
+              score += 0.4;
+            }
+            
+            // Fuzzy match as secondary check (already calculated above)
+            // Only add fuzzy score if it's high enough and we have some word matches
+            if (bestFuzzy > 0.85 && wordMatchRatio > 0.3) {
+              score += 0.3;
+            } else if (bestFuzzy > 0.9 && wordMatchRatio > 0.5) {
               score += 0.4;
             }
           }
           
-          // Check if title contains the movie title (partial match)
-          if (normTitle.includes(normSearchTitle) || normSearchTitle.includes(normTitle.split(' trailer')[0])) {
-            score += 0.3;
+          // Check if title contains the movie title as a substring (but require it to be significant)
+          const titleWithoutTrailer = normTitle.split(' trailer')[0].trim();
+          const searchWithoutTrailer = normSearchTitle.split(' trailer')[0].trim();
+          
+          if (titleWithoutTrailer.includes(searchWithoutTrailer) && searchWithoutTrailer.length >= 5) {
+            score += 0.2; // Reduced from 0.3
+          } else if (searchWithoutTrailer.includes(titleWithoutTrailer) && titleWithoutTrailer.length >= 5) {
+            score += 0.2; // Reduced from 0.3
           }
           
           // Trailer keyword bonus
@@ -978,9 +1003,14 @@ async function extractViaInternetArchive(tmdbMeta) {
           }
         }
         
-        // Use threshold for matches (0.6 - balanced between accuracy and coverage)
-        if (bestMatch && bestScore >= 0.6) {
-          console.log(`  [Internet Archive] Best match: "${bestMatch.title}" (score: ${bestScore.toFixed(2)})`);
+        // Use higher threshold for matches (0.75 - prioritize accuracy over coverage to avoid false positives)
+        // Require strong title matching to ensure relevance
+        if (bestMatch) {
+          console.log(`  [Internet Archive] Best candidate: "${bestMatch.title}" (score: ${bestScore.toFixed(2)}, threshold: 0.75)`);
+        }
+        
+        if (bestMatch && bestScore >= 0.75) {
+          console.log(`  [Internet Archive] ✓ Best match: "${bestMatch.title}" (score: ${bestScore.toFixed(2)})`);
           // Get the video URL from the item metadata
           const identifier = bestMatch.identifier;
           const metadataUrl = `https://archive.org/metadata/${identifier}`;
@@ -1075,8 +1105,12 @@ async function extractViaInternetArchive(tmdbMeta) {
             successTracker.recordFailure('archive', strategy.id);
             continue;
           }
+        } else if (bestMatch) {
+          // Match found but score too low (bestScore < 0.75) - rejected to avoid false positives
+          console.log(`  [Internet Archive] ✗ Rejected match: "${bestMatch.title}" (score: ${bestScore.toFixed(2)} < 0.75 threshold)`);
+          successTracker.recordFailure('archive', strategy.id);
         } else {
-          // No match found (bestScore < 0.6)
+          // No match found at all
           successTracker.recordFailure('archive', strategy.id);
         }
       } catch (e) {
