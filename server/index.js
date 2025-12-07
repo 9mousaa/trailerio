@@ -432,6 +432,7 @@ async function extractViaPiped(youtubeKey) {
   const tryInstance = async (instance) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout - enough time for Piped to respond
+    const startTime = Date.now();
     
     try {
       const response = await fetch(`${instance}/streams/${youtubeKey}`, {
@@ -439,20 +440,24 @@ async function extractViaPiped(youtubeKey) {
         signal: controller.signal
       });
       clearTimeout(timeout);
+      const duration = Date.now() - startTime;
       
-      if (!response.ok) return null;
+      if (!response.ok) {
+        console.log(`  [Piped] ${instance}: HTTP ${response.status} (${duration}ms)`);
+        return null;
+      }
       
       // Check if response is actually JSON before parsing
       const contentType = response.headers.get('content-type');
       if (!contentType || !contentType.includes('application/json')) {
         const text = await response.text();
-        if (PIPED_INSTANCES.indexOf(instance) < 2) {
-          console.log(`  [Piped] ${instance} returned non-JSON: ${text.substring(0, 50)}`);
-        }
+        console.log(`  [Piped] ${instance}: non-JSON response (${contentType || 'no content-type'}): ${text.substring(0, 100)}`);
         return null;
       }
       
       const data = await response.json();
+      const duration = Date.now() - startTime;
+      console.log(`  [Piped] ${instance}: got response (${duration}ms), has dash: ${!!data.dash}, videoStreams: ${data.videoStreams?.length || 0}`);
       
       // PRIORITY 1: DASH manifest (best for AVPlayer - native support, adaptive streaming, highest quality)
       if (data.dash) {
@@ -495,10 +500,9 @@ async function extractViaPiped(youtubeKey) {
       return null;
     } catch (e) {
       clearTimeout(timeout);
-      // Log error for debugging (only first few to avoid spam)
-      if (PIPED_INSTANCES.indexOf(instance) < 3) {
-        console.log(`  [Piped] ${instance} error: ${e.message || 'timeout/network error'}`);
-      }
+      const duration = Date.now() - startTime;
+      const errorType = e.name === 'AbortError' ? 'TIMEOUT' : e.code || 'ERROR';
+      console.log(`  [Piped] ${instance}: ${errorType} after ${duration}ms - ${e.message || 'unknown error'}`);
       return null;
     }
   };
@@ -509,9 +513,11 @@ async function extractViaPiped(youtubeKey) {
     .filter(r => r !== null);
   
   if (successfulResults.length === 0) {
-    console.log(`  ✗ [Piped] All instances failed or timed out`);
+    console.log(`  ✗ [Piped] All ${PIPED_INSTANCES.length} instances failed or timed out`);
     return null;
   }
+  
+  console.log(`  ✓ [Piped] ${successfulResults.length}/${PIPED_INSTANCES.length} instances succeeded`);
   
   // Find best quality result (prefer DASH, then highest quality combined stream)
   const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
@@ -567,6 +573,7 @@ async function extractViaInvidious(youtubeKey) {
   const tryInstance = async (instance) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout - enough time for Invidious to respond
+    const startTime = Date.now();
     
     try {
       const response = await fetch(`${instance}/api/v1/videos/${youtubeKey}`, {
@@ -574,20 +581,24 @@ async function extractViaInvidious(youtubeKey) {
         signal: controller.signal
       });
       clearTimeout(timeout);
+      const duration = Date.now() - startTime;
       
-      if (!response.ok) return null;
+      if (!response.ok) {
+        console.log(`  [Invidious] ${instance}: HTTP ${response.status} (${duration}ms)`);
+        return null;
+      }
       
       // Check if response is actually JSON before parsing
       const contentType = response.headers.get('content-type');
       if (!contentType || !contentType.includes('application/json')) {
         const text = await response.text();
-        if (INVIDIOUS_INSTANCES.indexOf(instance) < 2) {
-          console.log(`  [Invidious] ${instance} returned non-JSON: ${text.substring(0, 50)}`);
-        }
+        console.log(`  [Invidious] ${instance}: non-JSON response (${contentType || 'no content-type'}): ${text.substring(0, 100)}`);
         return null;
       }
       
       const data = await response.json();
+      const duration = Date.now() - startTime;
+      console.log(`  [Invidious] ${instance}: got response (${duration}ms), formatStreams: ${data.formatStreams?.length || 0}`);
       
       const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
       const getQualityRank = (label) => {
@@ -611,10 +622,9 @@ async function extractViaInvidious(youtubeKey) {
       return null;
     } catch (e) {
       clearTimeout(timeout);
-      // Log error for debugging (only first few to avoid spam)
-      if (INVIDIOUS_INSTANCES.indexOf(instance) < 3) {
-        console.log(`  [Invidious] ${instance} error: ${e.message || 'timeout/network error'}`);
-      }
+      const duration = Date.now() - startTime;
+      const errorType = e.name === 'AbortError' ? 'TIMEOUT' : e.code || 'ERROR';
+      console.log(`  [Invidious] ${instance}: ${errorType} after ${duration}ms - ${e.message || 'unknown error'}`);
       return null;
     }
   };
@@ -625,11 +635,11 @@ async function extractViaInvidious(youtubeKey) {
     .map(r => r.value)[0];
   
   if (validUrl) {
-    console.log(`  ✓ [Invidious] Got URL from Invidious`);
+    console.log(`  ✓ [Invidious] Got URL from Invidious (${results.filter(r => r.status === 'fulfilled' && r.value !== null).length}/${INVIDIOUS_INSTANCES.length} instances succeeded)`);
     return validUrl;
   }
   
-  console.log(`  ✗ [Invidious] All instances failed or timed out`);
+  console.log(`  ✗ [Invidious] All ${INVIDIOUS_INSTANCES.length} instances failed or timed out`);
   return null;
 }
 
