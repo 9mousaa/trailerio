@@ -804,11 +804,42 @@ async function extractViaInternetArchive(tmdbMeta) {
             
             // Find the best video file (prefer mp4, then webm)
             const files = metadata.files || [];
+            console.log(`  [Internet Archive] Metadata has ${files.length} files`);
+            
             const videoFiles = files.filter(f => {
+              if (!f.name) return false;
+              
+              const name = f.name.toLowerCase();
               const format = (f.format || '').toLowerCase();
-              return (format.includes('mp4') || format.includes('webm') || format.includes('h.264')) &&
-                     f.name && !f.name.includes('thumb') && !f.name.includes('sample');
+              
+              // Skip thumbnails, samples, images
+              if (name.includes('thumb') || name.includes('sample') || 
+                  name.includes('.jpg') || name.includes('.png') || name.includes('.gif') ||
+                  name.includes('.txt') || name.includes('.xml') || name.includes('.json')) {
+                return false;
+              }
+              
+              // Check by format field
+              if (format.includes('mp4') || format.includes('webm') || format.includes('h.264') || 
+                  format.includes('mpeg') || format.includes('quicktime')) {
+                return true;
+              }
+              
+              // Check by file extension
+              if (name.endsWith('.mp4') || name.endsWith('.webm') || name.endsWith('.mov') || 
+                  name.endsWith('.avi') || name.endsWith('.mkv') || name.endsWith('.m4v')) {
+                return true;
+              }
+              
+              // Check by mime type if available
+              if (f.mimeType && (f.mimeType.includes('video') || f.mimeType.includes('mp4') || f.mimeType.includes('webm'))) {
+                return true;
+              }
+              
+              return false;
             });
+            
+            console.log(`  [Internet Archive] Found ${videoFiles.length} potential video files out of ${files.length} total files`);
             
             if (videoFiles.length > 0) {
               // Sort by: 1) format preference (mp4 > webm > others), 2) size (larger = better quality)
@@ -832,21 +863,19 @@ async function extractViaInternetArchive(tmdbMeta) {
               console.log(`  ✓ [Internet Archive] Found: "${bestMatch.title}" (${bestFile.format || 'video'}, ${Math.round((bestFile.size || 0) / 1024 / 1024)}MB)`);
               return videoUrl;
             } else {
-              console.log(`  [Internet Archive] No video files found in metadata for "${bestMatch.title}"`);
+              // Log first few file names for debugging
+              const fileNames = files.slice(0, 5).map(f => f.name || 'unnamed').join(', ');
+              console.log(`  [Internet Archive] No video files found. Sample files: ${fileNames}${files.length > 5 ? '...' : ''}`);
             }
           } catch (metaError) {
             clearTimeout(metaTimeout);
-            if (searchTerms.indexOf(searchTerm) === 0) {
-              console.log(`  [Internet Archive] Metadata fetch error: ${metaError.message || 'timeout'}`);
-            }
+            console.log(`  [Internet Archive] Metadata fetch error for "${bestMatch.title}": ${metaError.message || 'timeout'}`);
             continue;
           }
         }
       } catch (e) {
         clearTimeout(timeout);
-        if (searchTerms.indexOf(searchTerm) === 0) {
-          console.log(`  [Internet Archive] Search error: ${e.message || 'timeout'}`);
-        }
+        console.log(`  [Internet Archive] Search error for query "${query.substring(0, 50)}...": ${e.message || 'timeout'}`);
         continue;
       }
     }
