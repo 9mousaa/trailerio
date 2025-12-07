@@ -8,7 +8,7 @@ const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
 const CACHE_DAYS = 30;
 const MIN_SCORE_THRESHOLD = 0.6;
 const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
-const STREAM_TIMEOUT = 20000; // 20 seconds - reduced to fail faster
+const STREAM_TIMEOUT = 15000; // 15 seconds - reduced to prevent gateway timeouts
 
 // Cache TTLs by source type (in hours)
 const CACHE_TTL = {
@@ -672,7 +672,7 @@ async function extractViaPiped(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000); // 3s timeout - reduced to fail faster
+    const timeout = setTimeout(() => controller.abort(), 2000); // 2s timeout - reduced to fail faster and prevent gateway timeouts
     const startTime = Date.now();
     let response = null;
     
@@ -871,7 +871,7 @@ async function extractViaInvidious(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000); // 3s timeout - reduced to fail faster
+    const timeout = setTimeout(() => controller.abort(), 2000); // 2s timeout - reduced to fail faster and prevent gateway timeouts
     const startTime = Date.now();
     let response = null;
     
@@ -1076,6 +1076,10 @@ async function extractViaInternetArchive(tmdbMeta) {
           const matchingWords = searchWords.filter(word => titleWords.includes(word));
           const wordMatchRatio = searchWords.length > 0 ? matchingWords.length / searchWords.length : 0;
           
+          // Check if "game" appears in search title (needed for filtering logic below)
+          // For "Game of Thrones", the search title itself contains "game", so we need to be careful
+          const searchTitleHasGame = /\bgame\b/.test(normSearchTitle.toLowerCase());
+          
           // Filter out video game trailers when searching for TV shows or movies
           // Check if title/description contains game-related terms that indicate it's a video game
           const allText = `${title} ${description} ${subject}`.toLowerCase();
@@ -1103,9 +1107,7 @@ async function extractViaInternetArchive(tmdbMeta) {
                                  hasGameSubtitle;
           
           // Check if "game" appears in a way that suggests it's a video game
-          // For "Game of Thrones", the search title itself contains "game", so we need to be careful
           const hasGameKeyword = /\bgame\b/.test(allText);
-          const searchTitleHasGame = /\bgame\b/.test(normSearchTitle.toLowerCase());
           
           // If the search title itself has "game" (like "Game of Thrones"), check for:
           // 1. Clear game indicators (steam, gameplay, etc.)
@@ -1464,7 +1466,7 @@ async function multiPassSearch(tmdbMeta) {
     
     // Search countries one at a time with delays to avoid rate limiting
     const searchStartTime = Date.now();
-    const MAX_SEARCH_TIME = 8000; // Max 8 seconds for iTunes search to prevent hanging
+    const MAX_SEARCH_TIME = 5000; // Max 5 seconds for iTunes search - reduced to prevent gateway timeouts
     
     for (const country of sortedCountries) {
       // Check if we're running out of time
@@ -1650,7 +1652,7 @@ async function resolvePreview(imdbId, type) {
   console.log(`\n========== Trying sources in order (sorted by success rate): ${sourceRates} ==========`);
   
   // Try each source in sorted order
-  const SOURCE_TIMEOUT = 10000; // 10 seconds per source (reduced from 15s)
+      const SOURCE_TIMEOUT = 7000; // 7 seconds per source - reduced to fail faster and prevent gateway timeouts
   
   for (const source of sortedSources) {
     console.log(`\n========== Trying ${source.toUpperCase()} ==========`);
