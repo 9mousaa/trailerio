@@ -587,14 +587,15 @@ async function extractViaPiped(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout - enough time for Piped to respond
+    const timeout = setTimeout(() => controller.abort(), 3000); // 3s timeout - reduced to fail faster
     const startTime = Date.now();
+    let response = null;
     
     try {
       // Try to get DASH format if available - some instances support format parameter
       let apiUrl = `${instance}/streams/${youtubeKey}`;
       
-      const response = await fetch(apiUrl, {
+      response = await fetch(apiUrl, {
         headers: { 'Accept': 'application/json' },
         signal: controller.signal
       });
@@ -602,6 +603,10 @@ async function extractViaPiped(youtubeKey) {
       const duration = Date.now() - startTime;
       
       if (!response.ok) {
+        // Consume response body to free up connection
+        try {
+          await response.text().catch(() => {});
+        } catch {}
         console.log(`  [Piped] ${instance}: HTTP ${response.status} (${duration}ms)`);
         successTracker.recordFailure('piped', instance);
         return null;
@@ -695,6 +700,12 @@ async function extractViaPiped(youtubeKey) {
       return null;
     } catch (e) {
       clearTimeout(timeout);
+      // Ensure response body is consumed if it exists
+      if (response && response.body) {
+        try {
+          response.body.destroy();
+        } catch {}
+      }
       const duration = Date.now() - startTime;
       const errorType = e.name === 'AbortError' ? 'TIMEOUT' : e.code || 'ERROR';
       console.log(`  [Piped] ${instance}: ${errorType} after ${duration}ms - ${e.message || 'unknown error'}`);
@@ -775,11 +786,12 @@ async function extractViaInvidious(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout - enough time for Invidious to respond
+    const timeout = setTimeout(() => controller.abort(), 3000); // 3s timeout - reduced to fail faster
     const startTime = Date.now();
+    let response = null;
     
     try {
-      const response = await fetch(`${instance}/api/v1/videos/${youtubeKey}`, {
+      response = await fetch(`${instance}/api/v1/videos/${youtubeKey}`, {
         headers: { 'Accept': 'application/json' },
         signal: controller.signal
       });
@@ -787,6 +799,10 @@ async function extractViaInvidious(youtubeKey) {
       const duration = Date.now() - startTime;
       
       if (!response.ok) {
+        // Consume response body to free up connection
+        try {
+          await response.text().catch(() => {});
+        } catch {}
         console.log(`  [Invidious] ${instance}: HTTP ${response.status} (${duration}ms)`);
         successTracker.recordFailure('invidious', instance);
         return null;
@@ -828,6 +844,12 @@ async function extractViaInvidious(youtubeKey) {
       return null;
     } catch (e) {
       clearTimeout(timeout);
+      // Ensure response body is consumed if it exists
+      if (response && response.body) {
+        try {
+          response.body.destroy();
+        } catch {}
+      }
       const duration = Date.now() - startTime;
       const errorType = e.name === 'AbortError' ? 'TIMEOUT' : e.code || 'ERROR';
       console.log(`  [Invidious] ${instance}: ${errorType} after ${duration}ms - ${e.message || 'unknown error'}`);
