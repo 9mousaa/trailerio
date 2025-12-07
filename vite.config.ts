@@ -14,4 +14,14 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  build: {
+    // Optimize build performance
+    minify: 'esbuild', // Faster than terser
+    sourcemap: false, // Disable sourcemaps for faster builds
+    rollupOptions: {
+      output: {
+        manualChunks: undefined, // Disable manual chunking for faster builds
+      },
+    },
+  },
 });
