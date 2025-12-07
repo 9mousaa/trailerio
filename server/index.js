@@ -1735,16 +1735,17 @@ async function resolvePreview(imdbId, type) {
         country: cached.country
       };
     }
-    if (!cached.youtube_key) {
-      console.log('Cache hit: negative cache (no preview found previously)');
-      return { found: false };
+    // If cache exists but has no preview_url, don't use negative cache - always search again
+    if (!cached.preview_url) {
+      console.log('Cache hit: no preview_url found previously, but searching again anyway...');
+    } else {
+      console.log('Cache expired, refreshing...');
     }
-    console.log('Cache expired, refreshing...');
   }
   
   const tmdbMeta = await getTMDBMetadata(imdbId, type);
   if (!tmdbMeta) {
-    setCache(imdbId, { preview_url: null, youtube_key: null, country: 'us' });
+    // Don't cache negative results - always search again
     return { found: false };
   }
   
@@ -1902,13 +1903,7 @@ async function resolvePreview(imdbId, type) {
     }
   }
   
-  setCache(imdbId, {
-    track_id: null,
-    preview_url: null,
-    country: 'us',
-    youtube_key: null
-  });
-  
+  // Don't cache negative results - always search again on next request
   console.log('No preview found from iTunes, YouTube, or Internet Archive');
   return { found: false };
 }
