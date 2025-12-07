@@ -256,7 +256,17 @@ async function searchITunes(params) {
           // Rate limited - will be handled by sequential requests
           return [];
         }
-        console.log(`  [iTunes] Search failed: HTTP ${response.status}`);
+        // For HTTP 400, try to get error details
+        if (response.status === 400) {
+          try {
+            const errorText = await response.text();
+            console.log(`  [iTunes] Search failed: HTTP 400 - ${errorText.substring(0, 200)}`);
+          } catch {
+            console.log(`  [iTunes] Search failed: HTTP 400 (Bad Request - likely invalid entity/parameters)`);
+          }
+        } else {
+          console.log(`  [iTunes] Search failed: HTTP ${response.status}`);
+        }
         return [];
       }
       
@@ -296,14 +306,16 @@ async function searchITunes(params) {
   };
   
   if (type === 'movie') {
-    // Strategy 1: moviePreview entity (most specific for trailers)
-    let results = await trySearch({ media: 'movie', entity: 'moviePreview' }, null);
+    // Strategy 1: Search all movie media types (no entity filter) - this gets everything
+    console.log(`  [iTunes] Strategy 1: Searching with media=movie (no entity filter)`);
+    let results = await trySearch({ media: 'movie' }, null);
     if (results.length > 0) {
-      console.log(`  [iTunes] Found ${results.length} moviePreview results with previews`);
+      console.log(`  [iTunes] Found ${results.length} movie results with previews (no entity filter)`);
       return results;
     }
     
     // Strategy 2: Regular movie search with movieTerm attribute
+    console.log(`  [iTunes] Strategy 2: Searching with media=movie, entity=movie, attribute=movieTerm`);
     results = await trySearch({ media: 'movie', entity: 'movie', attribute: 'movieTerm' }, null);
     if (results.length > 0) {
       console.log(`  [iTunes] Found ${results.length} movie results with previews`);
@@ -311,6 +323,7 @@ async function searchITunes(params) {
     }
     
     // Strategy 3: Movie search without attribute
+    console.log(`  [iTunes] Strategy 3: Searching with media=movie, entity=movie (no attribute)`);
     results = await trySearch({ media: 'movie', entity: 'movie' }, null);
     if (results.length > 0) {
       console.log(`  [iTunes] Found ${results.length} movie results (no attribute)`);
@@ -318,6 +331,7 @@ async function searchITunes(params) {
     }
     
     // Strategy 4: Search all movies, filter by kind
+    console.log(`  [iTunes] Strategy 4: Searching with media=movie, filtering by kind=feature-movie`);
     results = await trySearch({ media: 'movie' }, 'feature-movie');
     if (results.length > 0) {
       console.log(`  [iTunes] Found ${results.length} feature-movie results with previews`);
