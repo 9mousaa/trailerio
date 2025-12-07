@@ -20,6 +20,11 @@ const CACHE_TTL = {
   archive: 720     // Archive URLs are permanent - 30 days (720 hours)
 };
 
+// Memory management: Cache size limits
+const MAX_CACHE_SIZE = 10000; // Maximum cache entries in memory
+const MAX_SUCCESS_TRACKER_ENTRIES = 5000; // Maximum tracker entries per type
+const MAX_JSON_RESPONSE_SIZE = 10 * 1024 * 1024; // 10MB max JSON response size
+
 // Initialize SQLite database for persistent storage
 const dbPath = process.env.DB_PATH || path.join(__dirname, 'data', 'trailerio.db');
 const dbDir = path.dirname(dbPath);
@@ -114,11 +119,6 @@ console.log(`Loaded ${totalTrackerEntries} success tracker entries from database
 
 let activeRequests = 0;
 let totalRequests = 0;
-
-// Memory management: Cache size limits
-const MAX_CACHE_SIZE = 10000; // Maximum cache entries in memory
-const MAX_SUCCESS_TRACKER_ENTRIES = 5000; // Maximum tracker entries per type
-const MAX_JSON_RESPONSE_SIZE = 10 * 1024 * 1024; // 10MB max JSON response size
 
 // Periodic cache cleanup to prevent memory growth
 function cleanupCache() {
