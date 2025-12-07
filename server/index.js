@@ -17,7 +17,8 @@ const STREAM_TIMEOUT = 15000; // 15 seconds - reduced to prevent gateway timeout
 const CACHE_TTL = {
   youtube: 2,      // YouTube URLs (Piped/Invidious) expire quickly - 2 hours
   itunes: 168,     // iTunes URLs are stable - 7 days (168 hours)
-  archive: 720     // Archive URLs are permanent - 30 days (720 hours)
+  archive: 720,    // Archive URLs are permanent - 30 days (720 hours)
+  negative: 1      // Negative results (no preview found) - short TTL to allow retries when sources recover
 };
 
 // Initialize persistent database cache
@@ -1649,6 +1650,9 @@ function setCache(imdbId, data) {
   } else if (data.source) {
     // Use source from data if available
     sourceType = data.source === 'youtube' ? 'youtube' : data.source;
+  } else {
+    // No preview URL and no source = negative result (no preview found)
+    sourceType = 'negative';
   }
   
   const ttlHours = CACHE_TTL[sourceType] || CACHE_TTL.youtube;
