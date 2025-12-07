@@ -9,7 +9,6 @@ services:
       - NODE_ENV=production
       - PORT=3001
       - TMDB_API_KEY=${TMDB_API_KEY:-}
-      - YT_DLP_PROXIES=${YT_DLP_PROXIES:-}
     env_file:
       - .env
     networks:

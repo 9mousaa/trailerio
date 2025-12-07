@@ -3,16 +3,6 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Install Python and yt-dlp for direct YouTube extraction
-# Best practice: Always install latest yt-dlp to get latest anti-blocking fixes and PO token support
-RUN apk add --no-cache python3 py3-pip && \
-    python3 -m venv /opt/venv && \
-    /opt/venv/bin/pip install --no-cache-dir --upgrade pip && \
-    /opt/venv/bin/pip install --no-cache-dir --upgrade yt-dlp && \
-    ln -s /opt/venv/bin/yt-dlp /usr/local/bin/yt-dlp && \
-    yt-dlp --version && \
-    echo "yt-dlp installed successfully"
-
 # Copy server package files
 COPY server/package*.json ./
 

@@ -1,116 +1,14 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
-const { exec } = require('child_process');
-const { promisify } = require('util');
 
-const execAsync = promisify(exec);
 const app = express();
 const PORT = process.env.PORT || 3001;
 const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
 const CACHE_DAYS = 30;
 const MIN_SCORE_THRESHOLD = 0.6;
 const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
-const YT_DLP_TIMEOUT = 4000;
-const STREAM_TIMEOUT = 30000; // 30 seconds - increased for trying multiple Piped instances
-
-// Proxy configuration for yt-dlp
-// Manual proxies (comma-separated list for rotation)
-const MANUAL_PROXIES = process.env.YT_DLP_PROXIES ? 
-  process.env.YT_DLP_PROXIES.split(',').map(p => p.trim()).filter(p => p) : 
-  [];
-
-// Free proxy sources (public APIs that provide working proxies)
-const FREE_PROXY_SOURCES = [
-  'https://api.proxyscrape.com/v2/?request=get&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all',
-  'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt',
-  'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt',
-  'https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt',
-];
-
-// Cache for free proxies (refreshed periodically)
-let cachedFreeProxies = [];
-let freeProxyCacheTime = 0;
-const FREE_PROXY_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
-const MAX_FREE_PROXIES = 20; // Limit to avoid too many
-
-// Combined proxy list (manual + free)
-let allProxies = [...MANUAL_PROXIES];
-let proxyIndex = 0;
-
-// Fetch and test free proxies (disabled by default - free proxies are unreliable)
-async function fetchFreeProxies() {
-  // Only use free proxies if explicitly enabled via environment variable
-  // Free proxies are unreliable and cause timeouts
-  if (process.env.ENABLE_FREE_PROXIES !== 'true') {
-    console.log('Free proxies disabled (set ENABLE_FREE_PROXIES=true to enable)');
-    return MANUAL_PROXIES;
-  }
-
-  // If we have manual proxies, use them only (user preference)
-  if (MANUAL_PROXIES.length > 0) {
-    return MANUAL_PROXIES;
-  }
-
-  // Check cache
-  if (cachedFreeProxies.length > 0 && Date.now() - freeProxyCacheTime < FREE_PROXY_CACHE_TTL) {
-    return cachedFreeProxies;
-  }
-
-  console.log('Fetching free proxies from public APIs...');
-  const workingProxies = [];
-
-  // Try each source
-  for (const source of FREE_PROXY_SOURCES) {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
-      
-      const response = await fetch(source, {
-        signal: controller.signal,
-        headers: { 'User-Agent': 'Mozilla/5.0' }
-      });
-      clearTimeout(timeout);
-
-      if (!response.ok) continue;
-
-      const text = await response.text();
-      const lines = text.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
-
-      // Parse proxies (format: ip:port or http://ip:port)
-      for (const line of lines.slice(0, 50)) { // Test first 50
-        let proxy = line.trim();
-        
-        // Add http:// if missing
-        if (!proxy.startsWith('http://') && !proxy.startsWith('https://') && !proxy.startsWith('socks5://')) {
-          proxy = `http://${proxy}`;
-        }
-
-        // Quick test (just check if format is valid, actual testing happens on use)
-        if (proxy.match(/^https?:\/\/[\d\.]+:\d+$/)) {
-          workingProxies.push(proxy);
-          if (workingProxies.length >= MAX_FREE_PROXIES) break;
-        }
-      }
-
-      if (workingProxies.length >= MAX_FREE_PROXIES) break;
-    } catch (e) {
-      console.log(`  Failed to fetch from ${source}: ${e.message}`);
-      continue;
-    }
-  }
-
-  if (workingProxies.length > 0) {
-    console.log(`  ✓ Found ${workingProxies.length} free proxies`);
-    cachedFreeProxies = workingProxies;
-    freeProxyCacheTime = Date.now();
-    allProxies = [...MANUAL_PROXIES, ...workingProxies];
-    return workingProxies;
-  }
-
-  console.log('  ✗ No free proxies found, using manual proxies only');
-  return MANUAL_PROXIES;
-}
+const STREAM_TIMEOUT = 30000; // 30 seconds
 
 const cache = new Map();
 
@@ -335,9 +233,15 @@ async function searchITunes(params) {
   };
   
   if (type === 'movie') {
-    let results = await trySearch({ media: 'movie', entity: 'movie', attribute: 'movieTerm' }, null);
+    // FIXED: Use moviePreview entity to find movie trailers/previews
+    let results = await trySearch({ media: 'movie', entity: 'moviePreview', attribute: 'movieTerm' }, null);
     if (results.length > 0) return results;
     
+    // Fallback: try without entity restriction
+    results = await trySearch({ media: 'movie', entity: 'movie', attribute: 'movieTerm' }, null);
+    if (results.length > 0) return results;
+    
+    // Last fallback: search all and filter
     results = await trySearch({}, 'feature-movie');
     if (results.length > 0) return results;
   } else {
@@ -447,153 +351,6 @@ function findBestMatch(results, tmdbMeta) {
   return null;
 }
 
-// Track last extraction time to add delays between requests (Piped/Cobalt approach)
-let lastYtDlpExtraction = 0;
-const MIN_EXTRACTION_INTERVAL = 1500; // 1.5 seconds minimum between extractions (Piped approach)
-
-// Rotate user agents to mimic different browsers (Cobalt/Piped approach)
-const USER_AGENTS = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-];
-
-let userAgentIndex = 0;
-function getNextUserAgent() {
-  const ua = USER_AGENTS[userAgentIndex];
-  userAgentIndex = (userAgentIndex + 1) % USER_AGENTS.length;
-  return ua;
-}
-
-async function getNextProxy() {
-  // Refresh free proxies if needed (async, but don't wait)
-  if (MANUAL_PROXIES.length === 0) {
-    fetchFreeProxies().catch(() => {}); // Don't block on errors
-  }
-
-  if (allProxies.length === 0) {
-    // Try to get free proxies synchronously if we have none
-    if (cachedFreeProxies.length > 0) {
-      allProxies = [...MANUAL_PROXIES, ...cachedFreeProxies];
-    }
-  }
-
-  if (allProxies.length === 0) return null;
-  
-  const proxy = allProxies[proxyIndex];
-  proxyIndex = (proxyIndex + 1) % allProxies.length;
-  return proxy;
-}
-
-async function extractViaYtDlp(youtubeKey, retryCount = 0, useProxy = true) {
-  const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
-  const proxyStatus = useProxy ? 'with proxy' : 'without proxy';
-  console.log(`  [yt-dlp] Extracting highest quality for ${youtubeKey}${retryCount > 0 ? ` (retry ${retryCount}, ${proxyStatus})` : ` (${proxyStatus})`}...`);
-  const startTime = Date.now();
-  
-  // Add delay between requests to mimic human behavior (Piped/Cobalt approach)
-  const timeSinceLastExtraction = Date.now() - lastYtDlpExtraction;
-  if (timeSinceLastExtraction < MIN_EXTRACTION_INTERVAL) {
-    const delay = MIN_EXTRACTION_INTERVAL - timeSinceLastExtraction;
-    console.log(`  [yt-dlp] Adding ${delay}ms delay to avoid rate limiting...`);
-    await new Promise(resolve => setTimeout(resolve, delay));
-  }
-  lastYtDlpExtraction = Date.now();
-  
-  try {
-    // Format priority: 4K > 1440p > 1080p > 720p > best (MP4 preferred)
-    const formatString = 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160][ext=mp4]+bestaudio/bestvideo[height<=2160]+bestaudio/bestvideo[height<=1440]+bestaudio/bestvideo[height<=1080]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=2160][ext=mp4]/best[height<=1080][ext=mp4]/best[ext=mp4]/best';
-    
-    // Cobalt/Piped approach: Complete browser headers to mimic real requests
-    const userAgent = getNextUserAgent(); // Rotate user agents
-    const referer = 'https://www.youtube.com/';
-    
-    // Complete header set like Piped/Cobalt use (mimics real browser)
-    const headers = [
-      `User-Agent:${userAgent}`,
-      `Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8`,
-      `Accept-Language:en-US,en;q=0.9`,
-      `Accept-Encoding:gzip, deflate, br`,
-      `Referer:${referer}`,
-      `Origin:https://www.youtube.com`,
-      `DNT:1`,
-      `Connection:keep-alive`,
-      `Upgrade-Insecure-Requests:1`,
-      `Sec-Fetch-Dest:document`,
-      `Sec-Fetch-Mode:navigate`,
-      `Sec-Fetch-Site:same-origin`,
-      `Sec-Fetch-User:?1`
-    ];
-    
-    // Build yt-dlp command with all headers (Cobalt/Piped approach)
-    const headerArgs = headers.map(h => `--add-header "${h}"`).join(' ');
-    
-    // Use mweb client first (most reliable, may not need PO tokens)
-    // Fallback to other clients if mweb fails
-    const clients = ['mweb', 'tv_embedded', 'web_embedded'];
-    const client = clients[retryCount] || 'mweb';
-    
-    // Try with mweb client first (most compatible, less likely to need PO tokens)
-    const extractorArgs = `youtube:player-client=${client}`;
-    
-    // Only use proxy if enabled and we have manual proxies (free proxies are unreliable)
-    let proxy = null;
-    let proxyArg = '';
-    if (useProxy && MANUAL_PROXIES.length > 0) {
-      proxy = await getNextProxy();
-      proxyArg = proxy ? `--proxy "${proxy}"` : '';
-      if (proxy) {
-        console.log(`  [yt-dlp] Using manual proxy: ${proxy.substring(0, 50)}...`);
-      }
-    }
-    
-    const { stdout } = await Promise.race([
-      execAsync(`yt-dlp -f "${formatString}" -g --no-warnings --no-playlist --no-check-certificate --user-agent "${userAgent}" --referer "${referer}" --extractor-args "${extractorArgs}" ${proxyArg} ${headerArgs} "${youtubeUrl}"`, {
-        timeout: YT_DLP_TIMEOUT
-      }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), YT_DLP_TIMEOUT))
-    ]);
-    
-    const url = stdout.trim().split('\n')[0]; // Get first URL (best quality)
-    if (url && url.startsWith('http')) {
-      const elapsed = Date.now() - startTime;
-      console.log(`  ✓ [yt-dlp] Got highest quality URL in ${elapsed}ms`);
-      return url;
-    }
-    
-    console.log(`  ✗ [yt-dlp] No valid URL extracted`);
-    return null;
-  } catch (e) {
-    const elapsed = Date.now() - startTime;
-    const errorMsg = e.message || e.toString();
-    console.log(`  ✗ [yt-dlp] Failed after ${elapsed}ms: ${errorMsg}`);
-    
-    // If proxy failed, retry without proxy (only if we were using proxy)
-    if (useProxy && (errorMsg.includes('Proxy') || errorMsg.includes('Tunnel') || errorMsg.includes('proxy'))) {
-      console.log(`  [yt-dlp] Proxy failed, retrying without proxy...`);
-      return extractViaYtDlp(youtubeKey, retryCount, false);
-    }
-    
-    // Cobalt/Piped approach: Retry with exponential backoff and different clients
-    // Try different YouTube clients (mweb, tv_embedded, web_embedded) to avoid PO token requirements
-    if (retryCount < 2 && (
-      errorMsg.includes('bot') || 
-      errorMsg.includes('Sign in') || 
-      errorMsg.includes('Timeout') ||
-      errorMsg.includes('Failed to extract') ||
-      errorMsg.includes('player response')
-    )) {
-      const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 3000); // Max 3 seconds
-      console.log(`  [yt-dlp] Retrying with different client after ${backoffDelay}ms backoff (attempt ${retryCount + 1}/2)...`);
-      await new Promise(resolve => setTimeout(resolve, backoffDelay));
-      return extractViaYtDlp(youtubeKey, retryCount + 1, useProxy);
-    }
-    
-    return null;
-  }
-}
-
 // ============ PIPED EXTRACTOR ============
 
 const PIPED_INSTANCES = [
@@ -642,40 +399,26 @@ async function extractViaPiped(youtubeKey) {
         const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
         const getQualityRank = (q) => {
           if (!q) return 999;
-          // Check if quality string contains any of our priority resolutions
           const qLower = String(q).toLowerCase();
           const idx = qualityPriority.findIndex(p => qLower.includes(p));
           return idx === -1 ? 998 : idx;
         };
-        
-        // Log available qualities for debugging
-        const availableQualities = data.videoStreams
-          .filter(s => s.mimeType?.startsWith('video/') && s.url)
-          .map(s => s.quality || 'unknown')
-          .join(', ');
-        console.log(`  [Piped] ${instance}: available qualities: ${availableQualities || 'none'}`);
         
         const sorted = [...data.videoStreams]
           .filter(s => s.mimeType?.startsWith('video/') && s.url)
           .sort((a, b) => {
             const rankA = getQualityRank(a.quality);
             const rankB = getQualityRank(b.quality);
-            // Lower rank = higher quality, so sort ascending
             return rankA - rankB;
           });
         
-        // PRIORITY: Highest quality combined stream (no muxing - too much processing)
         // Only return combined streams (video + audio) - skip video-only streams
         if (sorted.length > 0) {
-          // Find highest quality combined stream
           const bestCombined = sorted.find(s => !s.videoOnly);
           if (bestCombined) {
             console.log(`  ✓ [Piped] ${instance}: selected ${bestCombined.quality || 'unknown'} (combined, highest quality)`);
             return { url: bestCombined.url, quality: bestCombined.quality, isDash: false };
           }
-          
-          // If no combined streams available, skip this instance (don't return video-only)
-          console.log(`  [Piped] ${instance}: no combined streams available, skipping`);
           return null;
         }
       }
@@ -687,12 +430,9 @@ async function extractViaPiped(youtubeKey) {
     }
   };
   
-  // Use Promise.allSettled to not fail if some instances timeout
   const results = await Promise.allSettled(PIPED_INSTANCES.map(tryInstance));
-  
-  // Extract successful results
   const successfulResults = results
-    .map((r, idx) => r.status === 'fulfilled' && r.value ? r.value : null)
+    .map((r) => r.status === 'fulfilled' && r.value ? r.value : null)
     .filter(r => r !== null);
   
   if (successfulResults.length === 0) {
@@ -701,32 +441,23 @@ async function extractViaPiped(youtubeKey) {
   }
   
   // Find best quality result (prefer DASH, then highest quality combined stream)
-  let bestResult = null;
   const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
-  
-  // Sort results: DASH first, then by quality (highest first)
   const sortedResults = successfulResults.sort((a, b) => {
-    // DASH is always best
     if (a.isDash && !b.isDash) return -1;
     if (!a.isDash && b.isDash) return 1;
-    // Then by quality (highest first)
     const rankA = qualityPriority.findIndex(p => (a.quality || '').toLowerCase().includes(p));
     const rankB = qualityPriority.findIndex(p => (b.quality || '').toLowerCase().includes(p));
     return (rankA === -1 ? 999 : rankA) - (rankB === -1 ? 999 : rankB);
   });
   
-  // DASH is always best - return immediately
   if (sortedResults.length > 0 && sortedResults[0].isDash) {
     console.log(`  ✓ [Piped] Selected DASH manifest (highest quality available)`);
-    return { url: sortedResults[0].url, isDash: true, quality: 'DASH' };
+    return sortedResults[0];
   }
   
-  // Return best result (highest quality combined stream)
   if (sortedResults.length > 0) {
-    bestResult = sortedResults[0];
-    console.log(`  ✓ [Piped] Got URL from Piped (quality: ${bestResult.quality || 'unknown'}, from ${successfulResults.length}/${PIPED_INSTANCES.length} instances)`);
-    // Return the result object
-    return bestResult;
+    console.log(`  ✓ [Piped] Got URL from Piped (quality: ${sortedResults[0].quality || 'unknown'}, from ${successfulResults.length}/${PIPED_INSTANCES.length} instances)`);
+    return sortedResults[0];
   }
   
   return null;
@@ -762,7 +493,7 @@ async function extractViaInvidious(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000); // 3s timeout per instance (same as Piped)
+    const timeout = setTimeout(() => controller.abort(), 3000);
     
     try {
       const response = await fetch(`${instance}/api/v1/videos/${youtubeKey}`, {
@@ -771,10 +502,7 @@ async function extractViaInvidious(youtubeKey) {
       });
       clearTimeout(timeout);
       
-      if (!response.ok) {
-        console.log(`  [Invidious] ${instance}: HTTP ${response.status}`);
-        return null;
-      }
+      if (!response.ok) return null;
       const data = await response.json();
       
       const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
@@ -796,36 +524,17 @@ async function extractViaInvidious(youtubeKey) {
         }
       }
       
-      if (data.adaptiveFormats?.length > 0) {
-        const videoFormats = data.adaptiveFormats.filter(s => 
-          s.type?.includes('video') || s.mimeType?.startsWith('video/')
-        );
-        
-        const sorted = videoFormats
-          .filter(s => s.container === 'mp4' || s.mimeType?.includes('mp4'))
-          .sort((a, b) => getQualityRank(a.qualityLabel) - getQualityRank(b.qualityLabel));
-        
-        if (sorted.length > 0) {
-          const best = sorted[0];
-          console.log(`  ✓ [Invidious] ${instance}: got ${best.qualityLabel || 'unknown'}`);
-          return best.url;
-        }
-      }
-      
-      console.log(`  [Invidious] ${instance}: no usable streams in response`);
       return null;
     } catch (e) {
       clearTimeout(timeout);
-      console.log(`  [Invidious] ${instance}: error - ${e.message || 'unknown'}`);
       return null;
     }
   };
   
-  // Use Promise.allSettled to not block if some instances hang (same as Piped)
   const results = await Promise.allSettled(INVIDIOUS_INSTANCES.map(tryInstance));
   const validUrl = results
     .filter(r => r.status === 'fulfilled' && r.value !== null)
-    .map(r => r.value)[0]; // Get first valid URL
+    .map(r => r.value)[0];
   
   if (validUrl) {
     console.log(`  ✓ [Invidious] Got URL from Invidious`);
@@ -833,41 +542,6 @@ async function extractViaInvidious(youtubeKey) {
   }
   
   console.log(`  ✗ [Invidious] All instances failed or timed out`);
-  return null;
-}
-
-async function extractYouTubeDirectUrl(youtubeKey) {
-  console.log(`\n========== Extracting YouTube URL for key: ${youtubeKey} ==========`);
-  const startTime = Date.now();
-  
-  // Priority 1: Try yt-dlp first (highest quality)
-  const ytdlpUrl = await extractViaYtDlp(youtubeKey);
-  if (ytdlpUrl) {
-    const elapsed = Date.now() - startTime;
-    console.log(`✓ Got YouTube URL from yt-dlp in ${elapsed}ms`);
-    return ytdlpUrl;
-  }
-  
-  // Priority 2: Try Piped (stable, good quality)
-  console.log(`  yt-dlp failed, trying Piped...`);
-  const pipedUrl = await extractViaPiped(youtubeKey);
-  if (pipedUrl) {
-    const elapsed = Date.now() - startTime;
-    console.log(`✓ Got YouTube URL from Piped in ${elapsed}ms`);
-    return pipedUrl;
-  }
-  
-  // Priority 3: Try Invidious (fallback)
-  console.log(`  Piped failed, trying Invidious...`);
-  const invidiousUrl = await extractViaInvidious(youtubeKey);
-  if (invidiousUrl) {
-    const elapsed = Date.now() - startTime;
-    console.log(`✓ Got YouTube URL from Invidious in ${elapsed}ms`);
-    return invidiousUrl;
-  }
-  
-  const elapsed = Date.now() - startTime;
-  console.log(`✗ Failed to extract YouTube URL from all extractors (took ${elapsed}ms)`);
   return null;
 }
 
@@ -953,20 +627,6 @@ async function resolvePreview(imdbId, type) {
   const cached = getCached(imdbId);
   
   if (cached) {
-    if (cached.youtube_key && !cached.preview_url) {
-      console.log(`Cache hit: YouTube key ${cached.youtube_key}, resolving fresh URL...`);
-      const freshUrl = await extractYouTubeDirectUrl(cached.youtube_key);
-      if (freshUrl) {
-        return {
-          found: true,
-          source: 'youtube',
-          previewUrl: freshUrl,
-          youtubeKey: cached.youtube_key,
-          country: 'yt'
-        };
-      }
-      console.log('Fresh YouTube extraction failed, continuing...');
-    }
     if (cached.preview_url) {
       console.log('Cache hit: returning cached iTunes preview');
       return {
@@ -1006,12 +666,11 @@ async function resolvePreview(imdbId, type) {
     return { ...itunesResult, source: 'itunes' };
   }
   
-  // PRIORITY 2: Try public instances (Piped/Invidious) - more reliable than yt-dlp
+  // PRIORITY 2: Try public instances (Piped/Invidious)
   if (tmdbMeta.youtubeTrailerKey) {
     console.log('\n========== iTunes not found, trying public instances (Piped/Invidious) ==========');
     console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
     
-    // Try Piped first, then Invidious
     const pipedResult = await extractViaPiped(tmdbMeta.youtubeTrailerKey);
     if (pipedResult) {
       setCache(imdbId, {
@@ -1021,7 +680,6 @@ async function resolvePreview(imdbId, type) {
         youtube_key: tmdbMeta.youtubeTrailerKey
       });
       console.log(`✓ Got URL from Piped`);
-      // Handle both string (URL) and object formats
       const pipedUrl = typeof pipedResult === 'string' ? pipedResult : pipedResult.url;
       return {
         found: true,
@@ -1049,26 +707,6 @@ async function resolvePreview(imdbId, type) {
         country: 'yt'
       };
     }
-    
-    // PRIORITY 3: Try yt-dlp as last resort (often blocked)
-    console.log('\n========== Public instances failed, trying yt-dlp (last resort) ==========');
-    const ytdlpUrl = await extractViaYtDlp(tmdbMeta.youtubeTrailerKey);
-    if (ytdlpUrl) {
-      setCache(imdbId, {
-        track_id: null,
-        preview_url: null,
-        country: 'yt',
-        youtube_key: tmdbMeta.youtubeTrailerKey
-      });
-      console.log(`✓ Got URL from yt-dlp`);
-      return {
-        found: true,
-        source: 'youtube',
-        previewUrl: ytdlpUrl,
-        youtubeKey: tmdbMeta.youtubeTrailerKey,
-        country: 'yt'
-      };
-    }
   }
   
   setCache(imdbId, {
@@ -1082,180 +720,15 @@ async function resolvePreview(imdbId, type) {
   return { found: false };
 }
 
-// Initialize free proxies on startup (non-blocking)
-fetchFreeProxies().catch(() => {
-  console.log('Failed to fetch free proxies on startup, will retry on first use');
-});
-
-// Health check endpoint (must be early for load balancer checks)
+// Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', version: '2.0.0' });
 });
 
-// Root endpoint for basic connectivity check
+// Root endpoint
 app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'trailerio-backend', version: '2.0.0' });
 });
-
-// AVPlayer-compatible video proxy endpoint
-app.get('/proxy-video', async (req, res) => {
-  const videoUrl = req.query.url;
-  if (!videoUrl) {
-    return res.status(400).json({ error: 'Missing url parameter' });
-  }
-  
-  console.log(`Proxying video: ${videoUrl.substring(0, 100)}...`);
-  
-  try {
-    // Build headers for upstream request, forwarding Range if present
-    const rangeHeader = req.headers.range;
-    
-    // Detect if this is a Piped/Invidious proxy URL (they need different headers)
-    const isPipedProxy = videoUrl.includes('pipedproxy') || videoUrl.includes('pipedapi');
-    const isInvidious = videoUrl.includes('invidious') || videoUrl.includes('iv.') || videoUrl.includes('yewtu.be');
-    
-    const fetchHeaders = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': '*/*',
-      'Accept-Language': 'en-US,en;q=0.9',
-    };
-    
-    // Piped/Invidious proxy URLs don't need YouTube-specific headers
-    if (!isPipedProxy && !isInvidious) {
-      fetchHeaders['Referer'] = 'https://www.youtube.com/';
-      fetchHeaders['Origin'] = 'https://www.youtube.com';
-    }
-    
-    if (rangeHeader) {
-      fetchHeaders['Range'] = rangeHeader;
-      console.log(`  Range request: ${rangeHeader}`);
-    }
-    
-    // Handle HEAD requests (AVPlayer often sends HEAD first to check availability)
-    if (req.method === 'HEAD') {
-      const headResponse = await fetch(videoUrl, { 
-        method: 'HEAD',
-        headers: fetchHeaders 
-      });
-      
-      // For Piped/Invidious, ensure we get proper Content-Type
-      let contentType = headResponse.headers.get('Content-Type') || '';
-      if (!contentType.includes('video/')) {
-        // If Content-Type is missing or wrong, default to mp4 (most common)
-        contentType = 'video/mp4';
-      }
-      
-      const contentLength = headResponse.headers.get('Content-Length');
-      const acceptRanges = headResponse.headers.get('Accept-Ranges') || 'bytes';
-      
-      // Set headers BEFORE sending response (critical for AVPlayer)
-      res.set({
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-        'Access-Control-Allow-Headers': 'Range',
-        'Content-Type': contentType,
-        'Accept-Ranges': acceptRanges,
-        'Cache-Control': 'public, max-age=3600',
-      });
-      
-      if (contentLength) {
-        res.set('Content-Length', contentLength);
-      }
-      
-      return res.status(headResponse.ok ? 200 : headResponse.status).end();
-    }
-    
-    const videoResponse = await fetch(videoUrl, { headers: fetchHeaders });
-    
-    // Handle both 200 (full content) and 206 (partial content) as success
-    if (!videoResponse.ok && videoResponse.status !== 206) {
-      console.log(`Proxy fetch failed: HTTP ${videoResponse.status}`);
-      if (!res.headersSent) {
-        return res.status(videoResponse.status).json({ error: `Upstream returned ${videoResponse.status}` });
-      }
-      return;
-    }
-    
-    // AVPlayer requires explicit video/mp4 Content-Type
-    // Piped/Invidious might return wrong or missing Content-Type
-    let upstreamContentType = videoResponse.headers.get('Content-Type') || '';
-    
-    // If Content-Type is missing or not video, default to mp4 (AVPlayer requirement)
-    if (!upstreamContentType.includes('video/')) {
-      // Check URL extension as fallback
-      if (videoUrl.includes('.m4v') || videoUrl.includes('.mp4')) {
-        upstreamContentType = 'video/mp4';
-      } else if (videoUrl.includes('.webm')) {
-        upstreamContentType = 'video/webm';
-      } else {
-        upstreamContentType = 'video/mp4'; // Default to mp4 for AVPlayer
-      }
-      console.log(`  ⚠️ Content-Type missing/wrong, using: ${upstreamContentType}`);
-    }
-    
-    const contentLength = videoResponse.headers.get('Content-Length');
-    const contentRange = videoResponse.headers.get('Content-Range');
-    const acceptRanges = videoResponse.headers.get('Accept-Ranges') || 'bytes';
-    
-    // Determine response status - AVPlayer requires 206 for Range requests
-    const isRangeRequest = !!rangeHeader;
-    const isPartialContent = videoResponse.status === 206;
-    const responseStatus = (isRangeRequest || isPartialContent) ? 206 : 200;
-    
-    // Set headers BEFORE piping (critical for AVPlayer - headers must be set before body)
-    // AVPlayer is very strict about header order and presence
-    res.set({
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-      'Access-Control-Allow-Headers': 'Range',
-      'Content-Type': upstreamContentType,
-      'Accept-Ranges': acceptRanges,
-      'Cache-Control': 'public, max-age=3600',
-    });
-    
-    // Content-Length is required for AVPlayer
-    if (contentLength) {
-      res.set('Content-Length', contentLength);
-    } else if (isRangeRequest && contentRange) {
-      // If we have Content-Range, extract length from it (format: "bytes 0-1023/2048")
-      const rangeMatch = contentRange.match(/\/(\d+)/);
-      if (rangeMatch) {
-        res.set('Content-Length', rangeMatch[1]);
-      }
-    }
-    
-    // Forward Content-Range for partial content responses (required for AVPlayer seeking)
-    if (contentRange) {
-      res.set('Content-Range', contentRange);
-    }
-    
-    // Set status BEFORE piping
-    res.status(responseStatus);
-    
-    console.log(`✓ Proxying video, status: ${responseStatus}, type: ${upstreamContentType}, size: ${contentLength || 'chunked'}, range: ${contentRange || 'none'}`);
-    
-    // Stream the video - pipe directly without buffering (critical for AVPlayer)
-    // Don't use res.pipe() - pipe the response body directly
-    videoResponse.body.pipe(res);
-  } catch (e) {
-    console.error('Proxy error:', e);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Failed to proxy video' });
-    }
-  }
-});
-
-// Handle OPTIONS requests for CORS (AVPlayer may send these)
-app.options('/proxy-video', (req, res) => {
-  res.set({
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-    'Access-Control-Allow-Headers': 'Range',
-    'Access-Control-Max-Age': '86400',
-  });
-  res.status(204).end();
-});
-
 
 app.get('/manifest.json', (req, res) => {
   res.json({
@@ -1296,7 +769,6 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     const result = await resolvePreview(id, type);
     clearTimeout(timeout);
     
-    // If timeout already fired, don't send another response
     if (timeoutFired) {
       console.log(`  ⚠️ Timeout already fired, skipping response for ${id}`);
       return;
@@ -1313,25 +785,12 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       
       let finalUrl = result.previewUrl;
       
-      // DASH manifests (.mpd) work directly in AVPlayer - don't proxy them
-      const isDashManifest = result.previewUrl.includes('.mpd') || result.previewUrl.endsWith('/dash');
-      
-      // Piped/Invidious URLs are already proxied and work directly in AVPlayer - don't proxy them again
+      // DASH manifests work directly in AVPlayer
+      const isDashManifest = typeof result.previewUrl === 'object' && result.previewUrl.isDash;
       const isPipedProxy = result.previewUrl.includes('pipedproxy') || result.previewUrl.includes('pipedapi');
       const isInvidiousProxy = result.previewUrl.includes('invidious') || result.previewUrl.includes('iv.') || result.previewUrl.includes('yewtu.be');
       
-      // Only proxy direct googlevideo.com URLs (from yt-dlp)
-      // Piped/Invidious URLs and DASH manifests work directly - don't proxy them
-      const needsProxy = isYouTube && !isDashManifest && !isPipedProxy && !isInvidiousProxy && 
-        result.previewUrl.includes('googlevideo.com') && 
-        !result.previewUrl.includes('video-ssl.itunes.apple.com');
-      
-      if (needsProxy) {
-        const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
-        const host = req.get('x-forwarded-host') || req.get('host') || 'localhost';
-        finalUrl = `${protocol}://${host}/api/proxy-video?url=${encodeURIComponent(result.previewUrl)}`;
-        console.log(`Wrapping googlevideo.com URL in proxy: ${finalUrl.substring(0, 80)}...`);
-      } else if (isDashManifest) {
+      if (isDashManifest) {
         console.log(`Using DASH manifest directly (AVPlayer native support): ${finalUrl.substring(0, 80)}...`);
       } else if (isPipedProxy || isInvidiousProxy) {
         console.log(`Using Piped/Invidious URL directly (already proxied, AVPlayer compatible): ${finalUrl.substring(0, 80)}...`);
@@ -1356,7 +815,6 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   } catch (error) {
     clearTimeout(timeout);
     console.error(`  ✗ Error resolving ${id}:`, error.message || error);
-    console.error('  Stack:', error.stack);
     if (!res.headersSent && !timeoutFired) {
       res.json({ streams: [] });
     }
