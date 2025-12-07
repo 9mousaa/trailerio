@@ -11,6 +11,8 @@ services:
       - TMDB_API_KEY=${TMDB_API_KEY:-}
     env_file:
       - .env
+    # Ensure .env file exists (create from .env.example if missing)
+    # This prevents the container from failing if .env is missing
     networks:
       - trailerio-internal
       - plaio_default

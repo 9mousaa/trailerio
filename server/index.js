@@ -8,7 +8,7 @@ const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
 const CACHE_DAYS = 30;
 const MIN_SCORE_THRESHOLD = 0.6;
 const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
-const STREAM_TIMEOUT = 30000; // 30 seconds
+const STREAM_TIMEOUT = 20000; // 20 seconds - reduced to fail faster
 
 const cache = new Map();
 
@@ -420,7 +420,6 @@ function findBestMatch(results, tmdbMeta) {
 const PIPED_INSTANCES = [
   'https://pipedapi.kavin.rocks',
   'https://pipedapi.r4fo.com',
-  'https://pipedapi.adminforge.de',
   'https://api.piped.projectsegfau.lt',
   'https://pipedapi.in.projectsegfau.lt',
   'https://piped-api.lunar.icu',
@@ -433,6 +432,7 @@ const PIPED_INSTANCES = [
   'https://pipedapi.mha.fi',
   'https://api.piped.private.coffee',
   'https://pipedapi.darkness.services',
+  'https://pipedapi.adminforge.de',
 ];
 
 async function extractViaPiped(youtubeKey) {
@@ -440,12 +440,13 @@ async function extractViaPiped(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 4000);
+    const timeout = setTimeout(() => controller.abort(), 2000); // Reduced to 2s for faster failure
     
     try {
       const response = await fetch(`${instance}/streams/${youtubeKey}`, {
         headers: { 'Accept': 'application/json' },
-        signal: controller.signal
+        signal: controller.signal,
+        timeout: 2000
       });
       clearTimeout(timeout);
       
@@ -531,25 +532,25 @@ async function extractViaPiped(youtubeKey) {
 
 const INVIDIOUS_INSTANCES = [
   'https://invidious.fdn.fr',
+  'https://yewtu.be',
+  'https://vid.puffyan.us',
+  'https://invidious.kavin.rocks',
+  'https://invidious.private.coffee',
+  'https://inv.tux.pizza',
+  'https://invidious.jing.rocks',
+  'https://invidious.darkness.services',
+  'https://invidious.f5.si',
+  'https://inv.perditum.com',
+  'https://invidious.privacyredirect.com',
   'https://iv.ggtyler.dev',
   'https://invidious.einfachzocken.eu',
   'https://invidious.slipfox.xyz',
   'https://inv.zzls.xyz',
-  'https://invidious.private.coffee',
   'https://invidious.baczek.me',
-  'https://inv.tux.pizza',
-  'https://invidious.jing.rocks',
-  'https://invidious.darkness.services',
   'https://yt.drgnz.club',
   'https://invidious.reallyaweso.me',
   'https://inv.nadeko.net',
   'https://invidious.nerdvpn.de',
-  'https://invidious.f5.si',
-  'https://inv.perditum.com',
-  'https://yewtu.be',
-  'https://invidious.privacyredirect.com',
-  'https://vid.puffyan.us',
-  'https://invidious.kavin.rocks',
 ];
 
 async function extractViaInvidious(youtubeKey) {
@@ -557,12 +558,13 @@ async function extractViaInvidious(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
+    const timeout = setTimeout(() => controller.abort(), 2000); // Reduced to 2s for faster failure
     
     try {
       const response = await fetch(`${instance}/api/v1/videos/${youtubeKey}`, {
         headers: { 'Accept': 'application/json' },
-        signal: controller.signal
+        signal: controller.signal,
+        timeout: 2000
       });
       clearTimeout(timeout);
       
@@ -830,7 +832,13 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   }, STREAM_TIMEOUT);
   
   try {
-    const result = await resolvePreview(id, type);
+    // Wrap resolvePreview in a promise race to ensure it doesn't exceed timeout
+    const resolvePromise = resolvePreview(id, type);
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Request timeout')), STREAM_TIMEOUT - 1000)
+    );
+    
+    const result = await Promise.race([resolvePromise, timeoutPromise]);
     clearTimeout(timeout);
     
     if (timeoutFired) {
@@ -878,7 +886,8 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     }
   } catch (error) {
     clearTimeout(timeout);
-    console.error(`  ✗ Error resolving ${id}:`, error.message || error);
+    const isTimeout = error.message === 'Request timeout';
+    console.error(`  ✗ Error resolving ${id}:`, isTimeout ? 'Request timeout' : (error.message || error));
     if (!res.headersSent && !timeoutFired) {
       res.json({ streams: [] });
     }
