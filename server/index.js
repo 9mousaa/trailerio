@@ -14,6 +14,47 @@ const cache = new Map();
 let activeRequests = 0;
 let totalRequests = 0;
 
+// Success rate tracking for smart sorting
+const successTracker = {
+  piped: new Map(), // instance URL -> { success: number, total: number }
+  invidious: new Map(), // instance URL -> { success: number, total: number }
+  itunes: new Map(), // country code -> { success: number, total: number }
+  
+  recordSuccess(type, identifier) {
+    const map = this[type];
+    if (!map.has(identifier)) {
+      map.set(identifier, { success: 0, total: 0 });
+    }
+    const stats = map.get(identifier);
+    stats.success++;
+    stats.total++;
+  },
+  
+  recordFailure(type, identifier) {
+    const map = this[type];
+    if (!map.has(identifier)) {
+      map.set(identifier, { success: 0, total: 0 });
+    }
+    const stats = map.get(identifier);
+    stats.total++;
+  },
+  
+  getSuccessRate(type, identifier) {
+    const map = this[type];
+    const stats = map.get(identifier);
+    if (!stats || stats.total === 0) return 0.5; // Default to 50% for untested
+    return stats.success / stats.total;
+  },
+  
+  sortBySuccessRate(type, list) {
+    return [...list].sort((a, b) => {
+      const rateA = this.getSuccessRate(type, a);
+      const rateB = this.getSuccessRate(type, b);
+      return rateB - rateA; // Sort descending (highest success rate first)
+    });
+  }
+};
+
 app.use(cors());
 app.use(express.json());
 
@@ -493,7 +534,13 @@ const PIPED_INSTANCES = [
 ];
 
 async function extractViaPiped(youtubeKey) {
-  console.log(`  [Piped] Trying ${PIPED_INSTANCES.length} instances for ${youtubeKey}...`);
+  // Sort instances by success rate (highest first)
+  const sortedInstances = successTracker.sortBySuccessRate('piped', PIPED_INSTANCES);
+  const top3 = sortedInstances.slice(0, 3).map(inst => {
+    const rate = successTracker.getSuccessRate('piped', inst);
+    return `${inst.split('//')[1].split('/')[0]} (${(rate * 100).toFixed(0)}%)`;
+  }).join(', ');
+  console.log(`  [Piped] Trying ${sortedInstances.length} instances for ${youtubeKey} (sorted by success rate - top 3: ${top3})...`);
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
@@ -510,6 +557,7 @@ async function extractViaPiped(youtubeKey) {
       
       if (!response.ok) {
         console.log(`  [Piped] ${instance}: HTTP ${response.status} (${duration}ms)`);
+        successTracker.recordFailure('piped', instance);
         return null;
       }
       
@@ -518,6 +566,7 @@ async function extractViaPiped(youtubeKey) {
       if (!contentType || !contentType.includes('application/json')) {
         const text = await response.text();
         console.log(`  [Piped] ${instance}: non-JSON response (${contentType || 'no content-type'}): ${text.substring(0, 100)}`);
+        successTracker.recordFailure('piped', instance);
         return null;
       }
       
@@ -527,6 +576,7 @@ async function extractViaPiped(youtubeKey) {
       // PRIORITY 1: DASH manifest (best for AVPlayer - native support, adaptive streaming, highest quality)
       if (data.dash) {
         console.log(`  ✓ [Piped] ${instance}: got DASH manifest (adaptive quality up to highest available + audio)`);
+        successTracker.recordSuccess('piped', instance);
         return { url: data.dash, isDash: true };
       }
       
@@ -553,36 +603,40 @@ async function extractViaPiped(youtubeKey) {
           const bestCombined = sorted.find(s => !s.videoOnly);
           if (bestCombined) {
             console.log(`  ✓ [Piped] ${instance}: selected ${bestCombined.quality || 'unknown'} (combined, highest quality)`);
+            successTracker.recordSuccess('piped', instance);
             return { url: bestCombined.url, quality: bestCombined.quality, isDash: false };
           }
           // Fallback to video-only if no combined streams available
           const bestVideoOnly = sorted[0];
           console.log(`  ✓ [Piped] ${instance}: selected ${bestVideoOnly.quality || 'unknown'} (video-only, no combined available)`);
+          successTracker.recordSuccess('piped', instance);
           return { url: bestVideoOnly.url, quality: bestVideoOnly.quality, isDash: false };
         }
       }
       
+      successTracker.recordFailure('piped', instance);
       return null;
     } catch (e) {
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
       const errorType = e.name === 'AbortError' ? 'TIMEOUT' : e.code || 'ERROR';
       console.log(`  [Piped] ${instance}: ${errorType} after ${duration}ms - ${e.message || 'unknown error'}`);
+      successTracker.recordFailure('piped', instance);
       return null;
     }
   };
   
-  const results = await Promise.allSettled(PIPED_INSTANCES.map(tryInstance));
+  const results = await Promise.allSettled(sortedInstances.map(tryInstance));
   const successfulResults = results
     .map((r) => r.status === 'fulfilled' && r.value ? r.value : null)
     .filter(r => r !== null);
   
   if (successfulResults.length === 0) {
-    console.log(`  ✗ [Piped] All ${PIPED_INSTANCES.length} instances failed or timed out`);
+    console.log(`  ✗ [Piped] All ${sortedInstances.length} instances failed or timed out`);
     return null;
   }
   
-  console.log(`  ✓ [Piped] ${successfulResults.length}/${PIPED_INSTANCES.length} instances succeeded`);
+  console.log(`  ✓ [Piped] ${successfulResults.length}/${sortedInstances.length} instances succeeded`);
   
   // Find best quality result (prefer DASH, then highest quality combined stream)
   const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
@@ -600,7 +654,7 @@ async function extractViaPiped(youtubeKey) {
   }
   
   if (sortedResults.length > 0) {
-    console.log(`  ✓ [Piped] Got URL from Piped (quality: ${sortedResults[0].quality || 'unknown'}, from ${successfulResults.length}/${PIPED_INSTANCES.length} instances)`);
+    console.log(`  ✓ [Piped] Got URL from Piped (quality: ${sortedResults[0].quality || 'unknown'}, from ${successfulResults.length}/${sortedInstances.length} instances)`);
     return sortedResults[0];
   }
   
@@ -634,7 +688,13 @@ const INVIDIOUS_INSTANCES = [
 ];
 
 async function extractViaInvidious(youtubeKey) {
-  console.log(`  [Invidious] Trying ${INVIDIOUS_INSTANCES.length} instances for ${youtubeKey}...`);
+  // Sort instances by success rate (highest first)
+  const sortedInstances = successTracker.sortBySuccessRate('invidious', INVIDIOUS_INSTANCES);
+  const top3 = sortedInstances.slice(0, 3).map(inst => {
+    const rate = successTracker.getSuccessRate('invidious', inst);
+    return `${inst.split('//')[1].split('/')[0]} (${(rate * 100).toFixed(0)}%)`;
+  }).join(', ');
+  console.log(`  [Invidious] Trying ${sortedInstances.length} instances for ${youtubeKey} (sorted by success rate - top 3: ${top3})...`);
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
@@ -651,6 +711,7 @@ async function extractViaInvidious(youtubeKey) {
       
       if (!response.ok) {
         console.log(`  [Invidious] ${instance}: HTTP ${response.status} (${duration}ms)`);
+        successTracker.recordFailure('invidious', instance);
         return null;
       }
       
@@ -659,6 +720,7 @@ async function extractViaInvidious(youtubeKey) {
       if (!contentType || !contentType.includes('application/json')) {
         const text = await response.text();
         console.log(`  [Invidious] ${instance}: non-JSON response (${contentType || 'no content-type'}): ${text.substring(0, 100)}`);
+        successTracker.recordFailure('invidious', instance);
         return null;
       }
       
@@ -680,31 +742,35 @@ async function extractViaInvidious(youtubeKey) {
         if (sorted.length > 0) {
           const best = sorted[0];
           console.log(`  ✓ [Invidious] ${instance}: got ${best.qualityLabel || 'unknown'}`);
+          successTracker.recordSuccess('invidious', instance);
           return best.url;
         }
       }
       
+      successTracker.recordFailure('invidious', instance);
       return null;
     } catch (e) {
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
       const errorType = e.name === 'AbortError' ? 'TIMEOUT' : e.code || 'ERROR';
       console.log(`  [Invidious] ${instance}: ${errorType} after ${duration}ms - ${e.message || 'unknown error'}`);
+      successTracker.recordFailure('invidious', instance);
       return null;
     }
   };
   
-  const results = await Promise.allSettled(INVIDIOUS_INSTANCES.map(tryInstance));
+  const results = await Promise.allSettled(sortedInstances.map(tryInstance));
   const validUrl = results
     .filter(r => r.status === 'fulfilled' && r.value !== null)
     .map(r => r.value)[0];
   
   if (validUrl) {
-    console.log(`  ✓ [Invidious] Got URL from Invidious (${results.filter(r => r.status === 'fulfilled' && r.value !== null).length}/${INVIDIOUS_INSTANCES.length} instances succeeded)`);
+    const successCount = results.filter(r => r.status === 'fulfilled' && r.value !== null).length;
+    console.log(`  ✓ [Invidious] Got URL from Invidious (${successCount}/${sortedInstances.length} instances succeeded)`);
     return validUrl;
   }
   
-  console.log(`  ✗ [Invidious] All ${INVIDIOUS_INSTANCES.length} instances failed or timed out`);
+  console.log(`  ✗ [Invidious] All ${sortedInstances.length} instances failed or timed out`);
   return null;
 }
 
@@ -971,8 +1037,15 @@ async function multiPassSearch(tmdbMeta) {
   const searchWithCountry = async (title, country) => {
     try {
       const results = await searchITunes({ term: title, country, type: searchType });
-      return results.length > 0 ? { results, country } : null;
+      if (results.length > 0) {
+        successTracker.recordSuccess('itunes', country);
+        return { results, country };
+      } else {
+        successTracker.recordFailure('itunes', country);
+        return null;
+      }
     } catch {
+      successTracker.recordFailure('itunes', country);
       return null;
     }
   };
@@ -983,8 +1056,16 @@ async function multiPassSearch(tmdbMeta) {
     
     let bestOverall = null;
     
+    // Sort countries by success rate (highest first)
+    const sortedCountries = successTracker.sortBySuccessRate('itunes', COUNTRY_VARIANTS);
+    const countryRates = sortedCountries.map(c => {
+      const rate = successTracker.getSuccessRate('itunes', c);
+      return `${c.toUpperCase()} (${(rate * 100).toFixed(0)}%)`;
+    }).join(', ');
+    console.log(`  [iTunes] Searching countries in order: ${countryRates}`);
+    
     // Search countries one at a time with delays to avoid rate limiting
-    for (const country of COUNTRY_VARIANTS) {
+    for (const country of sortedCountries) {
       // Add delay between requests to avoid rate limiting (except first request)
       if (bestOverall) {
         await new Promise(resolve => setTimeout(resolve, 200)); // 200ms delay
