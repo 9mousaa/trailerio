@@ -34,7 +34,7 @@ const Index = () => {
     setTestResult(null);
     
     try {
-      const apiUrl = import.meta.env.VITE_API_URL || `${window.location.origin}/api`;
+      const apiUrl = getApiUrl();
       const response = await fetch(`${apiUrl}/stream/${testType}/${testImdbId}.json`, {
         headers: {
           'Accept': 'application/json'
