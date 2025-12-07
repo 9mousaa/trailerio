@@ -1186,8 +1186,8 @@ async function extractViaInternetArchive(tmdbMeta) {
           }
           
           // Description/subject matching (minor bonus)
-          const allText = `${description} ${subject} ${creator}`.toLowerCase();
-          if (allText.includes(normSearchTitle)) {
+          const descriptionText = `${description} ${subject} ${creator}`.toLowerCase();
+          if (descriptionText.includes(normSearchTitle)) {
             score += 0.1;
           }
           
