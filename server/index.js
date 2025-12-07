@@ -1049,23 +1049,14 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       
       console.log(`  ✓ Returning stream for ${id}: ${finalUrl.substring(0, 80)}...`);
       if (!res.headersSent) {
-        try {
-          res.json({
-            streams: [{
-              name: streamName,
-              title: streamTitle,
-              url: finalUrl
-            }]
-          });
-          console.log(`  ✓ Response sent successfully for ${id}`);
-          return;
-        } catch (e) {
-          console.error(`  ✗ Error sending response for ${id}:`, e.message);
-          if (!res.headersSent) {
-            res.json({ streams: [] });
-          }
-          return;
-        }
+        res.json({
+          streams: [{
+            name: streamName,
+            title: streamTitle,
+            url: finalUrl
+          }]
+        });
+        return;
       }
     }
     
