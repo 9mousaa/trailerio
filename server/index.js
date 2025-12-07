@@ -233,6 +233,16 @@ async function getTMDBMetadata(imdbId, type) {
   const excludeTypes = ['Behind the Scenes', 'Featurette', 'Bloopers', 'Opening Credits'];
   const excludeNames = ['behind', 'featurette', 'bloopers', 'opening', 'credits', 'making of'];
   
+  // Helper function to check if a video is a sign language version
+  const isSignLanguage = (video) => {
+    const name = (video.name || '').toLowerCase();
+    return name.includes('sign language') || 
+           name.includes('asl') || 
+           name.includes('american sign language') ||
+           name.includes('british sign language') ||
+           name.includes('bsl');
+  };
+  
   const filteredVideos = videos.filter(v => {
     if (v.site !== 'YouTube') return false;
     const name = (v.name || '').toLowerCase();
@@ -240,44 +250,82 @@ async function getTMDBMetadata(imdbId, type) {
            !excludeNames.some(exclude => name.includes(exclude));
   });
   
-  // Priority 1: Official Trailer
+  // Priority 1: Official Trailer (excluding sign language versions)
   let trailer = filteredVideos.find(v => 
     v.type === 'Trailer' && 
-    v.official === true
+    v.official === true &&
+    !isSignLanguage(v)
   );
   if (trailer) {
     youtubeTrailerKey = trailer.key;
     console.log(`Found official trailer: ${trailer.name || 'Trailer'}`);
   } else {
-    // Priority 2: Official Teaser
+    // Fallback: Official Trailer (including sign language if no regular one found)
     trailer = filteredVideos.find(v => 
-      v.type === 'Teaser' && 
+      v.type === 'Trailer' && 
       v.official === true
     );
     if (trailer) {
       youtubeTrailerKey = trailer.key;
-      console.log(`Found official teaser: ${trailer.name || 'Teaser'}`);
+      const isASL = isSignLanguage(trailer);
+      console.log(`Found official trailer${isASL ? ' (sign language version)' : ''}: ${trailer.name || 'Trailer'}`);
     } else {
-      // Priority 3: Any Trailer (not official)
-      trailer = filteredVideos.find(v => v.type === 'Trailer');
+      // Priority 2: Official Teaser (excluding sign language)
+      trailer = filteredVideos.find(v => 
+        v.type === 'Teaser' && 
+        v.official === true &&
+        !isSignLanguage(v)
+      );
       if (trailer) {
         youtubeTrailerKey = trailer.key;
-        console.log(`Found trailer: ${trailer.name || 'Trailer'}`);
+        console.log(`Found official teaser: ${trailer.name || 'Teaser'}`);
       } else {
-        // Priority 4: Official Clip
+        // Fallback: Official Teaser (including sign language)
         trailer = filteredVideos.find(v => 
-          v.type === 'Clip' && 
+          v.type === 'Teaser' && 
           v.official === true
         );
         if (trailer) {
           youtubeTrailerKey = trailer.key;
-          console.log(`Found official clip: ${trailer.name || 'Clip'}`);
+          const isASL = isSignLanguage(trailer);
+          console.log(`Found official teaser${isASL ? ' (sign language version)' : ''}: ${trailer.name || 'Teaser'}`);
         } else {
-          // Last resort: Any YouTube video (but prefer official)
-          trailer = filteredVideos.find(v => v.official === true) || filteredVideos[0];
+          // Priority 3: Any Trailer (not official, excluding sign language)
+          trailer = filteredVideos.find(v => 
+            v.type === 'Trailer' && 
+            !isSignLanguage(v)
+          );
           if (trailer) {
             youtubeTrailerKey = trailer.key;
-            console.log(`Found YouTube video: ${trailer.name || 'Video'} (${trailer.type})`);
+            console.log(`Found trailer: ${trailer.name || 'Trailer'}`);
+          } else {
+            // Fallback: Any Trailer (including sign language)
+            trailer = filteredVideos.find(v => v.type === 'Trailer');
+            if (trailer) {
+              youtubeTrailerKey = trailer.key;
+              const isASL = isSignLanguage(trailer);
+              console.log(`Found trailer${isASL ? ' (sign language version)' : ''}: ${trailer.name || 'Trailer'}`);
+            } else {
+              // Priority 4: Official Clip
+              trailer = filteredVideos.find(v => 
+                v.type === 'Clip' && 
+                v.official === true
+              );
+              if (trailer) {
+                youtubeTrailerKey = trailer.key;
+                console.log(`Found official clip: ${trailer.name || 'Clip'}`);
+              } else {
+                // Last resort: Any YouTube video (but prefer official, excluding sign language)
+                trailer = filteredVideos.find(v => v.official === true && !isSignLanguage(v)) || 
+                         filteredVideos.find(v => v.official === true) || 
+                         filteredVideos[0];
+                if (trailer) {
+                  youtubeTrailerKey = trailer.key;
+                  const isASL = isSignLanguage(trailer);
+                  console.log(`Found YouTube video${isASL ? ' (sign language version)' : ''}: ${trailer.name || 'Video'} (${trailer.type})`);
+                }
+              }
+            }
           }
         }
       }
