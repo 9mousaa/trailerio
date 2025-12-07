@@ -1,6 +1,9 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
+const Database = require('better-sqlite3');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -17,19 +20,103 @@ const CACHE_TTL = {
   archive: 720     // Archive URLs are permanent - 30 days (720 hours)
 };
 
+// Initialize SQLite database for persistent storage
+const dbPath = process.env.DB_PATH || path.join(__dirname, 'data', 'trailerio.db');
+const dbDir = path.dirname(dbPath);
+
+// Ensure data directory exists
+if (!fs.existsSync(dbDir)) {
+  fs.mkdirSync(dbDir, { recursive: true });
+}
+
+const db = new Database(dbPath);
+
+// Create tables if they don't exist
+db.exec(`
+  CREATE TABLE IF NOT EXISTS cache (
+    imdb_id TEXT PRIMARY KEY,
+    preview_url TEXT,
+    track_id TEXT,
+    country TEXT,
+    youtube_key TEXT,
+    source_type TEXT,
+    source TEXT,
+    timestamp INTEGER
+  );
+  
+  CREATE TABLE IF NOT EXISTS success_tracker (
+    type TEXT NOT NULL,
+    identifier TEXT NOT NULL,
+    success INTEGER DEFAULT 0,
+    total INTEGER DEFAULT 0,
+    PRIMARY KEY (type, identifier)
+  );
+  
+  CREATE INDEX IF NOT EXISTS idx_cache_timestamp ON cache(timestamp);
+  CREATE INDEX IF NOT EXISTS idx_success_tracker_type ON success_tracker(type);
+`);
+
+// Load cache from database
 const cache = new Map();
+const loadCacheFromDB = db.prepare('SELECT * FROM cache');
+const cacheRows = loadCacheFromDB.all();
+for (const row of cacheRows) {
+  cache.set(row.imdb_id, {
+    preview_url: row.preview_url,
+    track_id: row.track_id,
+    country: row.country,
+    youtube_key: row.youtube_key,
+    source_type: row.source_type,
+    source: row.source,
+    timestamp: row.timestamp
+  });
+}
+console.log(`Loaded ${cache.size} cached items from database`);
+
+// Load success tracker from database
+const loadSuccessTracker = db.prepare('SELECT * FROM success_tracker');
+const trackerRows = loadSuccessTracker.all();
+const successTrackerData = {
+  piped: new Map(),
+  invidious: new Map(),
+  itunes: new Map(),
+  archive: new Map(),
+  sources: new Map()
+};
+
+for (const row of trackerRows) {
+  if (successTrackerData[row.type]) {
+    successTrackerData[row.type].set(row.identifier, {
+      success: row.success,
+      total: row.total
+    });
+  }
+}
+const totalTrackerEntries = Object.values(successTrackerData).reduce((sum, map) => sum + map.size, 0);
+console.log(`Loaded ${totalTrackerEntries} success tracker entries from database`);
+
 let activeRequests = 0;
 let totalRequests = 0;
 
 // Success rate tracking for smart sorting
 const successTracker = {
   // Source-level tracking (overall success rate for each source)
-  sources: new Map(), // 'itunes' | 'piped' | 'invidious' | 'archive' -> { success: number, total: number }
+  sources: successTrackerData.sources || new Map(), // 'itunes' | 'piped' | 'invidious' | 'archive' -> { success: number, total: number }
   // Instance/strategy-level tracking (within each source)
-  piped: new Map(), // instance URL -> { success: number, total: number }
-  invidious: new Map(), // instance URL -> { success: number, total: number }
-  itunes: new Map(), // country code -> { success: number, total: number }
-  archive: new Map(), // strategy ID -> { success: number, total: number }
+  piped: successTrackerData.piped || new Map(), // instance URL -> { success: number, total: number }
+  invidious: successTrackerData.invidious || new Map(), // instance URL -> { success: number, total: number }
+  itunes: successTrackerData.itunes || new Map(), // country code -> { success: number, total: number }
+  archive: successTrackerData.archive || new Map(), // strategy ID -> { success: number, total: number }
+  
+  // Database operations
+  _saveToDB(type, identifier, success, total) {
+    const stmt = db.prepare(`
+      INSERT INTO success_tracker (type, identifier, success, total)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(type, identifier) DO UPDATE SET success = ?, total = ?
+    `);
+    stmt.run(type, identifier, success, total, success, total);
+  },
   
   recordSuccess(type, identifier) {
     const map = this[type];
@@ -39,6 +126,8 @@ const successTracker = {
     const stats = map.get(identifier);
     stats.success++;
     stats.total++;
+    // Save to database
+    this._saveToDB(type, identifier, stats.success, stats.total);
   },
   
   recordFailure(type, identifier) {
@@ -48,6 +137,8 @@ const successTracker = {
     }
     const stats = map.get(identifier);
     stats.total++;
+    // Save to database
+    this._saveToDB(type, identifier, stats.success, stats.total);
   },
   
   getSuccessRate(type, identifier) {
@@ -73,6 +164,8 @@ const successTracker = {
     const stats = this.sources.get(source);
     stats.success++;
     stats.total++;
+    // Save to database
+    this._saveToDB('sources', source, stats.success, stats.total);
   },
   
   recordSourceFailure(source) {
@@ -81,6 +174,8 @@ const successTracker = {
     }
     const stats = this.sources.get(source);
     stats.total++;
+    // Save to database
+    this._saveToDB('sources', source, stats.success, stats.total);
   },
   
   getSourceSuccessRate(source) {
@@ -233,16 +328,6 @@ async function getTMDBMetadata(imdbId, type) {
   const excludeTypes = ['Behind the Scenes', 'Featurette', 'Bloopers', 'Opening Credits'];
   const excludeNames = ['behind', 'featurette', 'bloopers', 'opening', 'credits', 'making of'];
   
-  // Helper function to check if a video is a sign language version
-  const isSignLanguage = (video) => {
-    const name = (video.name || '').toLowerCase();
-    return name.includes('sign language') || 
-           name.includes('asl') || 
-           name.includes('american sign language') ||
-           name.includes('british sign language') ||
-           name.includes('bsl');
-  };
-  
   const filteredVideos = videos.filter(v => {
     if (v.site !== 'YouTube') return false;
     const name = (v.name || '').toLowerCase();
@@ -250,82 +335,44 @@ async function getTMDBMetadata(imdbId, type) {
            !excludeNames.some(exclude => name.includes(exclude));
   });
   
-  // Priority 1: Official Trailer (excluding sign language versions)
+  // Priority 1: Official Trailer
   let trailer = filteredVideos.find(v => 
     v.type === 'Trailer' && 
-    v.official === true &&
-    !isSignLanguage(v)
+    v.official === true
   );
   if (trailer) {
     youtubeTrailerKey = trailer.key;
     console.log(`Found official trailer: ${trailer.name || 'Trailer'}`);
   } else {
-    // Fallback: Official Trailer (including sign language if no regular one found)
+    // Priority 2: Official Teaser
     trailer = filteredVideos.find(v => 
-      v.type === 'Trailer' && 
+      v.type === 'Teaser' && 
       v.official === true
     );
     if (trailer) {
       youtubeTrailerKey = trailer.key;
-      const isASL = isSignLanguage(trailer);
-      console.log(`Found official trailer${isASL ? ' (sign language version)' : ''}: ${trailer.name || 'Trailer'}`);
+      console.log(`Found official teaser: ${trailer.name || 'Teaser'}`);
     } else {
-      // Priority 2: Official Teaser (excluding sign language)
-      trailer = filteredVideos.find(v => 
-        v.type === 'Teaser' && 
-        v.official === true &&
-        !isSignLanguage(v)
-      );
+      // Priority 3: Any Trailer (not official)
+      trailer = filteredVideos.find(v => v.type === 'Trailer');
       if (trailer) {
         youtubeTrailerKey = trailer.key;
-        console.log(`Found official teaser: ${trailer.name || 'Teaser'}`);
+        console.log(`Found trailer: ${trailer.name || 'Trailer'}`);
       } else {
-        // Fallback: Official Teaser (including sign language)
+        // Priority 4: Official Clip
         trailer = filteredVideos.find(v => 
-          v.type === 'Teaser' && 
+          v.type === 'Clip' && 
           v.official === true
         );
         if (trailer) {
           youtubeTrailerKey = trailer.key;
-          const isASL = isSignLanguage(trailer);
-          console.log(`Found official teaser${isASL ? ' (sign language version)' : ''}: ${trailer.name || 'Teaser'}`);
+          console.log(`Found official clip: ${trailer.name || 'Clip'}`);
         } else {
-          // Priority 3: Any Trailer (not official, excluding sign language)
-          trailer = filteredVideos.find(v => 
-            v.type === 'Trailer' && 
-            !isSignLanguage(v)
-          );
+          // Last resort: Any YouTube video (but prefer official)
+          trailer = filteredVideos.find(v => v.official === true) || filteredVideos[0];
           if (trailer) {
             youtubeTrailerKey = trailer.key;
-            console.log(`Found trailer: ${trailer.name || 'Trailer'}`);
-          } else {
-            // Fallback: Any Trailer (including sign language)
-            trailer = filteredVideos.find(v => v.type === 'Trailer');
-            if (trailer) {
-              youtubeTrailerKey = trailer.key;
-              const isASL = isSignLanguage(trailer);
-              console.log(`Found trailer${isASL ? ' (sign language version)' : ''}: ${trailer.name || 'Trailer'}`);
-            } else {
-              // Priority 4: Official Clip
-              trailer = filteredVideos.find(v => 
-                v.type === 'Clip' && 
-                v.official === true
-              );
-              if (trailer) {
-                youtubeTrailerKey = trailer.key;
-                console.log(`Found official clip: ${trailer.name || 'Clip'}`);
-              } else {
-                // Last resort: Any YouTube video (but prefer official, excluding sign language)
-                trailer = filteredVideos.find(v => v.official === true && !isSignLanguage(v)) || 
-                         filteredVideos.find(v => v.official === true) || 
-                         filteredVideos[0];
-                if (trailer) {
-                  youtubeTrailerKey = trailer.key;
-                  const isASL = isSignLanguage(trailer);
-                  console.log(`Found YouTube video${isASL ? ' (sign language version)' : ''}: ${trailer.name || 'Video'} (${trailer.type})`);
-                }
-              }
-            }
+            console.log(`Found YouTube video: ${trailer.name || 'Video'} (${trailer.type})`);
           }
         }
       }
@@ -635,15 +682,11 @@ async function extractViaPiped(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000); // 3s timeout - reduced to fail faster
+    const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout - enough time for Piped to respond
     const startTime = Date.now();
-    let response = null;
     
     try {
-      // Try to get DASH format if available - some instances support format parameter
-      let apiUrl = `${instance}/streams/${youtubeKey}`;
-      
-      response = await fetch(apiUrl, {
+      const response = await fetch(`${instance}/streams/${youtubeKey}`, {
         headers: { 'Accept': 'application/json' },
         signal: controller.signal
       });
@@ -651,10 +694,6 @@ async function extractViaPiped(youtubeKey) {
       const duration = Date.now() - startTime;
       
       if (!response.ok) {
-        // Consume response body to free up connection
-        try {
-          await response.text().catch(() => {});
-        } catch {}
         console.log(`  [Piped] ${instance}: HTTP ${response.status} (${duration}ms)`);
         successTracker.recordFailure('piped', instance);
         return null;
@@ -670,20 +709,13 @@ async function extractViaPiped(youtubeKey) {
       }
       
       const data = await response.json();
-      console.log(`  [Piped] ${instance}: got response (${duration}ms), has dash: ${!!data.dash}, videoStreams: ${data.videoStreams?.length || 0}, audioStreams: ${data.audioStreams?.length || 0}`);
+      console.log(`  [Piped] ${instance}: got response (${duration}ms), has dash: ${!!data.dash}, videoStreams: ${data.videoStreams?.length || 0}`);
       
       // PRIORITY 1: DASH manifest (best for AVPlayer - native support, adaptive streaming, highest quality)
-      // DASH manifests contain both video and audio tracks, allowing adaptive quality selection
       if (data.dash) {
         console.log(`  ✓ [Piped] ${instance}: got DASH manifest (adaptive quality up to highest available + audio)`);
         successTracker.recordSuccess('piped', instance);
         return { url: data.dash, isDash: true };
-      }
-      
-      // Check if we can request DASH format explicitly
-      // Some Piped instances might support format parameter
-      if (!data.dash && data.formats) {
-        console.log(`  [Piped] ${instance}: No DASH in default response, but formats available: ${Object.keys(data.formats || {}).join(', ')}`);
       }
       
       // PRIORITY 2: Video streams (fallback if no DASH)
@@ -696,23 +728,6 @@ async function extractViaPiped(youtubeKey) {
           return idx === -1 ? 998 : idx;
         };
         
-        // Log available qualities for debugging
-        const availableQualities = data.videoStreams
-          .filter(s => s.mimeType?.startsWith('video/') && s.url)
-          .map(s => `${s.quality || 'unknown'}${s.videoOnly ? ' (video-only)' : ' (combined)'}`)
-          .join(', ');
-        console.log(`  [Piped] ${instance}: Available qualities: ${availableQualities}`);
-        
-        // Check if higher quality combined streams are available
-        const combinedQualities = data.videoStreams
-          .filter(s => s.mimeType?.startsWith('video/') && s.url && !s.videoOnly)
-          .map(s => s.quality || 'unknown')
-          .filter(q => q !== 'unknown');
-        const highestCombined = combinedQualities.length > 0 ? combinedQualities[0] : 'none';
-        if (highestCombined === '360p' && data.videoStreams.some(s => s.quality && ['1080p', '720p', '480p'].includes(s.quality))) {
-          console.log(`  [Piped] ${instance}: ⚠️ Higher quality streams (1080p/720p/480p) exist but are video-only. Only 360p combined available.`);
-        }
-        
         const sorted = [...data.videoStreams]
           .filter(s => s.mimeType?.startsWith('video/') && s.url)
           .sort((a, b) => {
@@ -721,18 +736,11 @@ async function extractViaPiped(youtubeKey) {
             return rankA - rankB;
           });
         
-        // Prefer combined streams (video + audio) for AVPlayer compatibility
-        // Note: Higher quality streams (1080p, 720p) are often video-only, 
-        // but we need combined streams for AVPlayer to work without muxing
+        // Prefer combined streams (video + audio), but fall back to video-only if no combined streams exist
         if (sorted.length > 0) {
-          // Find all combined streams and select the highest quality one
-          const combinedStreams = sorted.filter(s => !s.videoOnly);
-          if (combinedStreams.length > 0) {
-            const bestCombined = combinedStreams[0]; // Already sorted by quality
-            console.log(`  ✓ [Piped] ${instance}: selected ${bestCombined.quality || 'unknown'} (combined, highest quality available)`);
-            if (data.audioStreams && data.audioStreams.length > 0) {
-              console.log(`  [Piped] ${instance}: Note: ${data.audioStreams.length} separate audio stream(s) available, but using combined stream for compatibility`);
-            }
+          const bestCombined = sorted.find(s => !s.videoOnly);
+          if (bestCombined) {
+            console.log(`  ✓ [Piped] ${instance}: selected ${bestCombined.quality || 'unknown'} (combined, highest quality)`);
             successTracker.recordSuccess('piped', instance);
             return { url: bestCombined.url, quality: bestCombined.quality, isDash: false };
           }
@@ -748,12 +756,6 @@ async function extractViaPiped(youtubeKey) {
       return null;
     } catch (e) {
       clearTimeout(timeout);
-      // Ensure response body is consumed if it exists
-      if (response && response.body) {
-        try {
-          response.body.destroy();
-        } catch {}
-      }
       const duration = Date.now() - startTime;
       const errorType = e.name === 'AbortError' ? 'TIMEOUT' : e.code || 'ERROR';
       console.log(`  [Piped] ${instance}: ${errorType} after ${duration}ms - ${e.message || 'unknown error'}`);
@@ -834,12 +836,11 @@ async function extractViaInvidious(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000); // 3s timeout - reduced to fail faster
+    const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout - enough time for Invidious to respond
     const startTime = Date.now();
-    let response = null;
     
     try {
-      response = await fetch(`${instance}/api/v1/videos/${youtubeKey}`, {
+      const response = await fetch(`${instance}/api/v1/videos/${youtubeKey}`, {
         headers: { 'Accept': 'application/json' },
         signal: controller.signal
       });
@@ -847,10 +848,6 @@ async function extractViaInvidious(youtubeKey) {
       const duration = Date.now() - startTime;
       
       if (!response.ok) {
-        // Consume response body to free up connection
-        try {
-          await response.text().catch(() => {});
-        } catch {}
         console.log(`  [Invidious] ${instance}: HTTP ${response.status} (${duration}ms)`);
         successTracker.recordFailure('invidious', instance);
         return null;
@@ -892,12 +889,6 @@ async function extractViaInvidious(youtubeKey) {
       return null;
     } catch (e) {
       clearTimeout(timeout);
-      // Ensure response body is consumed if it exists
-      if (response && response.body) {
-        try {
-          response.body.destroy();
-        } catch {}
-      }
       const duration = Date.now() - startTime;
       const errorType = e.name === 'AbortError' ? 'TIMEOUT' : e.code || 'ERROR';
       console.log(`  [Invidious] ${instance}: ${errorType} after ${duration}ms - ${e.message || 'unknown error'}`);
@@ -981,7 +972,7 @@ async function extractViaInternetArchive(tmdbMeta) {
       const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(strategy.query)}&fl=identifier,title,description,date,downloads,creator,subject&sort[]=downloads+desc&rows=20&output=json`;
       
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000); // Reduced from 8s to 5s to fail faster
+      const timeout = setTimeout(() => controller.abort(), 8000);
       const startTime = Date.now();
       
       try {
@@ -1033,147 +1024,64 @@ async function extractViaInternetArchive(tmdbMeta) {
           
           let score = 0;
           
-          // Extract meaningful words (ignore short words, numbers, common words)
-          const searchWords = normSearchTitle.split(' ').filter(w => w.length > 2 && !/^\d+$/.test(w));
-          const titleWords = normTitle.split(' ').filter(w => w.length > 0);
-          const matchingWords = searchWords.filter(word => titleWords.includes(word));
-          const wordMatchRatio = searchWords.length > 0 ? matchingWords.length / searchWords.length : 0;
-          
-          // Filter out video game trailers when searching for TV shows or movies
-          // Check if title/description contains game-related terms that indicate it's a video game
-          const allText = `${title} ${description} ${subject}`.toLowerCase();
-          const isVideoGame = /video game|videogame|gameplay|steam|epic games|nintendo|playstation|xbox|pc game|console game|mobile game|game engine|unity|unreal engine/.test(allText);
-          
-          // Check if "game" appears in a way that suggests it's a video game
-          // For "Game of Thrones", the search title itself contains "game", so we need to be careful
-          // Only filter if there are clear game indicators OR if "game" appears but title doesn't match well
-          const hasGameKeyword = /\bgame\b/.test(allText);
-          const searchTitleHasGame = /\bgame\b/.test(normSearchTitle.toLowerCase());
-          
-          // If the search title itself has "game" (like "Game of Thrones"), only filter if there are clear game indicators
-          // Otherwise, if "game" appears standalone and title doesn't closely match, it might be a game
-          const isLikelyGame = isVideoGame || 
-            (hasGameKeyword && !searchTitleHasGame && wordMatchRatio < 0.7); // "game" in result but not in search, and low match
-          
-          if (isLikelyGame) {
-            console.log(`  [Internet Archive] Skipping video game trailer: "${title}"`);
-            continue; // Skip video game trailers
-          }
-          
-          // Penalize extra words that aren't in the search term (to catch "Batman Beyond: Return of the Joker" for "Joker")
-          // Also check for percentage signs, numbers, and other prefixes that indicate it's not the main title
-          const extraWords = titleWords.filter(w => {
-            const wClean = w.replace(/[%()]/g, '').trim();
-            return wClean.length > 0 && !searchWords.includes(w) && !searchWords.some(sw => w.includes(sw) || sw.includes(w));
-          });
-          // Heavy penalty if there are many extra words (like "Batman Beyond: Return of" for "Joker")
-          const extraWordPenalty = extraWords.length > searchWords.length ? 0.4 : (extraWords.length * 0.15);
-          
-          // Special check: if title starts with percentage or number (like "100% Coco"), it's likely not the main title
-          const titleStartsWithNumberOrPercent = /^[\d%]+/.test(normTitle);
-          if (titleStartsWithNumberOrPercent && !normSearchTitle.match(/^[\d%]+/)) {
-            score -= 0.3; // Penalty for titles starting with numbers/percentages that don't match search
-          }
-          
-          // Check if main title appears early in the result (not buried in subtitle)
-          // For "Batman Beyond: Return of the Joker", "Joker" appears late, which is suspicious
-          const firstWords = titleWords.slice(0, Math.min(5, titleWords.length)).join(' ');
-          const mainTitleInFirstWords = searchWords.filter(w => firstWords.includes(w)).length;
-          const mainTitlePosition = searchWords.length > 0 ? mainTitleInFirstWords / searchWords.length : 0; // 1.0 = all words in first 5, 0.0 = none
-          
-          // Special handling for single-word titles (like "Coco", "Joker")
-          // Require the word to appear in the first 2 words of the result title
-          if (searchWords.length === 1) {
-            const firstTwoWords = titleWords.slice(0, 2).join(' ');
-            if (!firstTwoWords.includes(searchWords[0])) {
-              // Single-word title not in first 2 words - very suspicious (like "Joker" in "Batman Beyond: Return of the Joker")
-              console.log(`  [Internet Archive] Single-word title "${searchWords[0]}" not in first 2 words of "${title}" - rejecting`);
-              continue; // Skip this result entirely
-            }
-          }
-          
           // Title matching (most important) - be more strict
           if (normTitle === normSearchTitle) {
             score += 1.0; // Exact match
           } else if (normTitle === normOriginalTitle) {
             score += 0.9; // Exact match with original title
           } else {
-            // Require high word match ratio AND main title appears early
-            if (wordMatchRatio >= 0.9 && mainTitlePosition >= 0.8) {
-              // Almost all words match and appear early - very likely correct
-              score += 0.8;
-            } else if (wordMatchRatio >= 0.8 && mainTitlePosition >= 0.6) {
-              // Most words match and appear reasonably early
-              score += 0.6;
-            } else if (wordMatchRatio >= 0.6 && mainTitlePosition >= 0.5) {
-              // Good word match with decent position
-              score += 0.4;
+            // Check if title contains the movie title as a complete word (more strict)
+            const searchWords = normSearchTitle.split(' ').filter(w => w.length > 2); // Ignore short words
+            const titleWords = normTitle.split(' ');
+            const matchingWords = searchWords.filter(word => titleWords.includes(word));
+            const wordMatchRatio = searchWords.length > 0 ? matchingWords.length / searchWords.length : 0;
+            
+            if (wordMatchRatio >= 0.8) {
+              // Most words match - likely correct
+              score += 0.7;
             } else if (wordMatchRatio >= 0.5) {
-              // Moderate match
-              score += 0.2;
+              // Half words match - possible match
+              score += 0.4;
             }
             
-            // Apply penalty for extra words
-            score -= extraWordPenalty;
-            
-            // Fuzzy match as secondary check (only if word match is good)
-            if (bestFuzzy > 0.9 && wordMatchRatio > 0.7 && mainTitlePosition > 0.6) {
-              score += 0.2;
-            } else if (bestFuzzy > 0.85 && wordMatchRatio > 0.6 && mainTitlePosition > 0.5) {
-              score += 0.1;
+            // Fuzzy match as secondary check (already calculated above)
+            // Only add fuzzy score if it's high enough and we have some word matches
+            if (bestFuzzy > 0.85 && wordMatchRatio > 0.3) {
+              score += 0.3;
+            } else if (bestFuzzy > 0.9 && wordMatchRatio > 0.5) {
+              score += 0.4;
             }
           }
           
-          // Check if title contains the movie title as a substring (but require it to be significant and early)
+          // Check if title contains the movie title as a substring (but require it to be significant)
           const titleWithoutTrailer = normTitle.split(' trailer')[0].trim();
           const searchWithoutTrailer = normSearchTitle.split(' trailer')[0].trim();
           
-          if (titleWithoutTrailer.includes(searchWithoutTrailer) && searchWithoutTrailer.length >= 5 && mainTitlePosition > 0.5) {
-            score += 0.15;
-          } else if (searchWithoutTrailer.includes(titleWithoutTrailer) && titleWithoutTrailer.length >= 5 && mainTitlePosition > 0.5) {
-            score += 0.15;
+          if (titleWithoutTrailer.includes(searchWithoutTrailer) && searchWithoutTrailer.length >= 5) {
+            score += 0.2; // Reduced from 0.3
+          } else if (searchWithoutTrailer.includes(titleWithoutTrailer) && titleWithoutTrailer.length >= 5) {
+            score += 0.2; // Reduced from 0.3
           }
           
           // Trailer keyword bonus
           const lowerTitle = title.toLowerCase();
           if (lowerTitle.includes('trailer')) {
-            score += 0.15;
+            score += 0.2;
           } else if (lowerTitle.includes('preview') || lowerTitle.includes('teaser')) {
-            score += 0.1;
+            score += 0.15;
           }
           
-          // Year matching - CRITICAL: heavily penalize year mismatches
-          let yearMatch = false;
+          // Year matching
           if (tmdbMeta.year) {
             const yearStr = String(tmdbMeta.year);
-            const yearInTitle = title.includes(yearStr);
-            const yearInDesc = description.includes(yearStr) || subject.includes(yearStr);
-            
-            // Check date field if available
-            let docYear = null;
-            if (doc.date) {
-              docYear = parseInt(doc.date.substring(0, 4));
+            if (title.includes(yearStr) || description.includes(yearStr) || subject.includes(yearStr)) {
+              score += 0.3;
             }
-            
-            if (yearInTitle || yearInDesc || (docYear && Math.abs(docYear - tmdbMeta.year) <= 1)) {
-              yearMatch = true;
-              score += 0.4; // Strong bonus for year match
-            } else {
-              // Heavy penalty for year mismatch (to catch "Batman Beyond: Return of the Joker" (2000) for "Joker" (2019))
-              // Extract year from title if present
-              const yearMatchInTitle = title.match(/\b(19|20)\d{2}\b/);
-              if (yearMatchInTitle) {
-                const foundYear = parseInt(yearMatchInTitle[0]);
-                const yearDiff = Math.abs(foundYear - tmdbMeta.year);
-                if (yearDiff > 2) {
-                  // Year is significantly different - heavy penalty
-                  score -= 0.5;
-                  console.log(`  [Internet Archive] Year mismatch: found ${foundYear}, expected ${tmdbMeta.year} - applying penalty`);
-                }
-              } else if (docYear && Math.abs(docYear - tmdbMeta.year) > 2) {
-                // Year from date field is significantly different
-                score -= 0.5;
-                console.log(`  [Internet Archive] Year mismatch: found ${docYear}, expected ${tmdbMeta.year} - applying penalty`);
+            // Check date field if available
+            if (doc.date) {
+              const docYear = parseInt(doc.date.substring(0, 4));
+              if (docYear && Math.abs(docYear - tmdbMeta.year) <= 1) {
+                score += 0.2;
               }
             }
           }
@@ -1181,18 +1089,15 @@ async function extractViaInternetArchive(tmdbMeta) {
           // Downloads bonus (more popular = more likely to be correct)
           if (doc.downloads) {
             const downloads = parseInt(doc.downloads) || 0;
-            if (downloads > 1000) score += 0.05;
-            if (downloads > 10000) score += 0.05;
+            if (downloads > 1000) score += 0.1;
+            if (downloads > 10000) score += 0.1;
           }
           
-          // Description/subject matching (minor bonus)
-          const descriptionText = `${description} ${subject} ${creator}`.toLowerCase();
-          if (descriptionText.includes(normSearchTitle)) {
-            score += 0.1;
+          // Description/subject matching
+          const allText = `${description} ${subject} ${creator}`.toLowerCase();
+          if (allText.includes(normSearchTitle)) {
+            score += 0.2;
           }
-          
-          // Ensure score doesn't go negative
-          score = Math.max(0, score);
           
           if (score > bestScore) {
             bestScore = score;
@@ -1200,30 +1105,13 @@ async function extractViaInternetArchive(tmdbMeta) {
           }
         }
         
-        // Use higher threshold for matches (0.85 - prioritize accuracy over coverage to avoid false positives)
+        // Use higher threshold for matches (0.75 - prioritize accuracy over coverage to avoid false positives)
         // Require strong title matching to ensure relevance
-        // If year is provided, require year match (or at least no year mismatch penalty)
-        const threshold = 0.85;
         if (bestMatch) {
-          console.log(`  [Internet Archive] Best candidate: "${bestMatch.title}" (score: ${bestScore.toFixed(2)}, threshold: ${threshold})`);
+          console.log(`  [Internet Archive] Best candidate: "${bestMatch.title}" (score: ${bestScore.toFixed(2)}, threshold: 0.75)`);
         }
         
-        // Additional validation: if year is provided, check if the best match has year mismatch
-        let yearMismatch = false;
-        if (bestMatch && tmdbMeta.year) {
-          const yearStr = String(tmdbMeta.year);
-          const title = bestMatch.title || '';
-          const yearMatchInTitle = title.match(/\b(19|20)\d{2}\b/);
-          if (yearMatchInTitle) {
-            const foundYear = parseInt(yearMatchInTitle[0]);
-            if (Math.abs(foundYear - tmdbMeta.year) > 2) {
-              yearMismatch = true;
-              console.log(`  [Internet Archive] Rejecting "${bestMatch.title}" due to year mismatch: found ${foundYear}, expected ${tmdbMeta.year}`);
-            }
-          }
-        }
-        
-        if (bestMatch && bestScore >= threshold && !yearMismatch) {
+        if (bestMatch && bestScore >= 0.75) {
           console.log(`  [Internet Archive] ✓ Best match: "${bestMatch.title}" (score: ${bestScore.toFixed(2)})`);
           // Get the video URL from the item metadata
           const identifier = bestMatch.identifier;
@@ -1486,6 +1374,9 @@ async function getCachedWithValidation(imdbId) {
     if (!isValid) {
       console.log(`  [Cache] ✗ Cached URL is no longer valid, invalidating cache for ${imdbId}`);
       cache.delete(imdbId);
+      // Also delete from database
+      const deleteStmt = db.prepare('DELETE FROM cache WHERE imdb_id = ?');
+      deleteStmt.run(imdbId);
       return null;
     }
     
@@ -1511,11 +1402,39 @@ function setCache(imdbId, data) {
     sourceType = data.source === 'youtube' ? 'youtube' : data.source;
   }
   
-  cache.set(imdbId, {
+  const timestamp = Date.now();
+  const cacheData = {
     ...data,
     source_type: sourceType,
-    timestamp: Date.now()
-  });
+    timestamp: timestamp
+  };
+  
+  // Save to in-memory cache
+  cache.set(imdbId, cacheData);
+  
+  // Save to database
+  const stmt = db.prepare(`
+    INSERT INTO cache (imdb_id, preview_url, track_id, country, youtube_key, source_type, source, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(imdb_id) DO UPDATE SET
+      preview_url = excluded.preview_url,
+      track_id = excluded.track_id,
+      country = excluded.country,
+      youtube_key = excluded.youtube_key,
+      source_type = excluded.source_type,
+      source = excluded.source,
+      timestamp = excluded.timestamp
+  `);
+  stmt.run(
+    imdbId,
+    cacheData.preview_url || null,
+    cacheData.track_id || null,
+    cacheData.country || null,
+    cacheData.youtube_key || null,
+    sourceType,
+    cacheData.source || null,
+    timestamp
+  );
 }
 
 async function resolvePreview(imdbId, type) {

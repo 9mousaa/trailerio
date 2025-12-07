@@ -9,14 +9,12 @@ services:
       - NODE_ENV=production
       - PORT=3001
       - TMDB_API_KEY=${TMDB_API_KEY:-}
-      - DB_PATH=/data/cache.db
     env_file:
       - .env
     # Ensure .env file exists (create from .env.example if missing)
     # This prevents the container from failing if .env is missing
     volumes:
-      # Persist cache database across container recreations
-      - ./cache-data:/data
+      - ./data:/app/data
     networks:
       - trailerio-internal
       - plaio_default
