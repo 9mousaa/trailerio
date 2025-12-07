@@ -10,6 +10,13 @@ const MIN_SCORE_THRESHOLD = 0.6;
 const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
 const STREAM_TIMEOUT = 20000; // 20 seconds - reduced to fail faster
 
+// Cache TTLs by source type (in hours)
+const CACHE_TTL = {
+  youtube: 2,      // YouTube URLs (Piped/Invidious) expire quickly - 2 hours
+  itunes: 168,     // iTunes URLs are stable - 7 days (168 hours)
+  archive: 720     // Archive URLs are permanent - 30 days (720 hours)
+};
+
 const cache = new Map();
 let activeRequests = 0;
 let totalRequests = 0;
@@ -1214,20 +1221,92 @@ async function multiPassSearch(tmdbMeta) {
   return { found: false };
 }
 
+// Quick URL validation - checks if URL is still accessible
+async function validateUrl(url, timeout = 3000) {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    
+    const response = await fetch(url, {
+      method: 'HEAD',
+      signal: controller.signal,
+      headers: {
+        'Range': 'bytes=0-1' // Just check first byte to minimize bandwidth
+      }
+    });
+    
+    clearTimeout(timeoutId);
+    
+    // Accept 200 (OK) or 206 (Partial Content) as valid
+    return response.ok || response.status === 206;
+  } catch (error) {
+    // URL is not accessible
+    return false;
+  }
+}
+
 function getCached(imdbId) {
   const cached = cache.get(imdbId);
   if (cached) {
-    const daysSinceCheck = (Date.now() - cached.timestamp) / (1000 * 60 * 60 * 24);
-    if (daysSinceCheck < CACHE_DAYS) {
+    const hoursSinceCheck = (Date.now() - cached.timestamp) / (1000 * 60 * 60);
+    const sourceType = cached.source_type || 'youtube'; // Default to shortest TTL
+    const ttlHours = CACHE_TTL[sourceType] || CACHE_TTL.youtube;
+    
+    if (hoursSinceCheck < ttlHours) {
       return cached;
     }
   }
   return null;
 }
 
+async function getCachedWithValidation(imdbId) {
+  const cached = getCached(imdbId);
+  if (!cached || !cached.preview_url) {
+    return cached;
+  }
+  
+  // For YouTube URLs, always validate (they expire quickly)
+  // For other sources, only validate if cache is getting old
+  const hoursSinceCheck = (Date.now() - cached.timestamp) / (1000 * 60 * 60);
+  const sourceType = cached.source_type || 'youtube';
+  const ttlHours = CACHE_TTL[sourceType] || CACHE_TTL.youtube;
+  const shouldValidate = sourceType === 'youtube' || hoursSinceCheck > (ttlHours * 0.8); // Validate if 80% through TTL
+  
+  if (shouldValidate) {
+    console.log(`  [Cache] Validating cached URL for ${imdbId} (${sourceType}, ${hoursSinceCheck.toFixed(1)}h old)...`);
+    const isValid = await validateUrl(cached.preview_url);
+    
+    if (!isValid) {
+      console.log(`  [Cache] ✗ Cached URL is no longer valid, invalidating cache for ${imdbId}`);
+      cache.delete(imdbId);
+      return null;
+    }
+    
+    console.log(`  [Cache] ✓ Cached URL is still valid`);
+  }
+  
+  return cached;
+}
+
 function setCache(imdbId, data) {
+  // Determine source type from preview URL
+  let sourceType = 'youtube'; // default
+  if (data.preview_url) {
+    if (data.preview_url.includes('itunes.apple.com') || data.preview_url.includes('video-ssl.itunes')) {
+      sourceType = 'itunes';
+    } else if (data.preview_url.includes('archive.org')) {
+      sourceType = 'archive';
+    } else {
+      sourceType = 'youtube'; // Piped/Invidious
+    }
+  } else if (data.source) {
+    // Use source from data if available
+    sourceType = data.source === 'youtube' ? 'youtube' : data.source;
+  }
+  
   cache.set(imdbId, {
     ...data,
+    source_type: sourceType,
     timestamp: Date.now()
   });
 }
@@ -1235,14 +1314,16 @@ function setCache(imdbId, data) {
 async function resolvePreview(imdbId, type) {
   console.log(`\n========== Resolving ${imdbId} (${type}) ==========`);
   
-  const cached = getCached(imdbId);
+  // Check cache with validation
+  const cached = await getCachedWithValidation(imdbId);
   
   if (cached) {
     if (cached.preview_url) {
-      console.log('Cache hit: returning cached iTunes preview');
+      const sourceType = cached.source_type || 'unknown';
+      console.log(`Cache hit: returning cached ${sourceType} preview (validated)`);
       return {
         found: true,
-        source: 'itunes',
+        source: cached.source || (sourceType === 'itunes' ? 'itunes' : sourceType === 'archive' ? 'archive' : 'youtube'),
         previewUrl: cached.preview_url,
         trackId: cached.track_id,
         country: cached.country
@@ -1294,7 +1375,8 @@ async function resolvePreview(imdbId, type) {
               track_id: itunesResult.trackId,
               preview_url: itunesResult.previewUrl,
               country: itunesResult.country || 'us',
-              youtube_key: tmdbMeta.youtubeTrailerKey || null
+              youtube_key: tmdbMeta.youtubeTrailerKey || null,
+              source: 'itunes'
             });
             console.log(`✓ Found iTunes preview: ${itunesResult.previewUrl}`);
             successTracker.recordSourceSuccess('itunes');
@@ -1312,14 +1394,15 @@ async function resolvePreview(imdbId, type) {
           console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
           const pipedResult = await extractViaPiped(tmdbMeta.youtubeTrailerKey);
           if (pipedResult) {
+            const pipedUrl = typeof pipedResult === 'string' ? pipedResult : pipedResult.url;
             setCache(imdbId, {
               track_id: null,
-              preview_url: null,
+              preview_url: pipedUrl,
               country: 'yt',
-              youtube_key: tmdbMeta.youtubeTrailerKey
+              youtube_key: tmdbMeta.youtubeTrailerKey,
+              source: 'youtube'
             });
             console.log(`✓ Got URL from Piped`);
-            const pipedUrl = typeof pipedResult === 'string' ? pipedResult : pipedResult.url;
             successTracker.recordSourceSuccess('piped');
             return {
               found: true,
@@ -1343,9 +1426,10 @@ async function resolvePreview(imdbId, type) {
           if (invidiousUrl) {
             setCache(imdbId, {
               track_id: null,
-              preview_url: null,
+              preview_url: invidiousUrl,
               country: 'yt',
-              youtube_key: tmdbMeta.youtubeTrailerKey
+              youtube_key: tmdbMeta.youtubeTrailerKey,
+              source: 'youtube'
             });
             console.log(`✓ Got URL from Invidious`);
             successTracker.recordSourceSuccess('invidious');
@@ -1367,7 +1451,8 @@ async function resolvePreview(imdbId, type) {
               track_id: null,
               preview_url: archiveUrl,
               country: 'archive',
-              youtube_key: tmdbMeta.youtubeTrailerKey || null
+              youtube_key: tmdbMeta.youtubeTrailerKey || null,
+              source: 'archive'
             });
             console.log(`✓ Got URL from Internet Archive`);
             successTracker.recordSourceSuccess('archive');
