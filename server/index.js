@@ -440,13 +440,12 @@ async function extractViaPiped(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000); // Reduced to 2s for faster failure
+    const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout - enough time for Piped to respond
     
     try {
       const response = await fetch(`${instance}/streams/${youtubeKey}`, {
         headers: { 'Accept': 'application/json' },
-        signal: controller.signal,
-        timeout: 2000
+        signal: controller.signal
       });
       clearTimeout(timeout);
       
@@ -477,19 +476,22 @@ async function extractViaPiped(youtubeKey) {
             return rankA - rankB;
           });
         
-        // Only return combined streams (video + audio) - skip video-only streams
+        // Prefer combined streams (video + audio), but fall back to video-only if no combined streams exist
         if (sorted.length > 0) {
           const bestCombined = sorted.find(s => !s.videoOnly);
           if (bestCombined) {
             console.log(`  ✓ [Piped] ${instance}: selected ${bestCombined.quality || 'unknown'} (combined, highest quality)`);
             return { url: bestCombined.url, quality: bestCombined.quality, isDash: false };
           }
-          return null;
+          // Fallback to video-only if no combined streams available
+          const bestVideoOnly = sorted[0];
+          console.log(`  ✓ [Piped] ${instance}: selected ${bestVideoOnly.quality || 'unknown'} (video-only, no combined available)`);
+          return { url: bestVideoOnly.url, quality: bestVideoOnly.quality, isDash: false };
         }
       }
       
       return null;
-    } catch {
+    } catch (e) {
       clearTimeout(timeout);
       return null;
     }
@@ -558,13 +560,12 @@ async function extractViaInvidious(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000); // Reduced to 2s for faster failure
+    const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout - enough time for Invidious to respond
     
     try {
       const response = await fetch(`${instance}/api/v1/videos/${youtubeKey}`, {
         headers: { 'Accept': 'application/json' },
-        signal: controller.signal,
-        timeout: 2000
+        signal: controller.signal
       });
       clearTimeout(timeout);
       
