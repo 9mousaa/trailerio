@@ -963,64 +963,126 @@ async function extractViaInternetArchive(tmdbMeta) {
           
           let score = 0;
           
+          // Extract meaningful words (ignore short words, numbers, common words)
+          const searchWords = normSearchTitle.split(' ').filter(w => w.length > 2 && !/^\d+$/.test(w));
+          const titleWords = normTitle.split(' ').filter(w => w.length > 0);
+          const matchingWords = searchWords.filter(word => titleWords.includes(word));
+          const wordMatchRatio = searchWords.length > 0 ? matchingWords.length / searchWords.length : 0;
+          
+          // Penalize extra words that aren't in the search term (to catch "Batman Beyond: Return of the Joker" for "Joker")
+          // Also check for percentage signs, numbers, and other prefixes that indicate it's not the main title
+          const extraWords = titleWords.filter(w => {
+            const wClean = w.replace(/[%()]/g, '').trim();
+            return wClean.length > 0 && !searchWords.includes(w) && !searchWords.some(sw => w.includes(sw) || sw.includes(w));
+          });
+          // Heavy penalty if there are many extra words (like "Batman Beyond: Return of" for "Joker")
+          const extraWordPenalty = extraWords.length > searchWords.length ? 0.4 : (extraWords.length * 0.15);
+          
+          // Special check: if title starts with percentage or number (like "100% Coco"), it's likely not the main title
+          const titleStartsWithNumberOrPercent = /^[\d%]+/.test(normTitle);
+          if (titleStartsWithNumberOrPercent && !normSearchTitle.match(/^[\d%]+/)) {
+            score -= 0.3; // Penalty for titles starting with numbers/percentages that don't match search
+          }
+          
+          // Check if main title appears early in the result (not buried in subtitle)
+          // For "Batman Beyond: Return of the Joker", "Joker" appears late, which is suspicious
+          const firstWords = titleWords.slice(0, Math.min(5, titleWords.length)).join(' ');
+          const mainTitleInFirstWords = searchWords.filter(w => firstWords.includes(w)).length;
+          const mainTitlePosition = searchWords.length > 0 ? mainTitleInFirstWords / searchWords.length : 0; // 1.0 = all words in first 5, 0.0 = none
+          
+          // Special handling for single-word titles (like "Coco", "Joker")
+          // Require the word to appear in the first 2 words of the result title
+          if (searchWords.length === 1) {
+            const firstTwoWords = titleWords.slice(0, 2).join(' ');
+            if (!firstTwoWords.includes(searchWords[0])) {
+              // Single-word title not in first 2 words - very suspicious (like "Joker" in "Batman Beyond: Return of the Joker")
+              console.log(`  [Internet Archive] Single-word title "${searchWords[0]}" not in first 2 words of "${title}" - rejecting`);
+              continue; // Skip this result entirely
+            }
+          }
+          
           // Title matching (most important) - be more strict
           if (normTitle === normSearchTitle) {
             score += 1.0; // Exact match
           } else if (normTitle === normOriginalTitle) {
             score += 0.9; // Exact match with original title
           } else {
-            // Check if title contains the movie title as a complete word (more strict)
-            const searchWords = normSearchTitle.split(' ').filter(w => w.length > 2); // Ignore short words
-            const titleWords = normTitle.split(' ');
-            const matchingWords = searchWords.filter(word => titleWords.includes(word));
-            const wordMatchRatio = searchWords.length > 0 ? matchingWords.length / searchWords.length : 0;
-            
-            if (wordMatchRatio >= 0.8) {
-              // Most words match - likely correct
-              score += 0.7;
-            } else if (wordMatchRatio >= 0.5) {
-              // Half words match - possible match
+            // Require high word match ratio AND main title appears early
+            if (wordMatchRatio >= 0.9 && mainTitlePosition >= 0.8) {
+              // Almost all words match and appear early - very likely correct
+              score += 0.8;
+            } else if (wordMatchRatio >= 0.8 && mainTitlePosition >= 0.6) {
+              // Most words match and appear reasonably early
+              score += 0.6;
+            } else if (wordMatchRatio >= 0.6 && mainTitlePosition >= 0.5) {
+              // Good word match with decent position
               score += 0.4;
+            } else if (wordMatchRatio >= 0.5) {
+              // Moderate match
+              score += 0.2;
             }
             
-            // Fuzzy match as secondary check (already calculated above)
-            // Only add fuzzy score if it's high enough and we have some word matches
-            if (bestFuzzy > 0.85 && wordMatchRatio > 0.3) {
-              score += 0.3;
-            } else if (bestFuzzy > 0.9 && wordMatchRatio > 0.5) {
-              score += 0.4;
+            // Apply penalty for extra words
+            score -= extraWordPenalty;
+            
+            // Fuzzy match as secondary check (only if word match is good)
+            if (bestFuzzy > 0.9 && wordMatchRatio > 0.7 && mainTitlePosition > 0.6) {
+              score += 0.2;
+            } else if (bestFuzzy > 0.85 && wordMatchRatio > 0.6 && mainTitlePosition > 0.5) {
+              score += 0.1;
             }
           }
           
-          // Check if title contains the movie title as a substring (but require it to be significant)
+          // Check if title contains the movie title as a substring (but require it to be significant and early)
           const titleWithoutTrailer = normTitle.split(' trailer')[0].trim();
           const searchWithoutTrailer = normSearchTitle.split(' trailer')[0].trim();
           
-          if (titleWithoutTrailer.includes(searchWithoutTrailer) && searchWithoutTrailer.length >= 5) {
-            score += 0.2; // Reduced from 0.3
-          } else if (searchWithoutTrailer.includes(titleWithoutTrailer) && titleWithoutTrailer.length >= 5) {
-            score += 0.2; // Reduced from 0.3
+          if (titleWithoutTrailer.includes(searchWithoutTrailer) && searchWithoutTrailer.length >= 5 && mainTitlePosition > 0.5) {
+            score += 0.15;
+          } else if (searchWithoutTrailer.includes(titleWithoutTrailer) && titleWithoutTrailer.length >= 5 && mainTitlePosition > 0.5) {
+            score += 0.15;
           }
           
           // Trailer keyword bonus
           const lowerTitle = title.toLowerCase();
           if (lowerTitle.includes('trailer')) {
-            score += 0.2;
-          } else if (lowerTitle.includes('preview') || lowerTitle.includes('teaser')) {
             score += 0.15;
+          } else if (lowerTitle.includes('preview') || lowerTitle.includes('teaser')) {
+            score += 0.1;
           }
           
-          // Year matching
+          // Year matching - CRITICAL: heavily penalize year mismatches
+          let yearMatch = false;
           if (tmdbMeta.year) {
             const yearStr = String(tmdbMeta.year);
-            if (title.includes(yearStr) || description.includes(yearStr) || subject.includes(yearStr)) {
-              score += 0.3;
-            }
+            const yearInTitle = title.includes(yearStr);
+            const yearInDesc = description.includes(yearStr) || subject.includes(yearStr);
+            
             // Check date field if available
+            let docYear = null;
             if (doc.date) {
-              const docYear = parseInt(doc.date.substring(0, 4));
-              if (docYear && Math.abs(docYear - tmdbMeta.year) <= 1) {
-                score += 0.2;
+              docYear = parseInt(doc.date.substring(0, 4));
+            }
+            
+            if (yearInTitle || yearInDesc || (docYear && Math.abs(docYear - tmdbMeta.year) <= 1)) {
+              yearMatch = true;
+              score += 0.4; // Strong bonus for year match
+            } else {
+              // Heavy penalty for year mismatch (to catch "Batman Beyond: Return of the Joker" (2000) for "Joker" (2019))
+              // Extract year from title if present
+              const yearMatchInTitle = title.match(/\b(19|20)\d{2}\b/);
+              if (yearMatchInTitle) {
+                const foundYear = parseInt(yearMatchInTitle[0]);
+                const yearDiff = Math.abs(foundYear - tmdbMeta.year);
+                if (yearDiff > 2) {
+                  // Year is significantly different - heavy penalty
+                  score -= 0.5;
+                  console.log(`  [Internet Archive] Year mismatch: found ${foundYear}, expected ${tmdbMeta.year} - applying penalty`);
+                }
+              } else if (docYear && Math.abs(docYear - tmdbMeta.year) > 2) {
+                // Year from date field is significantly different
+                score -= 0.5;
+                console.log(`  [Internet Archive] Year mismatch: found ${docYear}, expected ${tmdbMeta.year} - applying penalty`);
               }
             }
           }
@@ -1028,15 +1090,18 @@ async function extractViaInternetArchive(tmdbMeta) {
           // Downloads bonus (more popular = more likely to be correct)
           if (doc.downloads) {
             const downloads = parseInt(doc.downloads) || 0;
-            if (downloads > 1000) score += 0.1;
-            if (downloads > 10000) score += 0.1;
+            if (downloads > 1000) score += 0.05;
+            if (downloads > 10000) score += 0.05;
           }
           
-          // Description/subject matching
+          // Description/subject matching (minor bonus)
           const allText = `${description} ${subject} ${creator}`.toLowerCase();
           if (allText.includes(normSearchTitle)) {
-            score += 0.2;
+            score += 0.1;
           }
+          
+          // Ensure score doesn't go negative
+          score = Math.max(0, score);
           
           if (score > bestScore) {
             bestScore = score;
@@ -1044,13 +1109,30 @@ async function extractViaInternetArchive(tmdbMeta) {
           }
         }
         
-        // Use higher threshold for matches (0.75 - prioritize accuracy over coverage to avoid false positives)
+        // Use higher threshold for matches (0.85 - prioritize accuracy over coverage to avoid false positives)
         // Require strong title matching to ensure relevance
+        // If year is provided, require year match (or at least no year mismatch penalty)
+        const threshold = 0.85;
         if (bestMatch) {
-          console.log(`  [Internet Archive] Best candidate: "${bestMatch.title}" (score: ${bestScore.toFixed(2)}, threshold: 0.75)`);
+          console.log(`  [Internet Archive] Best candidate: "${bestMatch.title}" (score: ${bestScore.toFixed(2)}, threshold: ${threshold})`);
         }
         
-        if (bestMatch && bestScore >= 0.75) {
+        // Additional validation: if year is provided, check if the best match has year mismatch
+        let yearMismatch = false;
+        if (bestMatch && tmdbMeta.year) {
+          const yearStr = String(tmdbMeta.year);
+          const title = bestMatch.title || '';
+          const yearMatchInTitle = title.match(/\b(19|20)\d{2}\b/);
+          if (yearMatchInTitle) {
+            const foundYear = parseInt(yearMatchInTitle[0]);
+            if (Math.abs(foundYear - tmdbMeta.year) > 2) {
+              yearMismatch = true;
+              console.log(`  [Internet Archive] Rejecting "${bestMatch.title}" due to year mismatch: found ${foundYear}, expected ${tmdbMeta.year}`);
+            }
+          }
+        }
+        
+        if (bestMatch && bestScore >= threshold && !yearMismatch) {
           console.log(`  [Internet Archive] ✓ Best match: "${bestMatch.title}" (score: ${bestScore.toFixed(2)})`);
           // Get the video URL from the item metadata
           const identifier = bestMatch.identifier;
