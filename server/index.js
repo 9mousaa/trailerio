@@ -786,7 +786,7 @@ function findBestMatch(results, tmdbMeta) {
 // ============ PIPED EXTRACTOR ============
 
 const PIPED_INSTANCES = [
-  'https://pipedapi.kavin.rocks', // Most reliable
+  'https://pipedapi.kavin.rocks',
   'https://pipedapi.in.projectsegfau.lt',
   'https://api.piped.private.coffee',
   'https://pipedapi.tokhmi.xyz',
@@ -795,12 +795,11 @@ const PIPED_INSTANCES = [
   'https://pipedapi.syncpundit.io',
   'https://pipedapi.leptons.xyz',
   'https://pipedapi.darkness.services',
-  // Removed dead instances:
-  // - piped-api.garudalinux.org (DNS)
-  // - piped-api.lunar.icu (expired cert)
-  // - watchapi.whatever.social (cert mismatch)
-  // - pipedapi.mha.fi (DNS)
-  // - pipedapi.adminforge.de (typo in URL)
+  // Additional instances to try
+  'https://pipedapi.frontendfocused.xyz',
+  'https://pipedapi.osphost.fi',
+  'https://pipedapi.smnz.de',
+  'https://pipedapi.privacyredirect.com',
 ];
 
 async function extractViaPiped(youtubeKey) {
@@ -814,7 +813,7 @@ async function extractViaPiped(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout - enough time for Piped to respond
+    const timeout = setTimeout(() => controller.abort(), 3000); // 3s timeout - fail faster
     const startTime = Date.now();
     
     try {
@@ -934,7 +933,7 @@ async function extractViaPiped(youtubeKey) {
 // ============ INVIDIOUS EXTRACTOR ============
 
 const INVIDIOUS_INSTANCES = [
-  'https://yewtu.be', // Most reliable
+  'https://yewtu.be',
   'https://vid.puffyan.us',
   'https://invidious.kavin.rocks',
   'https://invidious.private.coffee',
@@ -946,15 +945,12 @@ const INVIDIOUS_INSTANCES = [
   'https://invidious.slipfox.xyz',
   'https://inv.zzls.xyz',
   'https://inv.nadeko.net',
-  // Removed dead instances:
-  // - invidious.baczek.me (shutdown message)
-  // - invidious.einfachzocken.eu (HTML response)
-  // - invidious.nerdvpn.de (timeout)
-  // - invidious.jing.rocks (DNS)
-  // - invidious.reallyaweso.me (expired cert)
-  // - yt.drgnz.club (DNS)
-  // - iv.ggtyler.dev (HTML response)
-  // - invidious.fdn.fr (DNS)
+  // Additional instances to try
+  'https://invidious.flokinet.to',
+  'https://invidious.osi.kr',
+  'https://invidious.io.lol',
+  'https://invidious.nerdvpn.de',
+  'https://invidious.esmailelbob.xyz',
 ];
 
 async function extractViaInvidious(youtubeKey) {
@@ -968,7 +964,7 @@ async function extractViaInvidious(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout - enough time for Invidious to respond
+    const timeout = setTimeout(() => controller.abort(), 3000); // 3s timeout - fail faster
     const startTime = Date.now();
     
     try {
@@ -1108,12 +1104,48 @@ async function extractViaInternetArchive(tmdbMeta) {
       const startTime = Date.now();
       
       try {
-        const response = await fetch(searchUrl, { signal: controller.signal });
+        // Retry logic for 502 errors (temporary server issues)
+        let response = null;
+        let lastError = null;
+        const maxRetries = 2;
+        
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+          try {
+            const retryController = new AbortController();
+            const retryTimeout = setTimeout(() => retryController.abort(), 8000);
+            response = await fetch(searchUrl, { signal: retryController.signal });
+            clearTimeout(retryTimeout);
+            
+            if (response.ok) {
+              break; // Success, exit retry loop
+            }
+            
+            // If 502 and we have retries left, wait and retry
+            if (response.status === 502 && attempt < maxRetries) {
+              console.log(`  [Internet Archive] HTTP 502 on attempt ${attempt + 1}, retrying...`);
+              await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1))); // Exponential backoff
+              continue;
+            }
+            
+            // Not a retryable error or out of retries
+            break;
+          } catch (fetchError) {
+            lastError = fetchError;
+            if (attempt < maxRetries && fetchError.name !== 'AbortError') {
+              console.log(`  [Internet Archive] Error on attempt ${attempt + 1}, retrying...`);
+              await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+              continue;
+            }
+            throw fetchError;
+          }
+        }
+        
         clearTimeout(timeout);
         const duration = Date.now() - startTime;
         
-        if (!response.ok) {
-          console.log(`  [Internet Archive] Search failed: HTTP ${response.status} (${duration}ms) for strategy "${strategy.description}"`);
+        if (!response || !response.ok) {
+          const status = response ? response.status : 'NO_RESPONSE';
+          console.log(`  [Internet Archive] Search failed: HTTP ${status} (${duration}ms) for strategy "${strategy.description}" after ${maxRetries + 1} attempts`);
           successTracker.recordFailure('archive', strategy.id);
           continue;
         }
@@ -1609,7 +1641,11 @@ async function resolvePreview(imdbId, type) {
   }
   
   // Build list of available sources based on what we have
-  const availableSources = ['itunes'];
+  // Skip iTunes for movies - iTunes doesn't have movie previews, only TV episode previews
+  const availableSources = [];
+  if (type === 'series') {
+    availableSources.push('itunes'); // iTunes works for TV shows
+  }
   if (tmdbMeta.youtubeTrailerKey) {
     availableSources.push('piped', 'invidious');
   }
