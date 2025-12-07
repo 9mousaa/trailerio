@@ -251,28 +251,21 @@ async function searchITunes(params) {
   };
   
   if (type === 'movie') {
-    // Strategy 1: Direct moviePreview search (most specific for trailers)
-    let results = await trySearch({ media: 'movie', entity: 'moviePreview', attribute: 'movieTerm' }, null);
-    if (results.length > 0) {
-      console.log(`  [iTunes] Found ${results.length} moviePreview results`);
-      return results;
-    }
-    
-    // Strategy 2: moviePreview without attribute (broader search)
-    results = await trySearch({ media: 'movie', entity: 'moviePreview' }, null);
-    if (results.length > 0) {
-      console.log(`  [iTunes] Found ${results.length} moviePreview results (no attribute)`);
-      return results;
-    }
-    
-    // Strategy 3: Regular movie search, filter for previews
-    results = await trySearch({ media: 'movie', entity: 'movie', attribute: 'movieTerm' }, null);
+    // Strategy 1: Regular movie search with movieTerm attribute
+    let results = await trySearch({ media: 'movie', entity: 'movie', attribute: 'movieTerm' }, null);
     if (results.length > 0) {
       console.log(`  [iTunes] Found ${results.length} movie results with previews`);
       return results;
     }
     
-    // Strategy 4: Search all movies, filter by kind
+    // Strategy 2: Movie search without attribute
+    results = await trySearch({ media: 'movie', entity: 'movie' }, null);
+    if (results.length > 0) {
+      console.log(`  [iTunes] Found ${results.length} movie results (no attribute)`);
+      return results;
+    }
+    
+    // Strategy 3: Search all movies, filter by kind
     results = await trySearch({ media: 'movie' }, 'feature-movie');
     if (results.length > 0) {
       console.log(`  [iTunes] Found ${results.length} feature-movie results with previews`);
@@ -287,21 +280,14 @@ async function searchITunes(params) {
       return results;
     }
     
-    // Strategy 2: tvSeason (sometimes trailers are in season previews)
-    results = await trySearch({ media: 'tvShow', entity: 'tvSeason', attribute: 'showTerm' }, null);
-    if (results.length > 0) {
-      console.log(`  [iTunes] Found ${results.length} tvSeason results`);
-      return results;
-    }
-    
-    // Strategy 3: tvEpisode without attribute
+    // Strategy 2: tvEpisode without attribute
     results = await trySearch({ media: 'tvShow', entity: 'tvEpisode' }, null);
     if (results.length > 0) {
       console.log(`  [iTunes] Found ${results.length} tvEpisode results (no attribute)`);
       return results;
     }
     
-    // Strategy 4: Search all TV, filter by kind
+    // Strategy 3: Search all TV, filter by kind
     results = await trySearch({ media: 'tvShow' }, 'tv-episode');
     if (results.length > 0) {
       console.log(`  [iTunes] Found ${results.length} tv-episode results with previews`);
