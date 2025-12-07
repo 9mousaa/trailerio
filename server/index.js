@@ -1146,7 +1146,20 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       setTimeout(() => reject(new Error('Request timeout')), STREAM_TIMEOUT - 1000)
     );
     
-    const result = await Promise.race([resolvePromise, timeoutPromise]);
+    const result = await Promise.race([resolvePromise, timeoutPromise]).catch(err => {
+      if (err.message === 'Request timeout') {
+        console.log(`  ⚠️ Request timeout for ${id} - aborting`);
+        clearTimeout(timeout);
+        if (!res.headersSent) {
+          res.json({ streams: [] });
+        }
+        return;
+      }
+      throw err;
+    });
+    
+    if (!result) return; // Timeout was handled
+    
     clearTimeout(timeout);
     
     if (timeoutFired) {
