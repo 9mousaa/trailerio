@@ -192,16 +192,6 @@ function cleanupSuccessTracker() {
   }
 }
 
-// Run cleanup every hour
-setInterval(() => {
-  cleanupCache();
-  cleanupSuccessTracker();
-}, 60 * 60 * 1000); // 1 hour
-
-// Also run cleanup on startup
-cleanupCache();
-cleanupSuccessTracker();
-
 // Memory monitoring endpoint (for debugging)
 app.get('/health', (req, res) => {
   const memUsage = process.memoryUsage();
@@ -324,6 +314,16 @@ const successTracker = {
     });
   }
 };
+
+// Run cleanup every hour (after successTracker is defined)
+setInterval(() => {
+  cleanupCache();
+  cleanupSuccessTracker();
+}, 60 * 60 * 1000); // 1 hour
+
+// Also run cleanup on startup
+cleanupCache();
+cleanupSuccessTracker();
 
 app.use(cors());
 app.use(express.json());
