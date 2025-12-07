@@ -730,24 +730,24 @@ async function extractViaInternetArchive(tmdbMeta) {
             }
             
             const metadata = await metaResponse.json();
-          
-          // Find the best video file (prefer mp4, then webm)
-          const files = metadata.files || [];
-          const videoFiles = files.filter(f => {
-            const format = (f.format || '').toLowerCase();
-            return (format.includes('mp4') || format.includes('webm') || format.includes('h.264')) &&
-                   f.name && !f.name.includes('thumb') && !f.name.includes('sample');
-          });
-          
-          if (videoFiles.length > 0) {
-            // Sort by size (prefer larger files = better quality)
-            videoFiles.sort((a, b) => (b.size || 0) - (a.size || 0));
-            const bestFile = videoFiles[0];
-            const videoUrl = `https://archive.org/download/${identifier}/${encodeURIComponent(bestFile.name)}`;
             
-            console.log(`  ✓ [Internet Archive] Found: "${bestMatch.title}" (${bestFile.format || 'video'})`);
-            return videoUrl;
-          }
+            // Find the best video file (prefer mp4, then webm)
+            const files = metadata.files || [];
+            const videoFiles = files.filter(f => {
+              const format = (f.format || '').toLowerCase();
+              return (format.includes('mp4') || format.includes('webm') || format.includes('h.264')) &&
+                     f.name && !f.name.includes('thumb') && !f.name.includes('sample');
+            });
+            
+            if (videoFiles.length > 0) {
+              // Sort by size (prefer larger files = better quality)
+              videoFiles.sort((a, b) => (b.size || 0) - (a.size || 0));
+              const bestFile = videoFiles[0];
+              const videoUrl = `https://archive.org/download/${identifier}/${encodeURIComponent(bestFile.name)}`;
+              
+              console.log(`  ✓ [Internet Archive] Found: "${bestMatch.title}" (${bestFile.format || 'video'})`);
+              return videoUrl;
+            }
           } catch (metaError) {
             clearTimeout(metaTimeout);
             if (searchTerms.indexOf(searchTerm) === 0) {
