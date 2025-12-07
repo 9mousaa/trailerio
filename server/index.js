@@ -31,6 +31,13 @@ if (!fs.existsSync(dbDir)) {
 
 const db = new Database(dbPath);
 
+// Optimize database for better performance and memory usage
+db.pragma('journal_mode = WAL'); // Write-Ahead Logging for better concurrency
+db.pragma('synchronous = NORMAL'); // Balance between safety and performance
+db.pragma('cache_size = -64000'); // 64MB cache (negative = KB)
+db.pragma('temp_store = MEMORY'); // Store temp tables in memory
+db.pragma('mmap_size = 268435456'); // 256MB memory-mapped I/O
+
 // Create tables if they don't exist
 db.exec(`
   CREATE TABLE IF NOT EXISTS cache (
@@ -56,10 +63,14 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_success_tracker_type ON success_tracker(type);
 `);
 
-// Load cache from database
+// Load cache from database (limit to most recent entries to prevent memory issues)
 const cache = new Map();
-const loadCacheFromDB = db.prepare('SELECT * FROM cache');
-const cacheRows = loadCacheFromDB.all();
+const loadCacheFromDB = db.prepare(`
+  SELECT * FROM cache 
+  ORDER BY timestamp DESC 
+  LIMIT ?
+`);
+const cacheRows = loadCacheFromDB.all(MAX_CACHE_SIZE);
 for (const row of cacheRows) {
   cache.set(row.imdb_id, {
     preview_url: row.preview_url,
@@ -71,11 +82,15 @@ for (const row of cacheRows) {
     timestamp: row.timestamp
   });
 }
-console.log(`Loaded ${cache.size} cached items from database`);
+console.log(`Loaded ${cache.size} cached items from database (limited to ${MAX_CACHE_SIZE} most recent)`);
 
-// Load success tracker from database
-const loadSuccessTracker = db.prepare('SELECT * FROM success_tracker');
-const trackerRows = loadSuccessTracker.all();
+// Load success tracker from database (limit per type to prevent memory issues)
+const loadSuccessTracker = db.prepare(`
+  SELECT * FROM success_tracker 
+  WHERE type = ? 
+  ORDER BY total DESC 
+  LIMIT ?
+`);
 const successTrackerData = {
   piped: new Map(),
   invidious: new Map(),
@@ -84,19 +99,136 @@ const successTrackerData = {
   sources: new Map()
 };
 
-for (const row of trackerRows) {
-  if (successTrackerData[row.type]) {
-    successTrackerData[row.type].set(row.identifier, {
+const trackerTypes = ['piped', 'invidious', 'itunes', 'archive', 'sources'];
+for (const type of trackerTypes) {
+  const rows = loadSuccessTracker.all(type, MAX_SUCCESS_TRACKER_ENTRIES);
+  for (const row of rows) {
+    successTrackerData[type].set(row.identifier, {
       success: row.success,
       total: row.total
     });
   }
 }
 const totalTrackerEntries = Object.values(successTrackerData).reduce((sum, map) => sum + map.size, 0);
-console.log(`Loaded ${totalTrackerEntries} success tracker entries from database`);
+console.log(`Loaded ${totalTrackerEntries} success tracker entries from database (limited to ${MAX_SUCCESS_TRACKER_ENTRIES} per type)`);
 
 let activeRequests = 0;
 let totalRequests = 0;
+
+// Memory management: Cache size limits
+const MAX_CACHE_SIZE = 10000; // Maximum cache entries in memory
+const MAX_SUCCESS_TRACKER_ENTRIES = 5000; // Maximum tracker entries per type
+const MAX_JSON_RESPONSE_SIZE = 10 * 1024 * 1024; // 10MB max JSON response size
+
+// Periodic cache cleanup to prevent memory growth
+function cleanupCache() {
+  const now = Date.now();
+  let cleaned = 0;
+  
+  for (const [imdbId, cached] of cache.entries()) {
+    const hoursSinceCheck = (now - cached.timestamp) / (1000 * 60 * 60);
+    const sourceType = cached.source_type || 'youtube';
+    const ttlHours = CACHE_TTL[sourceType] || CACHE_TTL.youtube;
+    
+    // Remove expired entries
+    if (hoursSinceCheck >= ttlHours) {
+      cache.delete(imdbId);
+      const deleteStmt = db.prepare('DELETE FROM cache WHERE imdb_id = ?');
+      deleteStmt.run(imdbId);
+      cleaned++;
+    }
+  }
+  
+  // If cache is still too large, remove oldest entries
+  if (cache.size > MAX_CACHE_SIZE) {
+    const entries = Array.from(cache.entries())
+      .sort((a, b) => a[1].timestamp - b[1].timestamp);
+    
+    const toRemove = entries.slice(0, cache.size - MAX_CACHE_SIZE);
+    for (const [imdbId] of toRemove) {
+      cache.delete(imdbId);
+      const deleteStmt = db.prepare('DELETE FROM cache WHERE imdb_id = ?');
+      deleteStmt.run(imdbId);
+      cleaned++;
+    }
+  }
+  
+  if (cleaned > 0) {
+    console.log(`[Memory] Cleaned up ${cleaned} cache entries (current size: ${cache.size})`);
+  }
+}
+
+// Cleanup success tracker to prevent unbounded growth
+function cleanupSuccessTracker() {
+  const trackerTypes = ['piped', 'invidious', 'itunes', 'archive', 'sources'];
+  
+  for (const type of trackerTypes) {
+    const map = successTracker[type];
+    if (!map || map.size <= MAX_SUCCESS_TRACKER_ENTRIES) {
+      continue;
+    }
+    
+    // Keep entries with highest total (most active)
+    const entries = Array.from(map.entries())
+      .sort((a, b) => b[1].total - a[1].total)
+      .slice(0, MAX_SUCCESS_TRACKER_ENTRIES);
+    
+    map.clear();
+    for (const [identifier, stats] of entries) {
+      map.set(identifier, stats);
+    }
+    
+    // Also clean database - keep only the entries we're keeping
+    if (entries.length > 0) {
+      const placeholders = entries.map(() => '?').join(',');
+      const stmt = db.prepare(`DELETE FROM success_tracker WHERE type = ? AND identifier NOT IN (${placeholders})`);
+      stmt.run(type, ...entries.map(e => e[0]));
+    } else {
+      const stmt = db.prepare('DELETE FROM success_tracker WHERE type = ?');
+      stmt.run(type);
+    }
+    
+    console.log(`[Memory] Cleaned up success tracker for ${type} (kept ${map.size} entries)`);
+  }
+}
+
+// Run cleanup every hour
+setInterval(() => {
+  cleanupCache();
+  cleanupSuccessTracker();
+}, 60 * 60 * 1000); // 1 hour
+
+// Also run cleanup on startup
+cleanupCache();
+cleanupSuccessTracker();
+
+// Memory monitoring endpoint (for debugging)
+app.get('/health', (req, res) => {
+  const memUsage = process.memoryUsage();
+  res.json({
+    memory: {
+      rss: `${Math.round(memUsage.rss / 1024 / 1024)}MB`,
+      heapTotal: `${Math.round(memUsage.heapTotal / 1024 / 1024)}MB`,
+      heapUsed: `${Math.round(memUsage.heapUsed / 1024 / 1024)}MB`,
+      external: `${Math.round(memUsage.external / 1024 / 1024)}MB`
+    },
+    cache: {
+      size: cache.size,
+      maxSize: MAX_CACHE_SIZE
+    },
+    successTracker: {
+      piped: successTracker.piped.size,
+      invidious: successTracker.invidious.size,
+      itunes: successTracker.itunes.size,
+      archive: successTracker.archive.size,
+      sources: successTracker.sources.size
+    },
+    requests: {
+      active: activeRequests,
+      total: totalRequests
+    }
+  });
+});
 
 // Success rate tracking for smart sorting
 const successTracker = {
@@ -1128,6 +1260,14 @@ async function extractViaInternetArchive(tmdbMeta) {
             clearTimeout(metaTimeout);
             if (!metaResponse.ok) {
               console.log(`  [Internet Archive] Metadata fetch failed: HTTP ${metaResponse.status} for "${bestMatch.title}"`);
+              successTracker.recordFailure('archive', strategy.id);
+              continue;
+            }
+            
+            // Check response size to prevent memory issues
+            const contentLength = metaResponse.headers.get('content-length');
+            if (contentLength && parseInt(contentLength) > MAX_JSON_RESPONSE_SIZE) {
+              console.log(`  [Internet Archive] Metadata too large (${Math.round(parseInt(contentLength) / 1024 / 1024)}MB), skipping`);
               successTracker.recordFailure('archive', strategy.id);
               continue;
             }
