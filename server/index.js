@@ -713,10 +713,15 @@ async function extractViaInternetArchive(tmdbMeta) {
           const identifier = bestMatch.identifier;
           const metadataUrl = `https://archive.org/metadata/${identifier}`;
           
-          const metaResponse = await fetch(metadataUrl, { signal: controller.signal });
-          if (!metaResponse.ok) continue;
+          const metaController = new AbortController();
+          const metaTimeout = setTimeout(() => metaController.abort(), 5000);
           
-          const metadata = await metaResponse.json();
+          try {
+            const metaResponse = await fetch(metadataUrl, { signal: metaController.signal });
+            clearTimeout(metaTimeout);
+            if (!metaResponse.ok) continue;
+            
+            const metadata = await metaResponse.json();
           
           // Find the best video file (prefer mp4, then webm)
           const files = metadata.files || [];
@@ -734,6 +739,13 @@ async function extractViaInternetArchive(tmdbMeta) {
             
             console.log(`  ✓ [Internet Archive] Found: "${bestMatch.title}" (${bestFile.format || 'video'})`);
             return videoUrl;
+          }
+          } catch (metaError) {
+            clearTimeout(metaTimeout);
+            if (searchTerms.indexOf(searchTerm) === 0) {
+              console.log(`  [Internet Archive] Metadata fetch error: ${metaError.message || 'timeout'}`);
+            }
+            continue;
           }
         }
       } catch (e) {
@@ -1043,13 +1055,23 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       
       console.log(`  ✓ Returning stream for ${id}: ${finalUrl.substring(0, 80)}...`);
       if (!res.headersSent) {
-        return res.json({
-          streams: [{
-            name: streamName,
-            title: streamTitle,
-            url: finalUrl
-          }]
-        });
+        try {
+          res.json({
+            streams: [{
+              name: streamName,
+              title: streamTitle,
+              url: finalUrl
+            }]
+          });
+          console.log(`  ✓ Response sent successfully for ${id}`);
+          return;
+        } catch (e) {
+          console.error(`  ✗ Error sending response for ${id}:`, e.message);
+          if (!res.headersSent) {
+            res.json({ streams: [] });
+          }
+          return;
+        }
       }
     }
     
