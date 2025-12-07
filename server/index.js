@@ -455,6 +455,17 @@ async function extractViaPiped(youtubeKey) {
       clearTimeout(timeout);
       
       if (!response.ok) return null;
+      
+      // Check if response is actually JSON before parsing
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await response.text();
+        if (PIPED_INSTANCES.indexOf(instance) < 2) {
+          console.log(`  [Piped] ${instance} returned non-JSON: ${text.substring(0, 50)}`);
+        }
+        return null;
+      }
+      
       const data = await response.json();
       
       // PRIORITY 1: DASH manifest (best for AVPlayer - native support, adaptive streaming, highest quality)
