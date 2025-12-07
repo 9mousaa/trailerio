@@ -649,53 +649,127 @@ async function extractViaInternetArchive(tmdbMeta) {
   console.log(`  [Internet Archive] Searching for "${tmdbMeta.title}" (${tmdbMeta.year || ''})...`);
   
   try {
-    // Search Internet Archive for trailers
-    // Search in movie_trailers collection with the movie title
-    const searchTerms = [
-      `${tmdbMeta.title} trailer ${tmdbMeta.year || ''}`,
-      `${tmdbMeta.title} trailer`,
-      `${tmdbMeta.originalTitle} trailer ${tmdbMeta.year || ''}`
-    ];
+    // Build search queries - use better Internet Archive query syntax
+    const titleQuery = tmdbMeta.title.replace(/[^\w\s]/g, ' ').trim().replace(/\s+/g, ' ');
+    const yearQuery = tmdbMeta.year ? ` AND year:${tmdbMeta.year}` : '';
     
-    for (const searchTerm of searchTerms) {
-      const query = encodeURIComponent(searchTerm);
-      // Search in movie_trailers collection, limit to 10 results, sorted by downloads
-      const searchUrl = `https://archive.org/advancedsearch.php?q=collection:movie_trailers+AND+${query}&fl=identifier,title,description,date,downloads&sort[]=downloads+desc&rows=10&output=json`;
+    // Try multiple search strategies
+    const searchQueries = [
+      // Strategy 1: Title + year in movie_trailers collection (most specific)
+      `collection:movie_trailers AND title:${encodeURIComponent(titleQuery)}${yearQuery}`,
+      // Strategy 2: Title in movie_trailers (no year)
+      `collection:movie_trailers AND title:${encodeURIComponent(titleQuery)}`,
+      // Strategy 3: Title + "trailer" in all collections
+      `title:${encodeURIComponent(titleQuery + ' trailer')}${yearQuery}`,
+      // Strategy 4: Title + "trailer" (no year)
+      `title:${encodeURIComponent(titleQuery + ' trailer')}`,
+      // Strategy 5: Original title if different
+      tmdbMeta.originalTitle && tmdbMeta.originalTitle !== tmdbMeta.title
+        ? `collection:movie_trailers AND title:${encodeURIComponent(tmdbMeta.originalTitle.replace(/[^\w\s]/g, ' ').trim())}${yearQuery}`
+        : null
+    ].filter(q => q !== null);
+    
+    for (const query of searchQueries) {
+      // Use advancedsearch API with better field selection
+      const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(query)}&fl=identifier,title,description,date,downloads,creator,subject&sort[]=downloads+desc&rows=20&output=json`;
       
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 8000);
+      const startTime = Date.now();
       
       try {
         const response = await fetch(searchUrl, { signal: controller.signal });
         clearTimeout(timeout);
+        const duration = Date.now() - startTime;
         
-        if (!response.ok) continue;
+        if (!response.ok) {
+          console.log(`  [Internet Archive] Search failed: HTTP ${response.status} (${duration}ms)`);
+          continue;
+        }
         
         const data = await response.json();
         const docs = data.response?.docs || [];
         
+        console.log(`  [Internet Archive] Query returned ${docs.length} results (${duration}ms)`);
+        
         if (docs.length === 0) continue;
         
-        // Find best match by title similarity
+        // Find best match using fuzzy matching (like iTunes)
         let bestMatch = null;
         let bestScore = 0;
         
         for (const doc of docs) {
-          const title = (doc.title || '').toLowerCase();
-          const description = (doc.description || '').toLowerCase();
-          const searchTitle = tmdbMeta.title.toLowerCase();
+          const title = doc.title || '';
+          const description = doc.description || '';
+          const creator = doc.creator || '';
+          const subject = Array.isArray(doc.subject) ? doc.subject.join(' ') : (doc.subject || '');
           
-          // Score based on title match
+          // Use fuzzy matching for better accuracy
+          const normTitle = normalizeTitle(title);
+          const normSearchTitle = normalizeTitle(tmdbMeta.title);
+          const normOriginalTitle = normalizeTitle(tmdbMeta.originalTitle);
+          
           let score = 0;
-          if (title.includes(searchTitle) || searchTitle.includes(title.split(' trailer')[0])) {
-            score += 0.8;
+          
+          // Title matching (most important)
+          if (normTitle === normSearchTitle) {
+            score += 1.0; // Exact match
+          } else if (normTitle === normOriginalTitle) {
+            score += 0.9; // Exact match with original title
+          } else {
+            // Fuzzy match
+            const titleFuzzy = fuzzyMatch(normTitle, normSearchTitle);
+            const originalFuzzy = fuzzyMatch(normTitle, normOriginalTitle);
+            const bestFuzzy = Math.max(titleFuzzy, originalFuzzy);
+            
+            if (bestFuzzy > 0.9) {
+              score += 0.8;
+            } else if (bestFuzzy > 0.7) {
+              score += 0.6;
+            } else if (bestFuzzy > 0.5) {
+              score += 0.4;
+            }
           }
-          if (title.includes('trailer')) {
-            score += 0.2;
-          }
-          // Prefer items with year match
-          if (tmdbMeta.year && (title.includes(tmdbMeta.year) || description.includes(tmdbMeta.year))) {
+          
+          // Check if title contains the movie title (partial match)
+          if (normTitle.includes(normSearchTitle) || normSearchTitle.includes(normTitle.split(' trailer')[0])) {
             score += 0.3;
+          }
+          
+          // Trailer keyword bonus
+          const lowerTitle = title.toLowerCase();
+          if (lowerTitle.includes('trailer')) {
+            score += 0.2;
+          } else if (lowerTitle.includes('preview') || lowerTitle.includes('teaser')) {
+            score += 0.15;
+          }
+          
+          // Year matching
+          if (tmdbMeta.year) {
+            const yearStr = String(tmdbMeta.year);
+            if (title.includes(yearStr) || description.includes(yearStr) || subject.includes(yearStr)) {
+              score += 0.3;
+            }
+            // Check date field if available
+            if (doc.date) {
+              const docYear = parseInt(doc.date.substring(0, 4));
+              if (docYear && Math.abs(docYear - tmdbMeta.year) <= 1) {
+                score += 0.2;
+              }
+            }
+          }
+          
+          // Downloads bonus (more popular = more likely to be correct)
+          if (doc.downloads) {
+            const downloads = parseInt(doc.downloads) || 0;
+            if (downloads > 1000) score += 0.1;
+            if (downloads > 10000) score += 0.1;
+          }
+          
+          // Description/subject matching
+          const allText = `${description} ${subject} ${creator}`.toLowerCase();
+          if (allText.includes(normSearchTitle)) {
+            score += 0.2;
           }
           
           if (score > bestScore) {
@@ -704,7 +778,9 @@ async function extractViaInternetArchive(tmdbMeta) {
           }
         }
         
-        if (bestMatch && bestScore >= 0.5) {
+        // Use higher threshold for better matches (0.7 instead of 0.5)
+        if (bestMatch && bestScore >= 0.7) {
+          console.log(`  [Internet Archive] Best match: "${bestMatch.title}" (score: ${bestScore.toFixed(2)})`);
           // Get the video URL from the item metadata
           const identifier = bestMatch.identifier;
           const metadataUrl = `https://archive.org/metadata/${identifier}`;
@@ -736,13 +812,28 @@ async function extractViaInternetArchive(tmdbMeta) {
             });
             
             if (videoFiles.length > 0) {
-              // Sort by size (prefer larger files = better quality)
-              videoFiles.sort((a, b) => (b.size || 0) - (a.size || 0));
+              // Sort by: 1) format preference (mp4 > webm > others), 2) size (larger = better quality)
+              videoFiles.sort((a, b) => {
+                const formatA = (a.format || '').toLowerCase();
+                const formatB = (b.format || '').toLowerCase();
+                
+                // Prefer MP4
+                const aIsMp4 = formatA.includes('mp4') || formatA.includes('h.264');
+                const bIsMp4 = formatB.includes('mp4') || formatB.includes('h.264');
+                if (aIsMp4 && !bIsMp4) return -1;
+                if (!aIsMp4 && bIsMp4) return 1;
+                
+                // Then by size
+                return (b.size || 0) - (a.size || 0);
+              });
+              
               const bestFile = videoFiles[0];
               const videoUrl = `https://archive.org/download/${identifier}/${encodeURIComponent(bestFile.name)}`;
               
-              console.log(`  ✓ [Internet Archive] Found: "${bestMatch.title}" (${bestFile.format || 'video'})`);
+              console.log(`  ✓ [Internet Archive] Found: "${bestMatch.title}" (${bestFile.format || 'video'}, ${Math.round((bestFile.size || 0) / 1024 / 1024)}MB)`);
               return videoUrl;
+            } else {
+              console.log(`  [Internet Archive] No video files found in metadata for "${bestMatch.title}"`);
             }
           } catch (metaError) {
             clearTimeout(metaTimeout);
