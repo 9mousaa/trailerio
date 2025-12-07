@@ -647,6 +647,112 @@ async function extractViaInvidious(youtubeKey) {
   return null;
 }
 
+// ============ INTERNET ARCHIVE EXTRACTOR ============
+
+async function extractViaInternetArchive(tmdbMeta) {
+  console.log(`  [Internet Archive] Searching for "${tmdbMeta.title}" (${tmdbMeta.year || ''})...`);
+  
+  try {
+    // Search Internet Archive for trailers
+    // Search in movie_trailers collection with the movie title
+    const searchTerms = [
+      `${tmdbMeta.title} trailer ${tmdbMeta.year || ''}`,
+      `${tmdbMeta.title} trailer`,
+      `${tmdbMeta.originalTitle} trailer ${tmdbMeta.year || ''}`
+    ];
+    
+    for (const searchTerm of searchTerms) {
+      const query = encodeURIComponent(searchTerm);
+      // Search in movie_trailers collection, limit to 10 results, sorted by downloads
+      const searchUrl = `https://archive.org/advancedsearch.php?q=collection:movie_trailers+AND+${query}&fl=identifier,title,description,date,downloads&sort[]=downloads+desc&rows=10&output=json`;
+      
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
+      
+      try {
+        const response = await fetch(searchUrl, { signal: controller.signal });
+        clearTimeout(timeout);
+        
+        if (!response.ok) continue;
+        
+        const data = await response.json();
+        const docs = data.response?.docs || [];
+        
+        if (docs.length === 0) continue;
+        
+        // Find best match by title similarity
+        let bestMatch = null;
+        let bestScore = 0;
+        
+        for (const doc of docs) {
+          const title = (doc.title || '').toLowerCase();
+          const description = (doc.description || '').toLowerCase();
+          const searchTitle = tmdbMeta.title.toLowerCase();
+          
+          // Score based on title match
+          let score = 0;
+          if (title.includes(searchTitle) || searchTitle.includes(title.split(' trailer')[0])) {
+            score += 0.8;
+          }
+          if (title.includes('trailer')) {
+            score += 0.2;
+          }
+          // Prefer items with year match
+          if (tmdbMeta.year && (title.includes(tmdbMeta.year) || description.includes(tmdbMeta.year))) {
+            score += 0.3;
+          }
+          
+          if (score > bestScore) {
+            bestScore = score;
+            bestMatch = doc;
+          }
+        }
+        
+        if (bestMatch && bestScore >= 0.5) {
+          // Get the video URL from the item metadata
+          const identifier = bestMatch.identifier;
+          const metadataUrl = `https://archive.org/metadata/${identifier}`;
+          
+          const metaResponse = await fetch(metadataUrl, { signal: controller.signal });
+          if (!metaResponse.ok) continue;
+          
+          const metadata = await metaResponse.json();
+          
+          // Find the best video file (prefer mp4, then webm)
+          const files = metadata.files || [];
+          const videoFiles = files.filter(f => {
+            const format = (f.format || '').toLowerCase();
+            return (format.includes('mp4') || format.includes('webm') || format.includes('h.264')) &&
+                   f.name && !f.name.includes('thumb') && !f.name.includes('sample');
+          });
+          
+          if (videoFiles.length > 0) {
+            // Sort by size (prefer larger files = better quality)
+            videoFiles.sort((a, b) => (b.size || 0) - (a.size || 0));
+            const bestFile = videoFiles[0];
+            const videoUrl = `https://archive.org/download/${identifier}/${encodeURIComponent(bestFile.name)}`;
+            
+            console.log(`  ✓ [Internet Archive] Found: "${bestMatch.title}" (${bestFile.format || 'video'})`);
+            return videoUrl;
+          }
+        }
+      } catch (e) {
+        clearTimeout(timeout);
+        if (searchTerms.indexOf(searchTerm) === 0) {
+          console.log(`  [Internet Archive] Search error: ${e.message || 'timeout'}`);
+        }
+        continue;
+      }
+    }
+    
+    console.log(`  ✗ [Internet Archive] No trailer found`);
+    return null;
+  } catch (e) {
+    console.log(`  ✗ [Internet Archive] Error: ${e.message || 'unknown'}`);
+    return null;
+  }
+}
+
 async function multiPassSearch(tmdbMeta) {
   const searchType = tmdbMeta.mediaType === 'movie' ? 'movie' : 'tv';
   
@@ -823,6 +929,25 @@ async function resolvePreview(imdbId, type) {
     }
   }
   
+  // PRIORITY 3: Try Internet Archive as fallback
+  console.log('\n========== YouTube not found, trying Internet Archive ==========');
+  const archiveUrl = await extractViaInternetArchive(tmdbMeta);
+  if (archiveUrl) {
+    setCache(imdbId, {
+      track_id: null,
+      preview_url: archiveUrl,
+      country: 'archive',
+      youtube_key: tmdbMeta.youtubeTrailerKey || null
+    });
+    console.log(`✓ Got URL from Internet Archive`);
+    return {
+      found: true,
+      source: 'archive',
+      previewUrl: archiveUrl,
+      country: 'archive'
+    };
+  }
+  
   setCache(imdbId, {
     track_id: null,
     preview_url: null,
@@ -830,7 +955,7 @@ async function resolvePreview(imdbId, type) {
     youtube_key: null
   });
   
-  console.log('No preview found from iTunes or YouTube');
+  console.log('No preview found from iTunes, YouTube, or Internet Archive');
   return { found: false };
 }
 
