@@ -21,6 +21,43 @@ const cache = new Map();
 let activeRequests = 0;
 let totalRequests = 0;
 
+// Concurrency limiter to prevent resource exhaustion
+// Limit concurrent source extractions to prevent too many simultaneous fetch requests
+const MAX_CONCURRENT_EXTRACTIONS = 3;
+let activeExtractions = 0;
+const extractionQueue = [];
+
+async function withExtractionLimit(fn) {
+  return new Promise((resolve, reject) => {
+    const execute = async () => {
+      activeExtractions++;
+      if (extractionQueue.length > 0) {
+        console.log(`  [Concurrency] Executing extraction (${activeExtractions}/${MAX_CONCURRENT_EXTRACTIONS} active, ${extractionQueue.length} queued)`);
+      }
+      try {
+        const result = await fn();
+        resolve(result);
+      } catch (error) {
+        reject(error);
+      } finally {
+        activeExtractions--;
+        // Process next in queue
+        if (extractionQueue.length > 0) {
+          const next = extractionQueue.shift();
+          next();
+        }
+      }
+    };
+    
+    if (activeExtractions < MAX_CONCURRENT_EXTRACTIONS) {
+      execute();
+    } else {
+      console.log(`  [Concurrency] Queuing extraction (${activeExtractions}/${MAX_CONCURRENT_EXTRACTIONS} active, ${extractionQueue.length + 1} queued)`);
+      extractionQueue.push(execute);
+    }
+  });
+}
+
 // Success rate tracking for smart sorting
 const successTracker = {
   // Source-level tracking (overall success rate for each source)
@@ -625,9 +662,9 @@ const PIPED_INSTANCES = [
 ];
 
 async function extractViaPiped(youtubeKey) {
-  // Sort instances by success rate (highest first)
-  const sortedInstances = successTracker.sortBySuccessRate('piped', PIPED_INSTANCES);
-  const top3 = sortedInstances.slice(0, 3).map(inst => {
+  // Sort instances by success rate (highest first) and limit to top 3 to prevent resource exhaustion
+  const sortedInstances = successTracker.sortBySuccessRate('piped', PIPED_INSTANCES).slice(0, 3);
+  const top3 = sortedInstances.map(inst => {
     const rate = successTracker.getSuccessRate('piped', inst);
     return `${inst.split('//')[1].split('/')[0]} (${(rate * 100).toFixed(0)}%)`;
   }).join(', ');
@@ -824,9 +861,9 @@ const INVIDIOUS_INSTANCES = [
 ];
 
 async function extractViaInvidious(youtubeKey) {
-  // Sort instances by success rate (highest first)
-  const sortedInstances = successTracker.sortBySuccessRate('invidious', INVIDIOUS_INSTANCES);
-  const top3 = sortedInstances.slice(0, 3).map(inst => {
+  // Sort instances by success rate (highest first) and limit to top 3 to prevent resource exhaustion
+  const sortedInstances = successTracker.sortBySuccessRate('invidious', INVIDIOUS_INSTANCES).slice(0, 3);
+  const top3 = sortedInstances.map(inst => {
     const rate = successTracker.getSuccessRate('invidious', inst);
     return `${inst.split('//')[1].split('/')[0]} (${(rate * 100).toFixed(0)}%)`;
   }).join(', ');
@@ -1729,12 +1766,17 @@ async function resolvePreview(imdbId, type) {
         return null;
       };
       
-      // Race the source attempt against a timeout
+      // Race the source attempt against a timeout, with concurrency limiting
       const timeoutPromise = new Promise((_, reject) => 
         setTimeout(() => reject(new Error(`Source ${source} timeout after ${SOURCE_TIMEOUT}ms`)), SOURCE_TIMEOUT)
       );
       
-      const result = await Promise.race([sourceAttempt(), timeoutPromise]);
+      // Wrap source attempt with concurrency limiter to prevent resource exhaustion
+      // This ensures we don't have too many simultaneous extractions running
+      const limitedAttempt = withExtractionLimit(async () => {
+        return await sourceAttempt();
+      });
+      const result = await Promise.race([limitedAttempt, timeoutPromise]);
       
       if (result && result.found) {
         return result;
