@@ -33,3 +33,7 @@ dist-ssr
 
 # Docker
 .dockerignore
+
+# Cache database (persistent storage)
+cache-data/
+server/cache.db
