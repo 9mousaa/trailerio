@@ -591,7 +591,10 @@ async function extractViaPiped(youtubeKey) {
     const startTime = Date.now();
     
     try {
-      const response = await fetch(`${instance}/streams/${youtubeKey}`, {
+      // Try to get DASH format if available - some instances support format parameter
+      let apiUrl = `${instance}/streams/${youtubeKey}`;
+      
+      const response = await fetch(apiUrl, {
         headers: { 'Accept': 'application/json' },
         signal: controller.signal
       });
@@ -614,13 +617,20 @@ async function extractViaPiped(youtubeKey) {
       }
       
       const data = await response.json();
-      console.log(`  [Piped] ${instance}: got response (${duration}ms), has dash: ${!!data.dash}, videoStreams: ${data.videoStreams?.length || 0}`);
+      console.log(`  [Piped] ${instance}: got response (${duration}ms), has dash: ${!!data.dash}, videoStreams: ${data.videoStreams?.length || 0}, audioStreams: ${data.audioStreams?.length || 0}`);
       
       // PRIORITY 1: DASH manifest (best for AVPlayer - native support, adaptive streaming, highest quality)
+      // DASH manifests contain both video and audio tracks, allowing adaptive quality selection
       if (data.dash) {
         console.log(`  ✓ [Piped] ${instance}: got DASH manifest (adaptive quality up to highest available + audio)`);
         successTracker.recordSuccess('piped', instance);
         return { url: data.dash, isDash: true };
+      }
+      
+      // Check if we can request DASH format explicitly
+      // Some Piped instances might support format parameter
+      if (!data.dash && data.formats) {
+        console.log(`  [Piped] ${instance}: No DASH in default response, but formats available: ${Object.keys(data.formats || {}).join(', ')}`);
       }
       
       // PRIORITY 2: Video streams (fallback if no DASH)
@@ -640,6 +650,16 @@ async function extractViaPiped(youtubeKey) {
           .join(', ');
         console.log(`  [Piped] ${instance}: Available qualities: ${availableQualities}`);
         
+        // Check if higher quality combined streams are available
+        const combinedQualities = data.videoStreams
+          .filter(s => s.mimeType?.startsWith('video/') && s.url && !s.videoOnly)
+          .map(s => s.quality || 'unknown')
+          .filter(q => q !== 'unknown');
+        const highestCombined = combinedQualities.length > 0 ? combinedQualities[0] : 'none';
+        if (highestCombined === '360p' && data.videoStreams.some(s => s.quality && ['1080p', '720p', '480p'].includes(s.quality))) {
+          console.log(`  [Piped] ${instance}: ⚠️ Higher quality streams (1080p/720p/480p) exist but are video-only. Only 360p combined available.`);
+        }
+        
         const sorted = [...data.videoStreams]
           .filter(s => s.mimeType?.startsWith('video/') && s.url)
           .sort((a, b) => {
@@ -648,13 +668,18 @@ async function extractViaPiped(youtubeKey) {
             return rankA - rankB;
           });
         
-        // Prefer combined streams (video + audio), but fall back to video-only if no combined streams exist
+        // Prefer combined streams (video + audio) for AVPlayer compatibility
+        // Note: Higher quality streams (1080p, 720p) are often video-only, 
+        // but we need combined streams for AVPlayer to work without muxing
         if (sorted.length > 0) {
           // Find all combined streams and select the highest quality one
           const combinedStreams = sorted.filter(s => !s.videoOnly);
           if (combinedStreams.length > 0) {
             const bestCombined = combinedStreams[0]; // Already sorted by quality
             console.log(`  ✓ [Piped] ${instance}: selected ${bestCombined.quality || 'unknown'} (combined, highest quality available)`);
+            if (data.audioStreams && data.audioStreams.length > 0) {
+              console.log(`  [Piped] ${instance}: Note: ${data.audioStreams.length} separate audio stream(s) available, but using combined stream for compatibility`);
+            }
             successTracker.recordSuccess('piped', instance);
             return { url: bestCombined.url, quality: bestCombined.quality, isDash: false };
           }
