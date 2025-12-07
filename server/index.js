@@ -498,6 +498,10 @@ async function extractViaPiped(youtubeKey) {
       return null;
     } catch (e) {
       clearTimeout(timeout);
+      // Log error for debugging (only first few to avoid spam)
+      if (PIPED_INSTANCES.indexOf(instance) < 3) {
+        console.log(`  [Piped] ${instance} error: ${e.message || 'timeout/network error'}`);
+      }
       return null;
     }
   };
