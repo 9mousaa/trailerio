@@ -1243,91 +1243,133 @@ async function resolvePreview(imdbId, type) {
   console.log(`\n========== Trying sources in order (sorted by success rate): ${sourceRates} ==========`);
   
   // Try each source in sorted order
+  const SOURCE_TIMEOUT = 15000; // 15 seconds per source
+  
   for (const source of sortedSources) {
     console.log(`\n========== Trying ${source.toUpperCase()} ==========`);
     
-    if (source === 'itunes') {
-      const itunesResult = await multiPassSearch(tmdbMeta);
-      console.log(`iTunes search result: ${itunesResult.found ? 'FOUND' : 'NOT FOUND'}`);
+    try {
+      // Wrap each source attempt in a timeout to prevent hanging
+      const sourceAttempt = async () => {
+        if (source === 'itunes') {
+          const itunesResult = await multiPassSearch(tmdbMeta);
+          console.log(`iTunes search result: ${itunesResult.found ? 'FOUND' : 'NOT FOUND'}`);
+          
+          if (itunesResult.found) {
+            setCache(imdbId, {
+              track_id: itunesResult.trackId,
+              preview_url: itunesResult.previewUrl,
+              country: itunesResult.country || 'us',
+              youtube_key: tmdbMeta.youtubeTrailerKey || null
+            });
+            console.log(`✓ Found iTunes preview: ${itunesResult.previewUrl}`);
+            successTracker.recordSourceSuccess('itunes');
+            return { ...itunesResult, source: 'itunes' };
+          } else {
+            successTracker.recordSourceFailure('itunes');
+            return null;
+          }
+        } else if (source === 'piped') {
+          if (!tmdbMeta.youtubeTrailerKey) {
+            console.log(`  Skipping Piped: no YouTube key available`);
+            successTracker.recordSourceFailure('piped');
+            return null;
+          }
+          console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
+          const pipedResult = await extractViaPiped(tmdbMeta.youtubeTrailerKey);
+          if (pipedResult) {
+            setCache(imdbId, {
+              track_id: null,
+              preview_url: null,
+              country: 'yt',
+              youtube_key: tmdbMeta.youtubeTrailerKey
+            });
+            console.log(`✓ Got URL from Piped`);
+            const pipedUrl = typeof pipedResult === 'string' ? pipedResult : pipedResult.url;
+            successTracker.recordSourceSuccess('piped');
+            return {
+              found: true,
+              source: 'youtube',
+              previewUrl: pipedUrl,
+              youtubeKey: tmdbMeta.youtubeTrailerKey,
+              country: 'yt'
+            };
+          } else {
+            successTracker.recordSourceFailure('piped');
+            return null;
+          }
+        } else if (source === 'invidious') {
+          if (!tmdbMeta.youtubeTrailerKey) {
+            console.log(`  Skipping Invidious: no YouTube key available`);
+            successTracker.recordSourceFailure('invidious');
+            return null;
+          }
+          console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
+          const invidiousUrl = await extractViaInvidious(tmdbMeta.youtubeTrailerKey);
+          if (invidiousUrl) {
+            setCache(imdbId, {
+              track_id: null,
+              preview_url: null,
+              country: 'yt',
+              youtube_key: tmdbMeta.youtubeTrailerKey
+            });
+            console.log(`✓ Got URL from Invidious`);
+            successTracker.recordSourceSuccess('invidious');
+            return {
+              found: true,
+              source: 'youtube',
+              previewUrl: invidiousUrl,
+              youtubeKey: tmdbMeta.youtubeTrailerKey,
+              country: 'yt'
+            };
+          } else {
+            successTracker.recordSourceFailure('invidious');
+            return null;
+          }
+        } else if (source === 'archive') {
+          const archiveUrl = await extractViaInternetArchive(tmdbMeta);
+          if (archiveUrl) {
+            setCache(imdbId, {
+              track_id: null,
+              preview_url: archiveUrl,
+              country: 'archive',
+              youtube_key: tmdbMeta.youtubeTrailerKey || null
+            });
+            console.log(`✓ Got URL from Internet Archive`);
+            successTracker.recordSourceSuccess('archive');
+            return {
+              found: true,
+              source: 'archive',
+              previewUrl: archiveUrl,
+              country: 'archive'
+            };
+          } else {
+            successTracker.recordSourceFailure('archive');
+            return null;
+          }
+        }
+        return null;
+      };
       
-      if (itunesResult.found) {
-        setCache(imdbId, {
-          track_id: itunesResult.trackId,
-          preview_url: itunesResult.previewUrl,
-          country: itunesResult.country || 'us',
-          youtube_key: tmdbMeta.youtubeTrailerKey || null
-        });
-        console.log(`✓ Found iTunes preview: ${itunesResult.previewUrl}`);
-        successTracker.recordSourceSuccess('itunes');
-        return { ...itunesResult, source: 'itunes' };
-      } else {
-        successTracker.recordSourceFailure('itunes');
+      // Race the source attempt against a timeout
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error(`Source ${source} timeout after ${SOURCE_TIMEOUT}ms`)), SOURCE_TIMEOUT)
+      );
+      
+      const result = await Promise.race([sourceAttempt(), timeoutPromise]);
+      
+      if (result && result.found) {
+        return result;
       }
-    } else if (source === 'piped' && tmdbMeta.youtubeTrailerKey) {
-      console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
-      const pipedResult = await extractViaPiped(tmdbMeta.youtubeTrailerKey);
-      if (pipedResult) {
-        setCache(imdbId, {
-          track_id: null,
-          preview_url: null,
-          country: 'yt',
-          youtube_key: tmdbMeta.youtubeTrailerKey
-        });
-        console.log(`✓ Got URL from Piped`);
-        const pipedUrl = typeof pipedResult === 'string' ? pipedResult : pipedResult.url;
-        successTracker.recordSourceSuccess('piped');
-        return {
-          found: true,
-          source: 'youtube',
-          previewUrl: pipedUrl,
-          youtubeKey: tmdbMeta.youtubeTrailerKey,
-          country: 'yt'
-        };
+    } catch (error) {
+      if (error.message && error.message.includes('timeout')) {
+        console.log(`  ⚠️ ${source.toUpperCase()} timed out after ${SOURCE_TIMEOUT}ms`);
       } else {
-        successTracker.recordSourceFailure('piped');
+        console.log(`  ✗ Error in ${source.toUpperCase()}: ${error.message || 'unknown error'}`);
       }
-    } else if (source === 'invidious' && tmdbMeta.youtubeTrailerKey) {
-      console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
-      const invidiousUrl = await extractViaInvidious(tmdbMeta.youtubeTrailerKey);
-      if (invidiousUrl) {
-        setCache(imdbId, {
-          track_id: null,
-          preview_url: null,
-          country: 'yt',
-          youtube_key: tmdbMeta.youtubeTrailerKey
-        });
-        console.log(`✓ Got URL from Invidious`);
-        successTracker.recordSourceSuccess('invidious');
-        return {
-          found: true,
-          source: 'youtube',
-          previewUrl: invidiousUrl,
-          youtubeKey: tmdbMeta.youtubeTrailerKey,
-          country: 'yt'
-        };
-      } else {
-        successTracker.recordSourceFailure('invidious');
-      }
-    } else if (source === 'archive') {
-      const archiveUrl = await extractViaInternetArchive(tmdbMeta);
-      if (archiveUrl) {
-        setCache(imdbId, {
-          track_id: null,
-          preview_url: archiveUrl,
-          country: 'archive',
-          youtube_key: tmdbMeta.youtubeTrailerKey || null
-        });
-        console.log(`✓ Got URL from Internet Archive`);
-        successTracker.recordSourceSuccess('archive');
-        return {
-          found: true,
-          source: 'archive',
-          previewUrl: archiveUrl,
-          country: 'archive'
-        };
-      } else {
-        successTracker.recordSourceFailure('archive');
-      }
+      successTracker.recordSourceFailure(source);
+      // Continue to next source instead of crashing
+      continue;
     }
   }
   
@@ -1392,10 +1434,13 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     // Wrap resolvePreview in a promise race to ensure it doesn't exceed timeout
     const resolvePromise = resolvePreview(id, type);
     const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Request timeout')), STREAM_TIMEOUT - 1000)
+      setTimeout(() => reject(new Error('Request timeout')), STREAM_TIMEOUT - 500)
     );
     
-    const result = await Promise.race([resolvePromise, timeoutPromise]).catch(err => {
+    let result;
+    try {
+      result = await Promise.race([resolvePromise, timeoutPromise]);
+    } catch (err) {
       if (err.message === 'Request timeout') {
         console.log(`  ⚠️ Request timeout for ${id} - aborting`);
         clearTimeout(timeout);
@@ -1404,10 +1449,19 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         }
         return;
       }
+      // Re-throw other errors
       throw err;
-    });
+    }
     
-    if (!result) return; // Timeout was handled
+    if (!result) {
+      // This shouldn't happen, but handle it just in case
+      console.log(`  ⚠️ No result returned for ${id}`);
+      clearTimeout(timeout);
+      if (!res.headersSent) {
+        res.json({ streams: [] });
+      }
+      return;
+    }
     
     clearTimeout(timeout);
     
