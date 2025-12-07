@@ -663,9 +663,8 @@ const PIPED_INSTANCES = [
 
 async function extractViaPiped(youtubeKey) {
   // Sort instances by success rate (highest first)
-  // Try top 5 instances to improve reliability (increased from 3)
-  const allSortedInstances = successTracker.sortBySuccessRate('piped', PIPED_INSTANCES);
-  const sortedInstances = allSortedInstances.slice(0, 5);
+  // Try all available instances to maximize reliability
+  const sortedInstances = successTracker.sortBySuccessRate('piped', PIPED_INSTANCES);
   const top3 = sortedInstances.slice(0, 3).map(inst => {
     const rate = successTracker.getSuccessRate('piped', inst);
     return `${inst.split('//')[1].split('/')[0]} (${(rate * 100).toFixed(0)}%)`;
@@ -864,9 +863,8 @@ const INVIDIOUS_INSTANCES = [
 
 async function extractViaInvidious(youtubeKey) {
   // Sort instances by success rate (highest first)
-  // Try top 5 instances to improve reliability (increased from 3)
-  const allSortedInstances = successTracker.sortBySuccessRate('invidious', INVIDIOUS_INSTANCES);
-  const sortedInstances = allSortedInstances.slice(0, 5);
+  // Try all available instances to maximize reliability
+  const sortedInstances = successTracker.sortBySuccessRate('invidious', INVIDIOUS_INSTANCES);
   const top3 = sortedInstances.slice(0, 3).map(inst => {
     const rate = successTracker.getSuccessRate('invidious', inst);
     return `${inst.split('//')[1].split('/')[0]} (${(rate * 100).toFixed(0)}%)`;
