@@ -1,9 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
-const Database = require('better-sqlite3');
-const path = require('path');
-const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -11,89 +8,18 @@ const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
 const CACHE_DAYS = 30;
 const MIN_SCORE_THRESHOLD = 0.6;
 const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
-const STREAM_TIMEOUT = 15000; // 15 seconds - reduced to prevent gateway timeouts
+const STREAM_TIMEOUT = 20000; // 20 seconds - reduced to fail faster
 
 // Cache TTLs by source type (in hours)
 const CACHE_TTL = {
   youtube: 2,      // YouTube URLs (Piped/Invidious) expire quickly - 2 hours
   itunes: 168,     // iTunes URLs are stable - 7 days (168 hours)
-  archive: 720,    // Archive URLs are permanent - 30 days (720 hours)
-  negative: 1      // Negative results (no preview found) - short TTL to allow retries when sources recover
+  archive: 720     // Archive URLs are permanent - 30 days (720 hours)
 };
 
-// Initialize persistent database cache
-const dbPath = process.env.DB_PATH || path.join(__dirname, 'cache.db');
-// Ensure directory exists
-const dbDir = path.dirname(dbPath);
-if (!fs.existsSync(dbDir)) {
-  fs.mkdirSync(dbDir, { recursive: true });
-}
-
-const db = new Database(dbPath);
-
-// Create cache table if it doesn't exist
-db.exec(`
-  CREATE TABLE IF NOT EXISTS cache (
-    imdb_id TEXT PRIMARY KEY,
-    preview_url TEXT,
-    track_id TEXT,
-    country TEXT,
-    source TEXT,
-    source_type TEXT,
-    youtube_key TEXT,
-    timestamp INTEGER NOT NULL,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
-  );
-  
-  CREATE INDEX IF NOT EXISTS idx_timestamp ON cache(timestamp);
-`);
-
-// Clean up expired cache entries on startup
-const now = Date.now();
-const maxAge = Math.max(...Object.values(CACHE_TTL)) * 60 * 60 * 1000; // Longest TTL in milliseconds
-const cutoffTime = now - maxAge;
-const deleteExpired = db.prepare('DELETE FROM cache WHERE timestamp < ?');
-const deleted = deleteExpired.run(cutoffTime);
-console.log(`✓ Database cache initialized at ${dbPath} (cleaned ${deleted.changes} expired entries)`);
+const cache = new Map();
 let activeRequests = 0;
 let totalRequests = 0;
-
-// Concurrency limiter for resource-intensive operations (Piped/Invidious with multiple instances)
-// Only limit operations that make many parallel fetch requests, not simple API calls
-const MAX_CONCURRENT_HEAVY_EXTRACTIONS = 8; // Increased from 3 to handle more users
-let activeHeavyExtractions = 0;
-const heavyExtractionQueue = [];
-
-async function withHeavyExtractionLimit(fn) {
-  return new Promise((resolve, reject) => {
-    const execute = async () => {
-      activeHeavyExtractions++;
-      if (heavyExtractionQueue.length > 0) {
-        console.log(`  [Concurrency] Executing heavy extraction (${activeHeavyExtractions}/${MAX_CONCURRENT_HEAVY_EXTRACTIONS} active, ${heavyExtractionQueue.length} queued)`);
-      }
-      try {
-        const result = await fn();
-        resolve(result);
-      } catch (error) {
-        reject(error);
-      } finally {
-        activeHeavyExtractions--;
-        // Process next in queue
-        if (heavyExtractionQueue.length > 0) {
-          const next = heavyExtractionQueue.shift();
-          next();
-        }
-      }
-    };
-    
-    if (activeHeavyExtractions < MAX_CONCURRENT_HEAVY_EXTRACTIONS) {
-      execute();
-    } else {
-      console.log(`  [Concurrency] Queuing heavy extraction (${activeHeavyExtractions}/${MAX_CONCURRENT_HEAVY_EXTRACTIONS} active, ${heavyExtractionQueue.length + 1} queued)`);
-      heavyExtractionQueue.push(execute);
-    }
-  });
-}
 
 // Success rate tracking for smart sorting
 const successTracker = {
@@ -700,7 +626,6 @@ const PIPED_INSTANCES = [
 
 async function extractViaPiped(youtubeKey) {
   // Sort instances by success rate (highest first)
-  // Try all available instances to maximize reliability
   const sortedInstances = successTracker.sortBySuccessRate('piped', PIPED_INSTANCES);
   const top3 = sortedInstances.slice(0, 3).map(inst => {
     const rate = successTracker.getSuccessRate('piped', inst);
@@ -710,7 +635,7 @@ async function extractViaPiped(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000); // 3s timeout - balanced for reliability vs speed
+    const timeout = setTimeout(() => controller.abort(), 3000); // 3s timeout - reduced to fail faster
     const startTime = Date.now();
     let response = null;
     
@@ -900,7 +825,6 @@ const INVIDIOUS_INSTANCES = [
 
 async function extractViaInvidious(youtubeKey) {
   // Sort instances by success rate (highest first)
-  // Try all available instances to maximize reliability
   const sortedInstances = successTracker.sortBySuccessRate('invidious', INVIDIOUS_INSTANCES);
   const top3 = sortedInstances.slice(0, 3).map(inst => {
     const rate = successTracker.getSuccessRate('invidious', inst);
@@ -910,7 +834,7 @@ async function extractViaInvidious(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000); // 3s timeout - balanced for reliability vs speed
+    const timeout = setTimeout(() => controller.abort(), 3000); // 3s timeout - reduced to fail faster
     const startTime = Date.now();
     let response = null;
     
@@ -1057,7 +981,7 @@ async function extractViaInternetArchive(tmdbMeta) {
       const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(strategy.query)}&fl=identifier,title,description,date,downloads,creator,subject&sort[]=downloads+desc&rows=20&output=json`;
       
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 6000); // 6s timeout - balanced for Archive API reliability
+      const timeout = setTimeout(() => controller.abort(), 5000); // Reduced from 8s to 5s to fail faster
       const startTime = Date.now();
       
       try {
@@ -1115,52 +1039,24 @@ async function extractViaInternetArchive(tmdbMeta) {
           const matchingWords = searchWords.filter(word => titleWords.includes(word));
           const wordMatchRatio = searchWords.length > 0 ? matchingWords.length / searchWords.length : 0;
           
-          // Check if "game" appears in search title (needed for filtering logic below)
-          // For "Game of Thrones", the search title itself contains "game", so we need to be careful
-          const searchTitleHasGame = /\bgame\b/.test(normSearchTitle.toLowerCase());
-          
           // Filter out video game trailers when searching for TV shows or movies
           // Check if title/description contains game-related terms that indicate it's a video game
           const allText = `${title} ${description} ${subject}`.toLowerCase();
           const isVideoGame = /video game|videogame|gameplay|steam|epic games|nintendo|playstation|xbox|pc game|console game|mobile game|game engine|unity|unreal engine/.test(allText);
           
-          // Check for game-specific patterns even when search title has "game" (like "Game of Thrones")
-          // Game trailers often have patterns like: "Title - Location/Mode Trailer" or "Title Game Trailer"
-          // For "Game of Thrones", game trailers often have subtitles like "The Wall", "Telltale", etc.
-          // Check if title has a subtitle after the main title that suggests it's a game (like "Game of Thrones - The Wall")
-          const titleLower = title.toLowerCase();
-          
-          // Check for Telltale Games (the developer of GoT game)
-          const hasTelltale = /\b(telltale|telltale\s+games)\b/i.test(allText);
-          
-          // Check for game-specific subtitles for "Game of Thrones"
-          // Patterns: "Game of Thrones - The Wall", "Game of Thrones: The Wall", etc.
-          // "The Wall" is a specific game episode/location, not part of the TV show
-          const hasGameSubtitle = /game\s+of\s+thrones\s*[-:]\s*(the\s+wall|telltale|iron\s+from\s+ice|a\s+telltale)/i.test(title) ||
-                                  // If searching for "Game of Thrones" and result has "The Wall", it's likely the game
-                                  (searchTitleHasGame && /\bgame\s+of\s+thrones\b/i.test(titleLower) && /\bthe\s+wall\b/i.test(titleLower)) ||
-                                  hasTelltale;
-          
-          const hasGamePattern = /\b(game|edition|dlc|expansion|pack|bundle)\s+(trailer|teaser|preview)/i.test(title) ||
-                                 /\b(trailer|teaser|preview)\s+(for|of)\s+.*\s+game/i.test(title) ||
-                                 hasGameSubtitle;
-          
           // Check if "game" appears in a way that suggests it's a video game
+          // For "Game of Thrones", the search title itself contains "game", so we need to be careful
+          // Only filter if there are clear game indicators OR if "game" appears but title doesn't match well
           const hasGameKeyword = /\bgame\b/.test(allText);
+          const searchTitleHasGame = /\bgame\b/.test(normSearchTitle.toLowerCase());
           
-          // If the search title itself has "game" (like "Game of Thrones"), check for:
-          // 1. Clear game indicators (steam, gameplay, etc.)
-          // 2. Game-specific patterns (like "The Wall" which is a game location)
-          // 3. Game-specific subtitles (like "Game of Thrones - The Wall")
-          // 4. Low word match ratio (suggests it's not the same content)
+          // If the search title itself has "game" (like "Game of Thrones"), only filter if there are clear game indicators
+          // Otherwise, if "game" appears standalone and title doesn't closely match, it might be a game
           const isLikelyGame = isVideoGame || 
-            hasGamePattern ||
-            hasGameSubtitle ||
-            (hasGameKeyword && !searchTitleHasGame && wordMatchRatio < 0.7) || // "game" in result but not in search, and low match
-            (hasGameKeyword && searchTitleHasGame && wordMatchRatio < 0.5); // Both have "game" but very low match (likely different content)
+            (hasGameKeyword && !searchTitleHasGame && wordMatchRatio < 0.7); // "game" in result but not in search, and low match
           
           if (isLikelyGame) {
-            console.log(`  [Internet Archive] Skipping video game trailer: "${title}" (isVideoGame: ${isVideoGame}, hasGamePattern: ${hasGamePattern}, hasGameSubtitle: ${hasGameSubtitle}, wordMatchRatio: ${wordMatchRatio.toFixed(2)})`);
+            console.log(`  [Internet Archive] Skipping video game trailer: "${title}"`);
             continue; // Skip video game trailers
           }
           
@@ -1334,7 +1230,7 @@ async function extractViaInternetArchive(tmdbMeta) {
           const metadataUrl = `https://archive.org/metadata/${identifier}`;
           
           const metaController = new AbortController();
-          const metaTimeout = setTimeout(() => metaController.abort(), 6000); // 6s timeout - balanced for Archive API reliability
+          const metaTimeout = setTimeout(() => metaController.abort(), 5000);
           
           try {
             const metaResponse = await fetch(metadataUrl, { 
@@ -1477,26 +1373,14 @@ async function multiPassSearch(tmdbMeta) {
     }
   };
   
-  // Limit to first 2 titles to prevent excessive searching
-  const limitedTitles = titlesToTry.slice(0, 2);
-  const overallStartTime = Date.now();
-  const MAX_OVERALL_SEARCH_TIME = 9000; // Max 9 seconds total for all iTunes searches
-  
   // Search sequentially with delays to avoid rate limiting
-  for (const title of limitedTitles) {
-    // Check if we're running out of time before starting a new title
-    const elapsed = Date.now() - overallStartTime;
-    if (elapsed > MAX_OVERALL_SEARCH_TIME) {
-      console.log(`  [iTunes] Skipping remaining titles due to time limit (${elapsed}ms elapsed)`);
-      break;
-    }
-    
+  for (const title of titlesToTry) {
     console.log(`\nSearching countries sequentially for "${title}" (to avoid rate limiting)`);
     
     let bestOverall = null;
     
-    // Sort countries by success rate (highest first) and limit to top 2 to prevent hanging
-    const sortedCountries = successTracker.sortBySuccessRate('itunes', COUNTRY_VARIANTS).slice(0, 2);
+    // Sort countries by success rate (highest first)
+    const sortedCountries = successTracker.sortBySuccessRate('itunes', COUNTRY_VARIANTS);
     const countryRates = sortedCountries.map(c => {
       const rate = successTracker.getSuccessRate('itunes', c);
       return `${c.toUpperCase()} (${(rate * 100).toFixed(0)}%)`;
@@ -1504,17 +1388,7 @@ async function multiPassSearch(tmdbMeta) {
     console.log(`  [iTunes] Searching countries in order: ${countryRates}`);
     
     // Search countries one at a time with delays to avoid rate limiting
-    const searchStartTime = Date.now();
-    const MAX_SEARCH_TIME = 5000; // Max 5 seconds for iTunes search - reduced to prevent gateway timeouts
-    
     for (const country of sortedCountries) {
-      // Check if we're running out of time
-      const elapsed = Date.now() - searchStartTime;
-      if (elapsed > MAX_SEARCH_TIME) {
-        console.log(`  [iTunes] Skipping remaining countries due to time limit (${elapsed}ms elapsed)`);
-        break;
-      }
-      
       // Add delay between requests to avoid rate limiting (except first request)
       if (bestOverall) {
         await new Promise(resolve => setTimeout(resolve, 200)); // 200ms delay
@@ -1579,28 +1453,14 @@ async function validateUrl(url, timeout = 3000) {
 }
 
 function getCached(imdbId) {
-  const stmt = db.prepare('SELECT * FROM cache WHERE imdb_id = ?');
-  const row = stmt.get(imdbId);
-  
-  if (row) {
-    const hoursSinceCheck = (Date.now() - row.timestamp) / (1000 * 60 * 60);
-    const sourceType = row.source_type || 'youtube'; // Default to shortest TTL
+  const cached = cache.get(imdbId);
+  if (cached) {
+    const hoursSinceCheck = (Date.now() - cached.timestamp) / (1000 * 60 * 60);
+    const sourceType = cached.source_type || 'youtube'; // Default to shortest TTL
     const ttlHours = CACHE_TTL[sourceType] || CACHE_TTL.youtube;
     
     if (hoursSinceCheck < ttlHours) {
-      return {
-        preview_url: row.preview_url,
-        track_id: row.track_id,
-        country: row.country,
-        source: row.source,
-        source_type: row.source_type,
-        youtube_key: row.youtube_key,
-        timestamp: row.timestamp
-      };
-    } else {
-      // Cache expired, delete it
-      const deleteStmt = db.prepare('DELETE FROM cache WHERE imdb_id = ?');
-      deleteStmt.run(imdbId);
+      return cached;
     }
   }
   return null;
@@ -1625,8 +1485,7 @@ async function getCachedWithValidation(imdbId) {
     
     if (!isValid) {
       console.log(`  [Cache] ✗ Cached URL is no longer valid, invalidating cache for ${imdbId}`);
-      const deleteStmt = db.prepare('DELETE FROM cache WHERE imdb_id = ?');
-      deleteStmt.run(imdbId);
+      cache.delete(imdbId);
       return null;
     }
     
@@ -1650,37 +1509,13 @@ function setCache(imdbId, data) {
   } else if (data.source) {
     // Use source from data if available
     sourceType = data.source === 'youtube' ? 'youtube' : data.source;
-  } else {
-    // No preview URL and no source = negative result (no preview found)
-    sourceType = 'negative';
   }
   
-  const ttlHours = CACHE_TTL[sourceType] || CACHE_TTL.youtube;
-  const timestamp = Date.now();
-  
-  // Insert or replace cache entry
-  const stmt = db.prepare(`
-    INSERT OR REPLACE INTO cache (
-      imdb_id, preview_url, track_id, country, source, source_type, youtube_key, timestamp
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  
-  stmt.run(
-    imdbId,
-    data.preview_url || null,
-    data.track_id || null,
-    data.country || null,
-    data.source || null,
-    sourceType,
-    data.youtube_key || null,
-    timestamp
-  );
-  
-  if (data.preview_url) {
-    console.log(`  [Cache] ✓ Cached ${sourceType} preview for ${imdbId} (TTL: ${ttlHours}h)`);
-  } else {
-    console.log(`  [Cache] ✓ Cached negative result for ${imdbId} (no preview found)`);
-  }
+  cache.set(imdbId, {
+    ...data,
+    source_type: sourceType,
+    timestamp: Date.now()
+  });
 }
 
 async function resolvePreview(imdbId, type) {
@@ -1692,7 +1527,7 @@ async function resolvePreview(imdbId, type) {
   if (cached) {
     if (cached.preview_url) {
       const sourceType = cached.source_type || 'unknown';
-      console.log(`✓ [Cache] Cache hit: returning cached ${sourceType} preview (validated)`);
+      console.log(`Cache hit: returning cached ${sourceType} preview (validated)`);
       return {
         found: true,
         source: cached.source || (sourceType === 'itunes' ? 'itunes' : sourceType === 'archive' ? 'archive' : 'youtube'),
@@ -1702,12 +1537,10 @@ async function resolvePreview(imdbId, type) {
       };
     }
     if (!cached.youtube_key) {
-      console.log('✓ [Cache] Cache hit: negative cache (no preview found previously)');
+      console.log('Cache hit: negative cache (no preview found previously)');
       return { found: false };
     }
-    console.log('⚠️ [Cache] Cache expired, refreshing...');
-  } else {
-    console.log('  [Cache] Cache miss - fetching from sources...');
+    console.log('Cache expired, refreshing...');
   }
   
   const tmdbMeta = await getTMDBMetadata(imdbId, type);
@@ -1732,20 +1565,16 @@ async function resolvePreview(imdbId, type) {
   console.log(`\n========== Trying sources in order (sorted by success rate): ${sourceRates} ==========`);
   
   // Try each source in sorted order
-      const SOURCE_TIMEOUT = 7000; // 7 seconds per source - reduced to fail faster and prevent gateway timeouts
+  const SOURCE_TIMEOUT = 15000; // 15 seconds per source
   
   for (const source of sortedSources) {
     console.log(`\n========== Trying ${source.toUpperCase()} ==========`);
-    const sourceStartTime = Date.now();
     
     try {
       // Wrap each source attempt in a timeout to prevent hanging
       const sourceAttempt = async () => {
         if (source === 'itunes') {
-          console.log(`  [${source.toUpperCase()}] Starting search at ${new Date().toISOString()}`);
           const itunesResult = await multiPassSearch(tmdbMeta);
-          const duration = Date.now() - sourceStartTime;
-          console.log(`  [${source.toUpperCase()}] Search completed in ${duration}ms`);
           console.log(`iTunes search result: ${itunesResult.found ? 'FOUND' : 'NOT FOUND'}`);
           
           if (itunesResult.found) {
@@ -1853,20 +1682,7 @@ async function resolvePreview(imdbId, type) {
         setTimeout(() => reject(new Error(`Source ${source} timeout after ${SOURCE_TIMEOUT}ms`)), SOURCE_TIMEOUT)
       );
       
-      // Only apply concurrency limiting to resource-intensive operations (Piped/Invidious)
-      // These check multiple instances in parallel, which can exhaust resources
-      // iTunes and Archive are single API calls, so they don't need limiting
-      let limitedAttempt;
-      if (source === 'piped' || source === 'invidious') {
-        limitedAttempt = withHeavyExtractionLimit(async () => {
-          return await sourceAttempt();
-        });
-      } else {
-        // iTunes and Archive can run without limit (they're single API calls)
-        limitedAttempt = sourceAttempt();
-      }
-      
-      const result = await Promise.race([limitedAttempt, timeoutPromise]);
+      const result = await Promise.race([sourceAttempt(), timeoutPromise]);
       
       if (result && result.found) {
         return result;
