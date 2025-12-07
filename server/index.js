@@ -1600,11 +1600,18 @@ function setCache(imdbId, data) {
     sourceType = data.source === 'youtube' ? 'youtube' : data.source;
   }
   
+  const ttlHours = CACHE_TTL[sourceType] || CACHE_TTL.youtube;
   cache.set(imdbId, {
     ...data,
     source_type: sourceType,
     timestamp: Date.now()
   });
+  
+  if (data.preview_url) {
+    console.log(`  [Cache] ✓ Cached ${sourceType} preview for ${imdbId} (TTL: ${ttlHours}h)`);
+  } else {
+    console.log(`  [Cache] ✓ Cached negative result for ${imdbId} (no preview found)`);
+  }
 }
 
 async function resolvePreview(imdbId, type) {
@@ -1616,7 +1623,7 @@ async function resolvePreview(imdbId, type) {
   if (cached) {
     if (cached.preview_url) {
       const sourceType = cached.source_type || 'unknown';
-      console.log(`Cache hit: returning cached ${sourceType} preview (validated)`);
+      console.log(`✓ [Cache] Cache hit: returning cached ${sourceType} preview (validated)`);
       return {
         found: true,
         source: cached.source || (sourceType === 'itunes' ? 'itunes' : sourceType === 'archive' ? 'archive' : 'youtube'),
@@ -1626,10 +1633,12 @@ async function resolvePreview(imdbId, type) {
       };
     }
     if (!cached.youtube_key) {
-      console.log('Cache hit: negative cache (no preview found previously)');
+      console.log('✓ [Cache] Cache hit: negative cache (no preview found previously)');
       return { found: false };
     }
-    console.log('Cache expired, refreshing...');
+    console.log('⚠️ [Cache] Cache expired, refreshing...');
+  } else {
+    console.log('  [Cache] Cache miss - fetching from sources...');
   }
   
   const tmdbMeta = await getTMDBMetadata(imdbId, type);
