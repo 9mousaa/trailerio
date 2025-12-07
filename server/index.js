@@ -222,6 +222,11 @@ async function searchITunes(params) {
       clearTimeout(timeout);
       
       if (!response.ok) {
+        // Don't log every 403/429 to reduce spam - only log occasionally
+        if (response.status === 403 || response.status === 429) {
+          // Rate limited - will be handled by sequential requests
+          return [];
+        }
         console.log(`  [iTunes] Search failed: HTTP ${response.status}`);
         return [];
       }
@@ -594,6 +599,10 @@ async function extractViaInvidious(youtubeKey) {
       return null;
     } catch (e) {
       clearTimeout(timeout);
+      // Log error for debugging (only first few to avoid spam)
+      if (INVIDIOUS_INSTANCES.indexOf(instance) < 3) {
+        console.log(`  [Invidious] ${instance} error: ${e.message || 'timeout/network error'}`);
+      }
       return null;
     }
   };
@@ -635,23 +644,30 @@ async function multiPassSearch(tmdbMeta) {
     }
   };
   
+  // Search sequentially with delays to avoid rate limiting
   for (const title of titlesToTry) {
-    console.log(`\nSearching all countries in parallel for "${title}"`);
-    
-    const countrySearches = COUNTRY_VARIANTS.map(country => 
-      searchWithCountry(title, country)
-    );
-    
-    const allResults = await Promise.all(countrySearches);
+    console.log(`\nSearching countries sequentially for "${title}" (to avoid rate limiting)`);
     
     let bestOverall = null;
     
-    for (const result of allResults) {
+    // Search countries one at a time with delays to avoid rate limiting
+    for (const country of COUNTRY_VARIANTS) {
+      // Add delay between requests to avoid rate limiting (except first request)
+      if (bestOverall) {
+        await new Promise(resolve => setTimeout(resolve, 200)); // 200ms delay
+      }
+      
+      const result = await searchWithCountry(title, country);
       if (!result) continue;
       
       const match = findBestMatch(result.results, tmdbMeta);
       if (match && (!bestOverall || match.score > bestOverall.score)) {
         bestOverall = { ...match, country: result.country };
+        // If we found a good match, stop searching other countries
+        if (match.score >= MIN_SCORE_THRESHOLD + 0.2) {
+          console.log(`✓ Good match found (score: ${match.score.toFixed(2)}), stopping search`);
+          break;
+        }
       }
     }
     
@@ -663,6 +679,11 @@ async function multiPassSearch(tmdbMeta) {
         trackId: bestOverall.item.trackId || bestOverall.item.collectionId,
         country: bestOverall.country
       };
+    }
+    
+    // Add delay between title searches
+    if (titlesToTry.indexOf(title) < titlesToTry.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, 300));
     }
   }
   
