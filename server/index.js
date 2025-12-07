@@ -1,6 +1,9 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
+const Database = require('better-sqlite3');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -17,7 +20,40 @@ const CACHE_TTL = {
   archive: 720     // Archive URLs are permanent - 30 days (720 hours)
 };
 
-const cache = new Map();
+// Initialize persistent database cache
+const dbPath = process.env.DB_PATH || path.join(__dirname, 'cache.db');
+// Ensure directory exists
+const dbDir = path.dirname(dbPath);
+if (!fs.existsSync(dbDir)) {
+  fs.mkdirSync(dbDir, { recursive: true });
+}
+
+const db = new Database(dbPath);
+
+// Create cache table if it doesn't exist
+db.exec(`
+  CREATE TABLE IF NOT EXISTS cache (
+    imdb_id TEXT PRIMARY KEY,
+    preview_url TEXT,
+    track_id TEXT,
+    country TEXT,
+    source TEXT,
+    source_type TEXT,
+    youtube_key TEXT,
+    timestamp INTEGER NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+  );
+  
+  CREATE INDEX IF NOT EXISTS idx_timestamp ON cache(timestamp);
+`);
+
+// Clean up expired cache entries on startup
+const now = Date.now();
+const maxAge = Math.max(...Object.values(CACHE_TTL)) * 60 * 60 * 1000; // Longest TTL in milliseconds
+const cutoffTime = now - maxAge;
+const deleteExpired = db.prepare('DELETE FROM cache WHERE timestamp < ?');
+const deleted = deleteExpired.run(cutoffTime);
+console.log(`✓ Database cache initialized at ${dbPath} (cleaned ${deleted.changes} expired entries)`);
 let activeRequests = 0;
 let totalRequests = 0;
 
@@ -1542,14 +1578,28 @@ async function validateUrl(url, timeout = 3000) {
 }
 
 function getCached(imdbId) {
-  const cached = cache.get(imdbId);
-  if (cached) {
-    const hoursSinceCheck = (Date.now() - cached.timestamp) / (1000 * 60 * 60);
-    const sourceType = cached.source_type || 'youtube'; // Default to shortest TTL
+  const stmt = db.prepare('SELECT * FROM cache WHERE imdb_id = ?');
+  const row = stmt.get(imdbId);
+  
+  if (row) {
+    const hoursSinceCheck = (Date.now() - row.timestamp) / (1000 * 60 * 60);
+    const sourceType = row.source_type || 'youtube'; // Default to shortest TTL
     const ttlHours = CACHE_TTL[sourceType] || CACHE_TTL.youtube;
     
     if (hoursSinceCheck < ttlHours) {
-      return cached;
+      return {
+        preview_url: row.preview_url,
+        track_id: row.track_id,
+        country: row.country,
+        source: row.source,
+        source_type: row.source_type,
+        youtube_key: row.youtube_key,
+        timestamp: row.timestamp
+      };
+    } else {
+      // Cache expired, delete it
+      const deleteStmt = db.prepare('DELETE FROM cache WHERE imdb_id = ?');
+      deleteStmt.run(imdbId);
     }
   }
   return null;
@@ -1574,7 +1624,8 @@ async function getCachedWithValidation(imdbId) {
     
     if (!isValid) {
       console.log(`  [Cache] ✗ Cached URL is no longer valid, invalidating cache for ${imdbId}`);
-      cache.delete(imdbId);
+      const deleteStmt = db.prepare('DELETE FROM cache WHERE imdb_id = ?');
+      deleteStmt.run(imdbId);
       return null;
     }
     
@@ -1601,11 +1652,25 @@ function setCache(imdbId, data) {
   }
   
   const ttlHours = CACHE_TTL[sourceType] || CACHE_TTL.youtube;
-  cache.set(imdbId, {
-    ...data,
-    source_type: sourceType,
-    timestamp: Date.now()
-  });
+  const timestamp = Date.now();
+  
+  // Insert or replace cache entry
+  const stmt = db.prepare(`
+    INSERT OR REPLACE INTO cache (
+      imdb_id, preview_url, track_id, country, source, source_type, youtube_key, timestamp
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  
+  stmt.run(
+    imdbId,
+    data.preview_url || null,
+    data.track_id || null,
+    data.country || null,
+    data.source || null,
+    sourceType,
+    data.youtube_key || null,
+    timestamp
+  );
   
   if (data.preview_url) {
     console.log(`  [Cache] ✓ Cached ${sourceType} preview for ${imdbId} (TTL: ${ttlHours}h)`);
