@@ -1373,14 +1373,26 @@ async function multiPassSearch(tmdbMeta) {
     }
   };
   
+  // Limit to first 2 titles to prevent excessive searching
+  const limitedTitles = titlesToTry.slice(0, 2);
+  const overallStartTime = Date.now();
+  const MAX_OVERALL_SEARCH_TIME = 9000; // Max 9 seconds total for all iTunes searches
+  
   // Search sequentially with delays to avoid rate limiting
-  for (const title of titlesToTry) {
+  for (const title of limitedTitles) {
+    // Check if we're running out of time before starting a new title
+    const elapsed = Date.now() - overallStartTime;
+    if (elapsed > MAX_OVERALL_SEARCH_TIME) {
+      console.log(`  [iTunes] Skipping remaining titles due to time limit (${elapsed}ms elapsed)`);
+      break;
+    }
+    
     console.log(`\nSearching countries sequentially for "${title}" (to avoid rate limiting)`);
     
     let bestOverall = null;
     
-    // Sort countries by success rate (highest first)
-    const sortedCountries = successTracker.sortBySuccessRate('itunes', COUNTRY_VARIANTS);
+    // Sort countries by success rate (highest first) and limit to top 2 to prevent hanging
+    const sortedCountries = successTracker.sortBySuccessRate('itunes', COUNTRY_VARIANTS).slice(0, 2);
     const countryRates = sortedCountries.map(c => {
       const rate = successTracker.getSuccessRate('itunes', c);
       return `${c.toUpperCase()} (${(rate * 100).toFixed(0)}%)`;
@@ -1388,7 +1400,17 @@ async function multiPassSearch(tmdbMeta) {
     console.log(`  [iTunes] Searching countries in order: ${countryRates}`);
     
     // Search countries one at a time with delays to avoid rate limiting
+    const searchStartTime = Date.now();
+    const MAX_SEARCH_TIME = 8000; // Max 8 seconds for iTunes search to prevent hanging
+    
     for (const country of sortedCountries) {
+      // Check if we're running out of time
+      const elapsed = Date.now() - searchStartTime;
+      if (elapsed > MAX_SEARCH_TIME) {
+        console.log(`  [iTunes] Skipping remaining countries due to time limit (${elapsed}ms elapsed)`);
+        break;
+      }
+      
       // Add delay between requests to avoid rate limiting (except first request)
       if (bestOverall) {
         await new Promise(resolve => setTimeout(resolve, 200)); // 200ms delay
@@ -1565,16 +1587,20 @@ async function resolvePreview(imdbId, type) {
   console.log(`\n========== Trying sources in order (sorted by success rate): ${sourceRates} ==========`);
   
   // Try each source in sorted order
-  const SOURCE_TIMEOUT = 15000; // 15 seconds per source
+  const SOURCE_TIMEOUT = 10000; // 10 seconds per source (reduced from 15s)
   
   for (const source of sortedSources) {
     console.log(`\n========== Trying ${source.toUpperCase()} ==========`);
+    const sourceStartTime = Date.now();
     
     try {
       // Wrap each source attempt in a timeout to prevent hanging
       const sourceAttempt = async () => {
         if (source === 'itunes') {
+          console.log(`  [${source.toUpperCase()}] Starting search at ${new Date().toISOString()}`);
           const itunesResult = await multiPassSearch(tmdbMeta);
+          const duration = Date.now() - sourceStartTime;
+          console.log(`  [${source.toUpperCase()}] Search completed in ${duration}ms`);
           console.log(`iTunes search result: ${itunesResult.found ? 'FOUND' : 'NOT FOUND'}`);
           
           if (itunesResult.found) {
