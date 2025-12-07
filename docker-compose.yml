@@ -31,7 +31,7 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.trailerio.rule=Host(`trailerio.plaio.cc`)"
       - "traefik.http.routers.trailerio.entrypoints=websecure"
-      - "traefik.http.routers.trailerio.tls.certresolver=le"
+      - "traefik.http.routers.trailerio.tls.certresolver=letsencrypt"
       - "traefik.http.routers.trailerio.tls=true"
       - "traefik.http.services.trailerio.loadbalancer.server.port=80"
       # HTTP to HTTPS redirect
