@@ -456,7 +456,6 @@ async function extractViaPiped(youtubeKey) {
       }
       
       const data = await response.json();
-      const duration = Date.now() - startTime;
       console.log(`  [Piped] ${instance}: got response (${duration}ms), has dash: ${!!data.dash}, videoStreams: ${data.videoStreams?.length || 0}`);
       
       // PRIORITY 1: DASH manifest (best for AVPlayer - native support, adaptive streaming, highest quality)
@@ -597,7 +596,6 @@ async function extractViaInvidious(youtubeKey) {
       }
       
       const data = await response.json();
-      const duration = Date.now() - startTime;
       console.log(`  [Invidious] ${instance}: got response (${duration}ms), formatStreams: ${data.formatStreams?.length || 0}`);
       
       const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
