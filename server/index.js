@@ -1,11 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
-const { exec, spawn } = require('child_process');
+const { exec } = require('child_process');
 const { promisify } = require('util');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
 
 const execAsync = promisify(exec);
 const app = express();
@@ -667,54 +664,19 @@ async function extractViaPiped(youtubeKey) {
             return rankA - rankB;
           });
         
-        // PRIORITY 1: Highest quality (even if video-only + needs muxing)
-        // Quality is more important than avoiding muxing
+        // PRIORITY: Highest quality combined stream (no muxing - too much processing)
+        // Only return combined streams (video + audio) - skip video-only streams
         if (sorted.length > 0) {
-          const bestVideo = sorted[0]; // Highest quality video
-          
-          // Check if there's a matching audio stream for the highest quality video
-          if (data.audioStreams?.length > 0) {
-            // Find best quality audio stream
-            const bestAudio = data.audioStreams
-              .filter(s => s.mimeType?.startsWith('audio/') && s.url)
-              .sort((a, b) => {
-                // Prefer higher bitrate audio
-                const bitrateA = a.bitrate || 0;
-                const bitrateB = b.bitrate || 0;
-                return bitrateB - bitrateA;
-              })[0];
-            
-            if (bestAudio) {
-              // Check if there's a combined stream of the same quality
-              const combinedOfSameQuality = sorted.find(s => !s.videoOnly && s.quality === bestVideo.quality);
-              if (combinedOfSameQuality) {
-                // Prefer combined if same quality (no muxing needed)
-                console.log(`  ✓ [Piped] ${instance}: selected ${combinedOfSameQuality.quality || 'unknown'} (combined, highest quality)`);
-                return { url: combinedOfSameQuality.url, quality: combinedOfSameQuality.quality, isDash: false };
-              } else {
-                // Use highest quality video-only + audio (will mux)
-                console.log(`  ✓ [Piped] ${instance}: selected ${bestVideo.quality || 'unknown'} (video-only) + audio (will mux, highest quality)`);
-                return { 
-                  url: bestVideo.url, 
-                  audioUrl: bestAudio.url,
-                  quality: bestVideo.quality, 
-                  isDash: false,
-                  needsMuxing: true
-                };
-              }
-            }
-          }
-          
-          // Check if highest quality has a combined stream
-          const bestCombined = sorted.find(s => !s.videoOnly && s.quality === bestVideo.quality);
+          // Find highest quality combined stream
+          const bestCombined = sorted.find(s => !s.videoOnly);
           if (bestCombined) {
             console.log(`  ✓ [Piped] ${instance}: selected ${bestCombined.quality || 'unknown'} (combined, highest quality)`);
             return { url: bestCombined.url, quality: bestCombined.quality, isDash: false };
           }
           
-          // No audio available, return highest quality video-only as last resort
-          console.log(`  ⚠️ [Piped] ${instance}: selected ${bestVideo.quality || 'unknown'} (video-only, no audio available)`);
-          return { url: bestVideo.url, quality: bestVideo.quality, isDash: false };
+          // If no combined streams available, skip this instance (don't return video-only)
+          console.log(`  [Piped] ${instance}: no combined streams available, skipping`);
+          return null;
         }
       }
       
@@ -738,7 +700,7 @@ async function extractViaPiped(youtubeKey) {
     return null;
   }
   
-  // Find best quality result (prefer DASH, then highest quality regardless of muxing)
+  // Find best quality result (prefer DASH, then highest quality combined stream)
   let bestResult = null;
   const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
   
@@ -747,15 +709,10 @@ async function extractViaPiped(youtubeKey) {
     // DASH is always best
     if (a.isDash && !b.isDash) return -1;
     if (!a.isDash && b.isDash) return 1;
-    // Then by quality (highest first) - quality matters more than muxing
+    // Then by quality (highest first)
     const rankA = qualityPriority.findIndex(p => (a.quality || '').toLowerCase().includes(p));
     const rankB = qualityPriority.findIndex(p => (b.quality || '').toLowerCase().includes(p));
-    const qualityDiff = (rankA === -1 ? 999 : rankA) - (rankB === -1 ? 999 : rankB);
-    if (qualityDiff !== 0) return qualityDiff;
-    // If same quality, prefer combined over muxed (but quality is priority)
-    if (!a.needsMuxing && b.needsMuxing) return -1;
-    if (a.needsMuxing && !b.needsMuxing) return 1;
-    return 0;
+    return (rankA === -1 ? 999 : rankA) - (rankB === -1 ? 999 : rankB);
   });
   
   // DASH is always best - return immediately
@@ -764,12 +721,11 @@ async function extractViaPiped(youtubeKey) {
     return { url: sortedResults[0].url, isDash: true, quality: 'DASH' };
   }
   
-  // Return best result (highest quality, even if needs muxing)
+  // Return best result (highest quality combined stream)
   if (sortedResults.length > 0) {
     bestResult = sortedResults[0];
-    const muxInfo = bestResult.needsMuxing ? ' (will mux video+audio)' : '';
-    console.log(`  ✓ [Piped] Got URL from Piped (quality: ${bestResult.quality || 'unknown'}${muxInfo}, from ${successfulResults.length}/${PIPED_INSTANCES.length} instances)`);
-    // Return the result object (not just URL) so we can check for muxing
+    console.log(`  ✓ [Piped] Got URL from Piped (quality: ${bestResult.quality || 'unknown'}, from ${successfulResults.length}/${PIPED_INSTANCES.length} instances)`);
+    // Return the result object
     return bestResult;
   }
   
@@ -1065,14 +1021,12 @@ async function resolvePreview(imdbId, type) {
         youtube_key: tmdbMeta.youtubeTrailerKey
       });
       console.log(`✓ Got URL from Piped`);
-      // Handle both string (URL) and object (with muxing info) formats
+      // Handle both string (URL) and object formats
       const pipedUrl = typeof pipedResult === 'string' ? pipedResult : pipedResult.url;
       return {
         found: true,
         source: 'youtube',
         previewUrl: pipedUrl,
-        audioUrl: pipedResult.audioUrl || null,
-        needsMuxing: pipedResult.needsMuxing || false,
         youtubeKey: tmdbMeta.youtubeTrailerKey,
         country: 'yt'
       };
@@ -1302,197 +1256,6 @@ app.options('/proxy-video', (req, res) => {
   res.status(204).end();
 });
 
-// Mux video + audio endpoint (creates proper MP4 file for AVPlayer compatibility)
-// NOTE: This is a last resort - combined streams are preferred for AVPlayer compatibility
-app.get('/mux-video', async (req, res) => {
-  const videoUrl = req.query.video;
-  const audioUrl = req.query.audio;
-  
-  if (!videoUrl || !audioUrl) {
-    return res.status(400).json({ error: 'Missing video or audio parameter' });
-  }
-  
-  console.log(`Muxing video+audio: ${videoUrl.substring(0, 60)}... + ${audioUrl.substring(0, 60)}...`);
-  
-  // Set timeout to prevent blocking (60 seconds max for muxing)
-  const MUX_TIMEOUT = 60000;
-  let timeoutFired = false;
-  const timeout = setTimeout(() => {
-    timeoutFired = true;
-    console.log(`  ⚠️ [mux] Timeout after ${MUX_TIMEOUT / 1000}s`);
-    if (!res.headersSent) {
-      res.status(504).json({ error: 'Muxing timeout' });
-    }
-  }, MUX_TIMEOUT);
-  
-  try {
-    // Create temporary file for output (AVPlayer needs proper MP4 with moov atom at beginning)
-    const tempFile = path.join(os.tmpdir(), `mux-${Date.now()}-${Math.random().toString(36).substring(7)}.mp4`);
-    
-    // Use ffmpeg to mux video and audio to temp file first, then apply faststart
-    // This ensures moov atom is at beginning (required for AVPlayer)
-    const ffmpegArgs = [
-      '-i', videoUrl,           // Video input (can be URL)
-      '-i', audioUrl,           // Audio input (can be URL)
-      '-c:v', 'copy',           // Copy video codec (no re-encoding = fast)
-      '-c:a', 'aac',            // Encode audio to AAC (AVPlayer compatible)
-      '-b:a', '128k',           // Audio bitrate (AVPlayer compatible)
-      '-f', 'mp4',              // Output format
-      '-movflags', 'faststart', // Put moov atom at beginning (AVPlayer requirement - needs full file first)
-      '-preset', 'ultrafast',   // Fast encoding
-      '-y',                     // Overwrite output file
-      tempFile,                 // Output to temp file
-    ];
-    
-    console.log(`  [mux] Starting ffmpeg muxing to temp file...`);
-    const startTime = Date.now();
-    
-    // Run ffmpeg to create the file
-    await new Promise((resolve, reject) => {
-      const ffmpeg = spawn('ffmpeg', ffmpegArgs, {
-        stdio: ['ignore', 'pipe', 'pipe']
-      });
-      
-      let stderrOutput = '';
-      
-      // Log progress
-      ffmpeg.stderr.on('data', (data) => {
-        const msg = data.toString();
-        stderrOutput += msg;
-        // Log progress indicators
-        if (msg.includes('time=')) {
-          const timeMatch = msg.match(/time=(\d+:\d+:\d+\.\d+)/);
-          if (timeMatch) {
-            console.log(`  [mux] Progress: ${timeMatch[1]}`);
-          }
-        }
-        // Log errors
-        if (msg.includes('error') || msg.includes('Error') || msg.includes('failed')) {
-          console.error(`  [ffmpeg] ${msg.substring(0, 200)}`);
-        }
-      });
-      
-      ffmpeg.on('close', (code) => {
-        if (code !== 0) {
-          reject(new Error(`ffmpeg exited with code ${code}: ${stderrOutput.substring(0, 500)}`));
-        } else {
-          resolve();
-        }
-      });
-      
-      ffmpeg.on('error', (err) => {
-        reject(err);
-      });
-      
-      // Handle timeout
-      if (timeoutFired) {
-        ffmpeg.kill('SIGTERM');
-        reject(new Error('Muxing timeout'));
-      }
-    });
-    
-    clearTimeout(timeout);
-    
-    // Check if file was created
-    if (!fs.existsSync(tempFile)) {
-      throw new Error('Muxed file was not created');
-    }
-    
-    const fileStats = fs.statSync(tempFile);
-    const fileSize = fileStats.size;
-    const elapsed = Date.now() - startTime;
-    console.log(`  ✓ [mux] Muxing completed in ${elapsed}ms, file size: ${(fileSize / 1024 / 1024).toFixed(2)}MB`);
-    
-    // Handle Range requests (AVPlayer sends these for seeking)
-    const rangeHeader = req.headers.range;
-    let start = 0;
-    let end = fileSize - 1;
-    
-    if (rangeHeader) {
-      const parts = rangeHeader.replace(/bytes=/, '').split('-');
-      start = parseInt(parts[0], 10);
-      end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-      
-      if (start >= fileSize || end >= fileSize) {
-        res.status(416).set({ 'Content-Range': `bytes */${fileSize}` }).end();
-        fs.unlinkSync(tempFile); // Clean up
-        return;
-      }
-    }
-    
-    const chunkSize = (end - start) + 1;
-    
-    // Set headers for AVPlayer compatibility
-    res.set({
-      'Content-Type': 'video/mp4',
-      'Content-Length': chunkSize,
-      'Accept-Ranges': 'bytes',
-      'Content-Range': rangeHeader ? `bytes ${start}-${end}/${fileSize}` : undefined,
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-      'Access-Control-Allow-Headers': 'Range, Content-Type',
-      'Cache-Control': 'no-cache',
-    });
-    
-    // Set status code (206 for partial content, 200 for full)
-    res.status(rangeHeader ? 206 : 200);
-    
-    // Create read stream and pipe to response
-    const fileStream = fs.createReadStream(tempFile, { start, end });
-    
-    // Clean up temp file after streaming
-    fileStream.on('end', () => {
-      try {
-        fs.unlinkSync(tempFile);
-        console.log(`  ✓ [mux] Cleaned up temp file`);
-      } catch (e) {
-        console.warn(`  ⚠️ [mux] Failed to delete temp file: ${e.message}`);
-      }
-    });
-    
-    fileStream.on('error', (err) => {
-      console.error(`  ✗ [mux] Stream error: ${err.message}`);
-      try {
-        fs.unlinkSync(tempFile);
-      } catch (e) {
-        // Ignore cleanup errors
-      }
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'Stream error' });
-      }
-    });
-    
-    // Handle client disconnect
-    req.on('close', () => {
-      fileStream.destroy();
-      try {
-        fs.unlinkSync(tempFile);
-      } catch (e) {
-        // Ignore cleanup errors
-      }
-    });
-    
-    fileStream.pipe(res);
-    
-  } catch (error) {
-    clearTimeout(timeout);
-    console.error(`  ✗ [mux] Error: ${error.message}`);
-    if (!res.headersSent) {
-      res.status(500).json({ error: error.message });
-    }
-  }
-});
-
-// Handle OPTIONS requests for CORS (AVPlayer may send these)
-app.options('/mux-video', (req, res) => {
-  res.set({
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-    'Access-Control-Allow-Headers': 'Range, Content-Type',
-    'Access-Control-Max-Age': '86400',
-  });
-  res.status(204).end();
-});
 
 app.get('/manifest.json', (req, res) => {
   res.json({
@@ -1550,36 +1313,28 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       
       let finalUrl = result.previewUrl;
       
-      // Check if we need to mux video + audio
-      if (result.needsMuxing && result.audioUrl) {
+      // DASH manifests (.mpd) work directly in AVPlayer - don't proxy them
+      const isDashManifest = result.previewUrl.includes('.mpd') || result.previewUrl.endsWith('/dash');
+      
+      // Piped/Invidious URLs are already proxied and work directly in AVPlayer - don't proxy them again
+      const isPipedProxy = result.previewUrl.includes('pipedproxy') || result.previewUrl.includes('pipedapi');
+      const isInvidiousProxy = result.previewUrl.includes('invidious') || result.previewUrl.includes('iv.') || result.previewUrl.includes('yewtu.be');
+      
+      // Only proxy direct googlevideo.com URLs (from yt-dlp)
+      // Piped/Invidious URLs and DASH manifests work directly - don't proxy them
+      const needsProxy = isYouTube && !isDashManifest && !isPipedProxy && !isInvidiousProxy && 
+        result.previewUrl.includes('googlevideo.com') && 
+        !result.previewUrl.includes('video-ssl.itunes.apple.com');
+      
+      if (needsProxy) {
         const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
         const host = req.get('x-forwarded-host') || req.get('host') || 'localhost';
-        finalUrl = `${protocol}://${host}/api/mux-video?video=${encodeURIComponent(result.previewUrl)}&audio=${encodeURIComponent(result.audioUrl)}`;
-        console.log(`Using mux endpoint to combine video+audio: ${finalUrl.substring(0, 100)}...`);
-      } else {
-        // DASH manifests (.mpd) work directly in AVPlayer - don't proxy them
-        const isDashManifest = result.previewUrl.includes('.mpd') || result.previewUrl.endsWith('/dash');
-        
-        // Piped/Invidious URLs are already proxied and work directly in AVPlayer - don't proxy them again
-        const isPipedProxy = result.previewUrl.includes('pipedproxy') || result.previewUrl.includes('pipedapi');
-        const isInvidiousProxy = result.previewUrl.includes('invidious') || result.previewUrl.includes('iv.') || result.previewUrl.includes('yewtu.be');
-        
-        // Only proxy direct googlevideo.com URLs (from yt-dlp)
-        // Piped/Invidious URLs and DASH manifests work directly - don't proxy them
-        const needsProxy = isYouTube && !isDashManifest && !isPipedProxy && !isInvidiousProxy &&
-          result.previewUrl.includes('googlevideo.com') &&
-          !result.previewUrl.includes('video-ssl.itunes.apple.com');
-        
-        if (needsProxy) {
-          const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
-          const host = req.get('x-forwarded-host') || req.get('host') || 'localhost';
-          finalUrl = `${protocol}://${host}/api/proxy-video?url=${encodeURIComponent(result.previewUrl)}`;
-          console.log(`Wrapping googlevideo.com URL in proxy: ${finalUrl.substring(0, 80)}...`);
-        } else if (isDashManifest) {
-          console.log(`Using DASH manifest directly (AVPlayer native support): ${finalUrl.substring(0, 80)}...`);
-        } else if (isPipedProxy || isInvidiousProxy) {
-          console.log(`Using Piped/Invidious URL directly (already proxied, AVPlayer compatible): ${finalUrl.substring(0, 80)}...`);
-        }
+        finalUrl = `${protocol}://${host}/api/proxy-video?url=${encodeURIComponent(result.previewUrl)}`;
+        console.log(`Wrapping googlevideo.com URL in proxy: ${finalUrl.substring(0, 80)}...`);
+      } else if (isDashManifest) {
+        console.log(`Using DASH manifest directly (AVPlayer native support): ${finalUrl.substring(0, 80)}...`);
+      } else if (isPipedProxy || isInvidiousProxy) {
+        console.log(`Using Piped/Invidious URL directly (already proxied, AVPlayer compatible): ${finalUrl.substring(0, 80)}...`);
       }
       
       console.log(`  ✓ Returning stream for ${id}: ${finalUrl.substring(0, 80)}...`);
