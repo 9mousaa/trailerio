@@ -633,6 +633,13 @@ async function extractViaPiped(youtubeKey) {
           return idx === -1 ? 998 : idx;
         };
         
+        // Log available qualities for debugging
+        const availableQualities = data.videoStreams
+          .filter(s => s.mimeType?.startsWith('video/') && s.url)
+          .map(s => `${s.quality || 'unknown'}${s.videoOnly ? ' (video-only)' : ' (combined)'}`)
+          .join(', ');
+        console.log(`  [Piped] ${instance}: Available qualities: ${availableQualities}`);
+        
         const sorted = [...data.videoStreams]
           .filter(s => s.mimeType?.startsWith('video/') && s.url)
           .sort((a, b) => {
@@ -643,9 +650,11 @@ async function extractViaPiped(youtubeKey) {
         
         // Prefer combined streams (video + audio), but fall back to video-only if no combined streams exist
         if (sorted.length > 0) {
-          const bestCombined = sorted.find(s => !s.videoOnly);
-          if (bestCombined) {
-            console.log(`  ✓ [Piped] ${instance}: selected ${bestCombined.quality || 'unknown'} (combined, highest quality)`);
+          // Find all combined streams and select the highest quality one
+          const combinedStreams = sorted.filter(s => !s.videoOnly);
+          if (combinedStreams.length > 0) {
+            const bestCombined = combinedStreams[0]; // Already sorted by quality
+            console.log(`  ✓ [Piped] ${instance}: selected ${bestCombined.quality || 'unknown'} (combined, highest quality available)`);
             successTracker.recordSuccess('piped', instance);
             return { url: bestCombined.url, quality: bestCombined.quality, isDash: false };
           }
