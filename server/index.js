@@ -1326,8 +1326,22 @@ app.get('/mux-video', async (req, res) => {
   }, MUX_TIMEOUT);
   
   try {
+    // Handle HEAD requests (AVPlayer checks availability first)
+    if (req.method === 'HEAD') {
+      // For HEAD, we can't know the size without processing, but we can indicate it's available
+      res.set({
+        'Content-Type': 'video/mp4',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+        'Access-Control-Allow-Headers': 'Range',
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'no-cache',
+      });
+      return res.status(200).end();
+    }
+    
     // Use ffmpeg to mux video and audio streams on-the-fly
-    // AVPlayer compatible: use faststart to put moov atom at beginning (required for seeking)
+    // AVPlayer compatible: use fragmented MP4 for streaming (works better than faststart for streaming)
     const ffmpegArgs = [
       '-i', videoUrl,           // Video input (can be URL)
       '-i', audioUrl,           // Audio input (can be URL)
@@ -1335,7 +1349,7 @@ app.get('/mux-video', async (req, res) => {
       '-c:a', 'aac',            // Encode audio to AAC (AVPlayer compatible)
       '-b:a', '128k',           // Audio bitrate (AVPlayer compatible)
       '-f', 'mp4',              // Output format
-      '-movflags', 'faststart', // Put moov atom at beginning (AVPlayer requirement)
+      '-movflags', 'frag_keyframe+empty_moov+default_base_moof', // Fragmented MP4 for streaming (AVPlayer compatible)
       '-preset', 'ultrafast',   // Fast encoding
       '-',                      // Output to stdout
     ];
@@ -1348,6 +1362,7 @@ app.get('/mux-video', async (req, res) => {
       'Access-Control-Allow-Headers': 'Range',
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'no-cache',
+      'Transfer-Encoding': 'chunked', // Indicate streaming
     });
     
     // Spawn ffmpeg process
