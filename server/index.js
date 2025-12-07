@@ -786,9 +786,9 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       let finalUrl = result.previewUrl;
       
       // DASH manifests work directly in AVPlayer
-      const isDashManifest = typeof result.previewUrl === 'object' && result.previewUrl.isDash;
-      const isPipedProxy = result.previewUrl.includes('pipedproxy') || result.previewUrl.includes('pipedapi');
-      const isInvidiousProxy = result.previewUrl.includes('invidious') || result.previewUrl.includes('iv.') || result.previewUrl.includes('yewtu.be');
+      const isDashManifest = finalUrl.includes('.mpd') || finalUrl.endsWith('/dash');
+      const isPipedProxy = finalUrl.includes('pipedproxy') || finalUrl.includes('pipedapi');
+      const isInvidiousProxy = finalUrl.includes('invidious') || finalUrl.includes('iv.') || finalUrl.includes('yewtu.be');
       
       if (isDashManifest) {
         console.log(`Using DASH manifest directly (AVPlayer native support): ${finalUrl.substring(0, 80)}...`);
