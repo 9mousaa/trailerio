@@ -19,6 +19,7 @@ const successTracker = {
   piped: new Map(), // instance URL -> { success: number, total: number }
   invidious: new Map(), // instance URL -> { success: number, total: number }
   itunes: new Map(), // country code -> { success: number, total: number }
+  archive: new Map(), // strategy ID -> { success: number, total: number }
   
   recordSuccess(type, identifier) {
     const map = this[type];
@@ -784,25 +785,54 @@ async function extractViaInternetArchive(tmdbMeta) {
     const titleQuery = tmdbMeta.title.replace(/[^\w\s]/g, ' ').trim().replace(/\s+/g, ' ');
     const yearQuery = tmdbMeta.year ? ` AND year:${tmdbMeta.year}` : '';
     
-    // Try multiple search strategies
-    const searchQueries = [
-      // Strategy 1: Title + year in movie_trailers collection (most specific)
-      `collection:movie_trailers AND title:${encodeURIComponent(titleQuery)}${yearQuery}`,
-      // Strategy 2: Title in movie_trailers (no year)
-      `collection:movie_trailers AND title:${encodeURIComponent(titleQuery)}`,
-      // Strategy 3: Title + "trailer" in all collections
-      `title:${encodeURIComponent(titleQuery + ' trailer')}${yearQuery}`,
-      // Strategy 4: Title + "trailer" (no year)
-      `title:${encodeURIComponent(titleQuery + ' trailer')}`,
-      // Strategy 5: Original title if different
-      tmdbMeta.originalTitle && tmdbMeta.originalTitle !== tmdbMeta.title
-        ? `collection:movie_trailers AND title:${encodeURIComponent(tmdbMeta.originalTitle.replace(/[^\w\s]/g, ' ').trim())}${yearQuery}`
-        : null
-    ].filter(q => q !== null);
+    // Define search strategies with IDs for tracking
+    const searchStrategies = [
+      {
+        id: 'archive_collection_title_year',
+        query: `collection:movie_trailers AND title:${encodeURIComponent(titleQuery)}${yearQuery}`,
+        description: 'Title + year in movie_trailers collection'
+      },
+      {
+        id: 'archive_collection_title',
+        query: `collection:movie_trailers AND title:${encodeURIComponent(titleQuery)}`,
+        description: 'Title in movie_trailers (no year)'
+      },
+      {
+        id: 'archive_title_trailer_year',
+        query: `title:${encodeURIComponent(titleQuery + ' trailer')}${yearQuery}`,
+        description: 'Title + "trailer" with year'
+      },
+      {
+        id: 'archive_title_trailer',
+        query: `title:${encodeURIComponent(titleQuery + ' trailer')}`,
+        description: 'Title + "trailer" (no year)'
+      }
+    ];
     
-    for (const query of searchQueries) {
+    // Add original title strategy if different
+    if (tmdbMeta.originalTitle && tmdbMeta.originalTitle !== tmdbMeta.title) {
+      const originalTitleQuery = tmdbMeta.originalTitle.replace(/[^\w\s]/g, ' ').trim();
+      searchStrategies.push({
+        id: 'archive_collection_original_year',
+        query: `collection:movie_trailers AND title:${encodeURIComponent(originalTitleQuery)}${yearQuery}`,
+        description: 'Original title + year in movie_trailers'
+      });
+    }
+    
+    // Sort strategies by success rate (highest first)
+    const strategyIds = searchStrategies.map(s => s.id);
+    const sortedIds = successTracker.sortBySuccessRate('archive', strategyIds);
+    const sortedStrategies = sortedIds.map(id => searchStrategies.find(s => s.id === id)).filter(s => s !== undefined);
+    
+    const strategyRates = sortedStrategies.slice(0, 3).map(s => {
+      const rate = successTracker.getSuccessRate('archive', s.id);
+      return `${s.description} (${(rate * 100).toFixed(0)}%)`;
+    }).join(', ');
+    console.log(`  [Internet Archive] Trying ${sortedStrategies.length} strategies (sorted by success rate - top 3: ${strategyRates})...`);
+    
+    for (const strategy of sortedStrategies) {
       // Use advancedsearch API with better field selection
-      const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(query)}&fl=identifier,title,description,date,downloads,creator,subject&sort[]=downloads+desc&rows=20&output=json`;
+      const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(strategy.query)}&fl=identifier,title,description,date,downloads,creator,subject&sort[]=downloads+desc&rows=20&output=json`;
       
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 8000);
@@ -814,16 +844,20 @@ async function extractViaInternetArchive(tmdbMeta) {
         const duration = Date.now() - startTime;
         
         if (!response.ok) {
-          console.log(`  [Internet Archive] Search failed: HTTP ${response.status} (${duration}ms)`);
+          console.log(`  [Internet Archive] Search failed: HTTP ${response.status} (${duration}ms) for strategy "${strategy.description}"`);
+          successTracker.recordFailure('archive', strategy.id);
           continue;
         }
         
         const data = await response.json();
         const docs = data.response?.docs || [];
         
-        console.log(`  [Internet Archive] Query returned ${docs.length} results (${duration}ms)`);
+        console.log(`  [Internet Archive] Query returned ${docs.length} results (${duration}ms) for strategy "${strategy.description}"`);
         
-        if (docs.length === 0) continue;
+        if (docs.length === 0) {
+          successTracker.recordFailure('archive', strategy.id);
+          continue;
+        }
         
         // Find best match using fuzzy matching (like iTunes)
         let bestMatch = null;
@@ -926,9 +960,8 @@ async function extractViaInternetArchive(tmdbMeta) {
             });
             clearTimeout(metaTimeout);
             if (!metaResponse.ok) {
-              if (searchTerms.indexOf(searchTerm) === 0) {
-                console.log(`  [Internet Archive] Metadata fetch failed: HTTP ${metaResponse.status}`);
-              }
+              console.log(`  [Internet Archive] Metadata fetch failed: HTTP ${metaResponse.status} for "${bestMatch.title}"`);
+              successTracker.recordFailure('archive', strategy.id);
               continue;
             }
             
@@ -992,22 +1025,29 @@ async function extractViaInternetArchive(tmdbMeta) {
               const bestFile = videoFiles[0];
               const videoUrl = `https://archive.org/download/${identifier}/${encodeURIComponent(bestFile.name)}`;
               
-              console.log(`  ✓ [Internet Archive] Found: "${bestMatch.title}" (${bestFile.format || 'video'}, ${Math.round((bestFile.size || 0) / 1024 / 1024)}MB)`);
+              console.log(`  ✓ [Internet Archive] Found: "${bestMatch.title}" (${bestFile.format || 'video'}, ${Math.round((bestFile.size || 0) / 1024 / 1024)}MB) via strategy "${strategy.description}"`);
+              successTracker.recordSuccess('archive', strategy.id);
               return videoUrl;
             } else {
               // Log first few file names for debugging
               const fileNames = files.slice(0, 5).map(f => f.name || 'unnamed').join(', ');
               console.log(`  [Internet Archive] No video files found. Sample files: ${fileNames}${files.length > 5 ? '...' : ''}`);
+              successTracker.recordFailure('archive', strategy.id);
             }
           } catch (metaError) {
             clearTimeout(metaTimeout);
             console.log(`  [Internet Archive] Metadata fetch error for "${bestMatch.title}": ${metaError.message || 'timeout'}`);
+            successTracker.recordFailure('archive', strategy.id);
             continue;
           }
+        } else {
+          // No match found (bestScore < 0.6)
+          successTracker.recordFailure('archive', strategy.id);
         }
       } catch (e) {
         clearTimeout(timeout);
-        console.log(`  [Internet Archive] Search error for query "${query.substring(0, 50)}...": ${e.message || 'timeout'}`);
+        console.log(`  [Internet Archive] Search error for strategy "${strategy.description}": ${e.message || 'timeout'}`);
+        successTracker.recordFailure('archive', strategy.id);
         continue;
       }
     }
