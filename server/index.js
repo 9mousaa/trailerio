@@ -11,9 +11,31 @@ const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
 const STREAM_TIMEOUT = 20000; // 20 seconds - reduced to fail faster
 
 const cache = new Map();
+let activeRequests = 0;
+let totalRequests = 0;
 
 app.use(cors());
 app.use(express.json());
+
+// Request tracking middleware
+app.use((req, res, next) => {
+  activeRequests++;
+  totalRequests++;
+  const requestId = totalRequests;
+  console.log(`[REQ ${requestId}] ${req.method} ${req.path} - Active: ${activeRequests}`);
+  
+  res.on('finish', () => {
+    activeRequests--;
+    console.log(`[REQ ${requestId}] Finished - Active: ${activeRequests}`);
+  });
+  
+  res.on('close', () => {
+    activeRequests--;
+    console.log(`[REQ ${requestId}] Closed - Active: ${activeRequests}`);
+  });
+  
+  next();
+});
 
 function normalizeTitle(s) {
   return s
@@ -1122,8 +1144,9 @@ app.get('/manifest.json', (req, res) => {
 
 app.get('/stream/:type/:id.json', async (req, res) => {
   const { type, id } = req.params;
+  const requestStart = Date.now();
   
-  console.log(`\n========== Stream request: type=${type}, id=${id} ==========`);
+  console.log(`\n========== Stream request: type=${type}, id=${id} (Active requests: ${activeRequests}) ==========`);
   
   if (!id.startsWith('tt')) {
     console.log(`  Skipping non-IMDB ID: ${id}`);
@@ -1209,16 +1232,23 @@ app.get('/stream/:type/:id.json', async (req, res) => {
           
           // Track response completion
           res.on('finish', () => {
-            console.log(`  [DEBUG] Response finished for ${id}`);
+            const duration = Date.now() - requestStart;
+            console.log(`  [DEBUG] Response finished for ${id} (took ${duration}ms total)`);
           });
           
           res.on('close', () => {
-            console.log(`  [DEBUG] Response closed for ${id}`);
+            const duration = Date.now() - requestStart;
+            console.log(`  [DEBUG] Response closed for ${id} (took ${duration}ms total)`);
           });
           
           res.on('error', (err) => {
             console.error(`  [DEBUG] Response error for ${id}:`, err.message);
           });
+          
+          // Ensure response is properly ended
+          if (!res.finished && !res.closed) {
+            console.log(`  [DEBUG] Response not finished/closed, ensuring end for ${id}`);
+          }
           
           return;
         } catch (jsonError) {
@@ -1235,7 +1265,8 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     if (!res.headersSent) {
       try {
         res.json({ streams: [] });
-        console.log(`  [DEBUG] Empty response sent for ${id}`);
+        const duration = Date.now() - requestStart;
+        console.log(`  [DEBUG] Empty response sent for ${id} (took ${duration}ms total)`);
         return;
       } catch (jsonError) {
         console.error(`  [DEBUG] Error sending empty response for ${id}:`, jsonError.message);
@@ -1246,9 +1277,10 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   } catch (error) {
     clearTimeout(timeout);
     const isTimeout = error.message === 'Request timeout';
+    const duration = Date.now() - requestStart;
     console.error(`  ✗ Error resolving ${id}:`, isTimeout ? 'Request timeout' : (error.message || error));
     console.error(`  [DEBUG] Error stack:`, error.stack);
-    console.log(`  [DEBUG] Before error response - headersSent: ${res.headersSent}, timeoutFired: ${timeoutFired}`);
+    console.log(`  [DEBUG] Before error response - headersSent: ${res.headersSent}, timeoutFired: ${timeoutFired} (took ${duration}ms)`);
     if (!res.headersSent && !timeoutFired) {
       try {
         res.json({ streams: [] });
