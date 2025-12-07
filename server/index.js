@@ -1302,7 +1302,7 @@ app.options('/proxy-video', (req, res) => {
   res.status(204).end();
 });
 
-// Mux video + audio endpoint (minimal server effort - streams directly with ffmpeg)
+// Mux video + audio endpoint (creates proper MP4 file for AVPlayer compatibility)
 // NOTE: This is a last resort - combined streams are preferred for AVPlayer compatibility
 app.get('/mux-video', async (req, res) => {
   const videoUrl = req.query.video;
@@ -1314,8 +1314,8 @@ app.get('/mux-video', async (req, res) => {
   
   console.log(`Muxing video+audio: ${videoUrl.substring(0, 60)}... + ${audioUrl.substring(0, 60)}...`);
   
-  // Set timeout to prevent blocking (30 seconds max)
-  const MUX_TIMEOUT = 30000;
+  // Set timeout to prevent blocking (60 seconds max for muxing)
+  const MUX_TIMEOUT = 60000;
   let timeoutFired = false;
   const timeout = setTimeout(() => {
     timeoutFired = true;
@@ -1326,22 +1326,11 @@ app.get('/mux-video', async (req, res) => {
   }, MUX_TIMEOUT);
   
   try {
-    // Handle HEAD requests (AVPlayer checks availability first)
-    if (req.method === 'HEAD') {
-      // For HEAD, we can't know the size without processing, but we can indicate it's available
-      res.set({
-        'Content-Type': 'video/mp4',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-        'Access-Control-Allow-Headers': 'Range',
-        'Accept-Ranges': 'bytes',
-        'Cache-Control': 'no-cache',
-      });
-      return res.status(200).end();
-    }
+    // Create temporary file for output (AVPlayer needs proper MP4 with moov atom at beginning)
+    const tempFile = path.join(os.tmpdir(), `mux-${Date.now()}-${Math.random().toString(36).substring(7)}.mp4`);
     
-    // Use ffmpeg to mux video and audio streams on-the-fly
-    // AVPlayer compatible: use fragmented MP4 for streaming (works better than faststart for streaming)
+    // Use ffmpeg to mux video and audio to temp file first, then apply faststart
+    // This ensures moov atom is at beginning (required for AVPlayer)
     const ffmpegArgs = [
       '-i', videoUrl,           // Video input (can be URL)
       '-i', audioUrl,           // Audio input (can be URL)
@@ -1349,65 +1338,141 @@ app.get('/mux-video', async (req, res) => {
       '-c:a', 'aac',            // Encode audio to AAC (AVPlayer compatible)
       '-b:a', '128k',           // Audio bitrate (AVPlayer compatible)
       '-f', 'mp4',              // Output format
-      '-movflags', 'frag_keyframe+empty_moov+default_base_moof', // Fragmented MP4 for streaming (AVPlayer compatible)
+      '-movflags', 'faststart', // Put moov atom at beginning (AVPlayer requirement - needs full file first)
       '-preset', 'ultrafast',   // Fast encoding
-      '-',                      // Output to stdout
+      '-y',                     // Overwrite output file
+      tempFile,                 // Output to temp file
     ];
     
-    // Set headers before starting ffmpeg
-    res.set({
-      'Content-Type': 'video/mp4',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-      'Access-Control-Allow-Headers': 'Range',
-      'Accept-Ranges': 'bytes',
-      'Cache-Control': 'no-cache',
-      'Transfer-Encoding': 'chunked', // Indicate streaming
-    });
+    console.log(`  [mux] Starting ffmpeg muxing to temp file...`);
+    const startTime = Date.now();
     
-    // Spawn ffmpeg process
-    const ffmpeg = spawn('ffmpeg', ffmpegArgs, {
-      stdio: ['ignore', 'pipe', 'pipe'] // stdin: ignore, stdout: pipe, stderr: pipe
-    });
-    
-    // Handle timeout
-    if (timeoutFired) {
-      ffmpeg.kill('SIGTERM');
-      return;
-    }
-    
-    // Pipe ffmpeg output directly to response
-    ffmpeg.stdout.pipe(res);
-    
-    // Log errors but don't block
-    ffmpeg.stderr.on('data', (data) => {
-      const errorMsg = data.toString();
-      // Only log actual errors, not info messages
-      if (errorMsg.includes('error') || errorMsg.includes('Error') || errorMsg.includes('failed')) {
-        console.error(`  [ffmpeg] ${errorMsg.substring(0, 200)}`);
+    // Run ffmpeg to create the file
+    await new Promise((resolve, reject) => {
+      const ffmpeg = spawn('ffmpeg', ffmpegArgs, {
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      
+      let stderrOutput = '';
+      
+      // Log progress
+      ffmpeg.stderr.on('data', (data) => {
+        const msg = data.toString();
+        stderrOutput += msg;
+        // Log progress indicators
+        if (msg.includes('time=')) {
+          const timeMatch = msg.match(/time=(\d+:\d+:\d+\.\d+)/);
+          if (timeMatch) {
+            console.log(`  [mux] Progress: ${timeMatch[1]}`);
+          }
+        }
+        // Log errors
+        if (msg.includes('error') || msg.includes('Error') || msg.includes('failed')) {
+          console.error(`  [ffmpeg] ${msg.substring(0, 200)}`);
+        }
+      });
+      
+      ffmpeg.on('close', (code) => {
+        if (code !== 0) {
+          reject(new Error(`ffmpeg exited with code ${code}: ${stderrOutput.substring(0, 500)}`));
+        } else {
+          resolve();
+        }
+      });
+      
+      ffmpeg.on('error', (err) => {
+        reject(err);
+      });
+      
+      // Handle timeout
+      if (timeoutFired) {
+        ffmpeg.kill('SIGTERM');
+        reject(new Error('Muxing timeout'));
       }
     });
     
-    // Handle process exit
-    ffmpeg.on('close', (code) => {
-      clearTimeout(timeout);
-      if (timeoutFired) return; // Already handled by timeout
+    clearTimeout(timeout);
+    
+    // Check if file was created
+    if (!fs.existsSync(tempFile)) {
+      throw new Error('Muxed file was not created');
+    }
+    
+    const fileStats = fs.statSync(tempFile);
+    const fileSize = fileStats.size;
+    const elapsed = Date.now() - startTime;
+    console.log(`  ✓ [mux] Muxing completed in ${elapsed}ms, file size: ${(fileSize / 1024 / 1024).toFixed(2)}MB`);
+    
+    // Handle Range requests (AVPlayer sends these for seeking)
+    const rangeHeader = req.headers.range;
+    let start = 0;
+    let end = fileSize - 1;
+    
+    if (rangeHeader) {
+      const parts = rangeHeader.replace(/bytes=/, '').split('-');
+      start = parseInt(parts[0], 10);
+      end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
       
-      if (code !== 0 && !res.headersSent) {
-        console.error(`  ✗ [ffmpeg] Process exited with code ${code}`);
-        if (!res.headersSent) {
-          res.status(500).json({ error: 'Muxing failed' });
-        }
-      } else {
-        console.log(`  ✓ [ffmpeg] Muxing completed successfully`);
+      if (start >= fileSize || end >= fileSize) {
+        res.status(416).set({ 'Content-Range': `bytes */${fileSize}` }).end();
+        fs.unlinkSync(tempFile); // Clean up
+        return;
+      }
+    }
+    
+    const chunkSize = (end - start) + 1;
+    
+    // Set headers for AVPlayer compatibility
+    res.set({
+      'Content-Type': 'video/mp4',
+      'Content-Length': chunkSize,
+      'Accept-Ranges': 'bytes',
+      'Content-Range': rangeHeader ? `bytes ${start}-${end}/${fileSize}` : undefined,
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+      'Access-Control-Allow-Headers': 'Range, Content-Type',
+      'Cache-Control': 'no-cache',
+    });
+    
+    // Set status code (206 for partial content, 200 for full)
+    res.status(rangeHeader ? 206 : 200);
+    
+    // Create read stream and pipe to response
+    const fileStream = fs.createReadStream(tempFile, { start, end });
+    
+    // Clean up temp file after streaming
+    fileStream.on('end', () => {
+      try {
+        fs.unlinkSync(tempFile);
+        console.log(`  ✓ [mux] Cleaned up temp file`);
+      } catch (e) {
+        console.warn(`  ⚠️ [mux] Failed to delete temp file: ${e.message}`);
+      }
+    });
+    
+    fileStream.on('error', (err) => {
+      console.error(`  ✗ [mux] Stream error: ${err.message}`);
+      try {
+        fs.unlinkSync(tempFile);
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Stream error' });
       }
     });
     
     // Handle client disconnect
     req.on('close', () => {
-      clearTimeout(timeout);
-      ffmpeg.kill('SIGTERM');
+      fileStream.destroy();
+      try {
+        fs.unlinkSync(tempFile);
+      } catch (e) {
+        // Ignore cleanup errors
+      }
     });
+    
+    fileStream.pipe(res);
     
   } catch (error) {
     clearTimeout(timeout);
