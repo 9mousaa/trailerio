@@ -813,34 +813,50 @@ async function extractViaPiped(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000); // 3s timeout - fail faster
+    const timeout = setTimeout(() => controller.abort(), 4000); // 4s timeout - balance between speed and reliability
     const startTime = Date.now();
     
     try {
-      const response = await fetch(`${instance}/streams/${youtubeKey}`, {
-        headers: { 'Accept': 'application/json' },
+      const url = `${instance}/streams/${youtubeKey}`;
+      console.log(`  [Piped] Trying ${instance}...`);
+      
+      const response = await fetch(url, {
+        headers: { 
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (compatible; TrailerIO/1.0)'
+        },
         signal: controller.signal
       });
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
       
       if (!response.ok) {
-        console.log(`  [Piped] ${instance}: HTTP ${response.status} (${duration}ms)`);
+        const statusText = response.statusText || 'Unknown';
+        console.log(`  [Piped] ✗ ${instance}: HTTP ${response.status} ${statusText} (${duration}ms)`);
         successTracker.recordFailure('piped', instance);
         return null;
       }
       
       // Check if response is actually JSON before parsing
-      const contentType = response.headers.get('content-type');
-      if (!contentType || !contentType.includes('application/json')) {
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
         const text = await response.text();
-        console.log(`  [Piped] ${instance}: non-JSON response (${contentType || 'no content-type'}): ${text.substring(0, 100)}`);
+        const preview = text.substring(0, 150).replace(/\n/g, ' ');
+        console.log(`  [Piped] ✗ ${instance}: non-JSON response (${contentType || 'no content-type'}): ${preview}`);
         successTracker.recordFailure('piped', instance);
         return null;
       }
       
       const data = await response.json();
-      console.log(`  [Piped] ${instance}: got response (${duration}ms), has dash: ${!!data.dash}, videoStreams: ${data.videoStreams?.length || 0}`);
+      
+      // Check for error in response
+      if (data.error) {
+        console.log(`  [Piped] ✗ ${instance}: API error: ${data.error} (${duration}ms)`);
+        successTracker.recordFailure('piped', instance);
+        return null;
+      }
+      
+      console.log(`  [Piped] ✓ ${instance}: got response (${duration}ms), has dash: ${!!data.dash}, videoStreams: ${data.videoStreams?.length || 0}, audioStreams: ${data.audioStreams?.length || 0}`);
       
       // PRIORITY 1: DASH manifest (best for AVPlayer - native support, adaptive streaming, highest quality)
       if (data.dash) {
@@ -888,8 +904,23 @@ async function extractViaPiped(youtubeKey) {
     } catch (e) {
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
-      const errorType = e.name === 'AbortError' ? 'TIMEOUT' : e.code || 'ERROR';
-      console.log(`  [Piped] ${instance}: ${errorType} after ${duration}ms - ${e.message || 'unknown error'}`);
+      let errorType = 'ERROR';
+      let errorMsg = e.message || 'unknown error';
+      
+      if (e.name === 'AbortError') {
+        errorType = 'TIMEOUT';
+        errorMsg = 'Request aborted (timeout)';
+      } else if (e.code === 'ENOTFOUND') {
+        errorType = 'DNS_ERROR';
+        errorMsg = `DNS lookup failed: ${e.hostname || 'unknown host'}`;
+      } else if (e.code === 'ETIMEDOUT' || e.code === 'ECONNRESET') {
+        errorType = 'CONNECTION_ERROR';
+        errorMsg = `${e.code}: ${e.message}`;
+      } else if (e.code) {
+        errorType = e.code;
+      }
+      
+      console.log(`  [Piped] ✗ ${instance}: ${errorType} after ${duration}ms - ${errorMsg}`);
       successTracker.recordFailure('piped', instance);
       return null;
     }
@@ -964,34 +995,50 @@ async function extractViaInvidious(youtubeKey) {
   
   const tryInstance = async (instance) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000); // 3s timeout - fail faster
+    const timeout = setTimeout(() => controller.abort(), 4000); // 4s timeout - balance between speed and reliability
     const startTime = Date.now();
     
     try {
-      const response = await fetch(`${instance}/api/v1/videos/${youtubeKey}`, {
-        headers: { 'Accept': 'application/json' },
+      const url = `${instance}/api/v1/videos/${youtubeKey}`;
+      console.log(`  [Invidious] Trying ${instance}...`);
+      
+      const response = await fetch(url, {
+        headers: { 
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (compatible; TrailerIO/1.0)'
+        },
         signal: controller.signal
       });
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
       
       if (!response.ok) {
-        console.log(`  [Invidious] ${instance}: HTTP ${response.status} (${duration}ms)`);
+        const statusText = response.statusText || 'Unknown';
+        console.log(`  [Invidious] ✗ ${instance}: HTTP ${response.status} ${statusText} (${duration}ms)`);
         successTracker.recordFailure('invidious', instance);
         return null;
       }
       
       // Check if response is actually JSON before parsing
-      const contentType = response.headers.get('content-type');
-      if (!contentType || !contentType.includes('application/json')) {
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
         const text = await response.text();
-        console.log(`  [Invidious] ${instance}: non-JSON response (${contentType || 'no content-type'}): ${text.substring(0, 100)}`);
+        const preview = text.substring(0, 150).replace(/\n/g, ' ');
+        console.log(`  [Invidious] ✗ ${instance}: non-JSON response (${contentType || 'no content-type'}): ${preview}`);
         successTracker.recordFailure('invidious', instance);
         return null;
       }
       
       const data = await response.json();
-      console.log(`  [Invidious] ${instance}: got response (${duration}ms), formatStreams: ${data.formatStreams?.length || 0}`);
+      
+      // Check for error in response
+      if (data.error) {
+        console.log(`  [Invidious] ✗ ${instance}: API error: ${data.error} (${duration}ms)`);
+        successTracker.recordFailure('invidious', instance);
+        return null;
+      }
+      
+      console.log(`  [Invidious] ✓ ${instance}: got response (${duration}ms), formatStreams: ${data.formatStreams?.length || 0}, adaptiveFormats: ${data.adaptiveFormats?.length || 0}`);
       
       const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
       const getQualityRank = (label) => {
@@ -1018,8 +1065,23 @@ async function extractViaInvidious(youtubeKey) {
     } catch (e) {
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
-      const errorType = e.name === 'AbortError' ? 'TIMEOUT' : e.code || 'ERROR';
-      console.log(`  [Invidious] ${instance}: ${errorType} after ${duration}ms - ${e.message || 'unknown error'}`);
+      let errorType = 'ERROR';
+      let errorMsg = e.message || 'unknown error';
+      
+      if (e.name === 'AbortError') {
+        errorType = 'TIMEOUT';
+        errorMsg = 'Request aborted (timeout)';
+      } else if (e.code === 'ENOTFOUND') {
+        errorType = 'DNS_ERROR';
+        errorMsg = `DNS lookup failed: ${e.hostname || 'unknown host'}`;
+      } else if (e.code === 'ETIMEDOUT' || e.code === 'ECONNRESET') {
+        errorType = 'CONNECTION_ERROR';
+        errorMsg = `${e.code}: ${e.message}`;
+      } else if (e.code) {
+        errorType = e.code;
+      }
+      
+      console.log(`  [Invidious] ✗ ${instance}: ${errorType} after ${duration}ms - ${errorMsg}`);
       successTracker.recordFailure('invidious', instance);
       return null;
     }
@@ -1096,45 +1158,63 @@ async function extractViaInternetArchive(tmdbMeta) {
     console.log(`  [Internet Archive] Trying ${sortedStrategies.length} strategies (sorted by success rate - top 3: ${strategyRates})...`);
     
     for (const strategy of sortedStrategies) {
-      // Use advancedsearch API with better field selection
-      const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(strategy.query)}&fl=identifier,title,description,date,downloads,creator,subject&sort[]=downloads+desc&rows=20&output=json`;
+      // Try REST API first (more reliable), fallback to advancedsearch.php
+      const restApiUrl = `https://archive.org/search.php?query=${encodeURIComponent(strategy.query)}&output=json`;
+      const advancedSearchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(strategy.query)}&fl=identifier,title,description,date,downloads,creator,subject&sort[]=downloads+desc&rows=20&output=json`;
       
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 8000);
+      const timeout = setTimeout(() => controller.abort(), 10000); // Increased timeout
       const startTime = Date.now();
       
       try {
-        // Retry logic for 502 errors (temporary server issues)
+        // Try REST API first, then fallback to advancedsearch
         let response = null;
-        let lastError = null;
-        const maxRetries = 2;
+        let searchUrl = restApiUrl;
+        let apiType = 'REST';
+        const maxRetries = 1; // Reduced retries to fail faster
         
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
           try {
+            // On second attempt, try advancedsearch.php
+            if (attempt === 1) {
+              searchUrl = advancedSearchUrl;
+              apiType = 'AdvancedSearch';
+              console.log(`  [Internet Archive] Trying ${apiType} API for strategy "${strategy.description}"...`);
+            }
+            
             const retryController = new AbortController();
-            const retryTimeout = setTimeout(() => retryController.abort(), 8000);
-            response = await fetch(searchUrl, { signal: retryController.signal });
+            const retryTimeout = setTimeout(() => retryController.abort(), 10000);
+            
+            response = await fetch(searchUrl, { 
+              signal: retryController.signal,
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (compatible; TrailerIO/1.0)',
+                'Accept': 'application/json'
+              }
+            });
             clearTimeout(retryTimeout);
             
             if (response.ok) {
               break; // Success, exit retry loop
             }
             
-            // If 502 and we have retries left, wait and retry
-            if (response.status === 502 && attempt < maxRetries) {
-              console.log(`  [Internet Archive] HTTP 502 on attempt ${attempt + 1}, retrying...`);
-              await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1))); // Exponential backoff
+            // If 502/503/504 and we have retries left, wait and retry
+            if ([502, 503, 504].includes(response.status) && attempt < maxRetries) {
+              console.log(`  [Internet Archive] HTTP ${response.status} on attempt ${attempt + 1} (${apiType}), retrying with different API...`);
+              await new Promise(resolve => setTimeout(resolve, 2000));
               continue;
             }
             
             // Not a retryable error or out of retries
             break;
           } catch (fetchError) {
-            lastError = fetchError;
             if (attempt < maxRetries && fetchError.name !== 'AbortError') {
-              console.log(`  [Internet Archive] Error on attempt ${attempt + 1}, retrying...`);
-              await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+              console.log(`  [Internet Archive] Network error on attempt ${attempt + 1} (${apiType}): ${fetchError.message}, trying different API...`);
+              await new Promise(resolve => setTimeout(resolve, 2000));
               continue;
+            }
+            if (fetchError.name === 'AbortError') {
+              console.log(`  [Internet Archive] Request aborted (timeout) for ${apiType} API`);
             }
             throw fetchError;
           }
@@ -1145,15 +1225,28 @@ async function extractViaInternetArchive(tmdbMeta) {
         
         if (!response || !response.ok) {
           const status = response ? response.status : 'NO_RESPONSE';
-          console.log(`  [Internet Archive] Search failed: HTTP ${status} (${duration}ms) for strategy "${strategy.description}" after ${maxRetries + 1} attempts`);
+          const statusText = response ? response.statusText : 'No response';
+          console.log(`  [Internet Archive] ✗ Search failed: HTTP ${status} ${statusText} (${duration}ms) for strategy "${strategy.description}" using ${apiType} API`);
           successTracker.recordFailure('archive', strategy.id);
           continue;
         }
         
+        // Parse response - REST API has different structure
         const data = await response.json();
-        const docs = data.response?.docs || [];
+        let docs = [];
         
-        console.log(`  [Internet Archive] Query returned ${docs.length} results (${duration}ms) for strategy "${strategy.description}"`);
+        if (data.response && data.response.docs) {
+          // AdvancedSearch format
+          docs = data.response.docs;
+        } else if (Array.isArray(data)) {
+          // REST API format (array of results)
+          docs = data;
+        } else if (data.items) {
+          // Alternative REST format
+          docs = data.items;
+        }
+        
+        console.log(`  [Internet Archive] ✓ ${apiType} API returned ${docs.length} results (${duration}ms) for strategy "${strategy.description}"`);
         
         if (docs.length === 0) {
           successTracker.recordFailure('archive', strategy.id);
