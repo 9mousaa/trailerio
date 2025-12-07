@@ -1043,10 +1043,34 @@ async function extractViaInvidious(youtubeKey) {
       const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
       const getQualityRank = (label) => {
         if (!label) return 999;
-        const idx = qualityPriority.findIndex(q => label.includes(q));
+        const labelLower = String(label).toLowerCase();
+        const idx = qualityPriority.findIndex(q => labelLower.includes(q));
         return idx === -1 ? 998 : idx;
       };
       
+      // PRIORITY 1: Try adaptiveFormats first (usually higher quality, DASH)
+      if (data.adaptiveFormats?.length > 0) {
+        // Filter for video formats with quality label
+        const videoFormats = data.adaptiveFormats
+          .filter(f => f.type?.startsWith('video/') && f.qualityLabel)
+          .map(f => ({
+            url: f.url,
+            quality: f.qualityLabel,
+            mimeType: f.type,
+            itag: f.itag
+          }));
+        
+        if (videoFormats.length > 0) {
+          // Sort by quality (highest first)
+          const sorted = videoFormats.sort((a, b) => getQualityRank(a.quality) - getQualityRank(b.quality));
+          const best = sorted[0];
+          console.log(`  ✓ [Invidious] ${instance}: got ${best.quality || 'unknown'} from adaptiveFormats`);
+          successTracker.recordSuccess('invidious', instance);
+          return best.url;
+        }
+      }
+      
+      // PRIORITY 2: Fallback to formatStreams (combined video+audio, lower quality)
       if (data.formatStreams?.length > 0) {
         const sorted = [...data.formatStreams]
           .filter(s => s.container === 'mp4' || s.mimeType?.includes('mp4'))
@@ -1054,12 +1078,13 @@ async function extractViaInvidious(youtubeKey) {
         
         if (sorted.length > 0) {
           const best = sorted[0];
-          console.log(`  ✓ [Invidious] ${instance}: got ${best.qualityLabel || 'unknown'}`);
+          console.log(`  ✓ [Invidious] ${instance}: got ${best.qualityLabel || 'unknown'} from formatStreams`);
           successTracker.recordSuccess('invidious', instance);
           return best.url;
         }
       }
       
+      console.log(`  ✗ [Invidious] ${instance}: No valid video streams found`);
       successTracker.recordFailure('invidious', instance);
       return null;
     } catch (e) {
@@ -1158,32 +1183,23 @@ async function extractViaInternetArchive(tmdbMeta) {
     console.log(`  [Internet Archive] Trying ${sortedStrategies.length} strategies (sorted by success rate - top 3: ${strategyRates})...`);
     
     for (const strategy of sortedStrategies) {
-      // Try REST API first (more reliable), fallback to advancedsearch.php
-      const restApiUrl = `https://archive.org/search.php?query=${encodeURIComponent(strategy.query)}&output=json`;
-      const advancedSearchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(strategy.query)}&fl=identifier,title,description,date,downloads,creator,subject&sort[]=downloads+desc&rows=20&output=json`;
+      // Use AdvancedSearch API (the correct API for Internet Archive)
+      // Format: https://archive.org/advancedsearch.php?q=query&fl=fields&sort[]=field+order&rows=N&output=json
+      const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(strategy.query)}&fl=identifier,title,description,date,downloads,creator,subject&sort[]=downloads+desc&rows=20&output=json&page=1`;
       
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000); // Increased timeout
+      const timeout = setTimeout(() => controller.abort(), 8000); // 8s timeout
       const startTime = Date.now();
       
       try {
-        // Try REST API first, then fallback to advancedsearch
+        // Retry logic for 502/503/504 errors (temporary server issues)
         let response = null;
-        let searchUrl = restApiUrl;
-        let apiType = 'REST';
-        const maxRetries = 1; // Reduced retries to fail faster
+        const maxRetries = 2;
         
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
           try {
-            // On second attempt, try advancedsearch.php
-            if (attempt === 1) {
-              searchUrl = advancedSearchUrl;
-              apiType = 'AdvancedSearch';
-              console.log(`  [Internet Archive] Trying ${apiType} API for strategy "${strategy.description}"...`);
-            }
-            
             const retryController = new AbortController();
-            const retryTimeout = setTimeout(() => retryController.abort(), 10000);
+            const retryTimeout = setTimeout(() => retryController.abort(), 8000);
             
             response = await fetch(searchUrl, { 
               signal: retryController.signal,
@@ -1200,8 +1216,8 @@ async function extractViaInternetArchive(tmdbMeta) {
             
             // If 502/503/504 and we have retries left, wait and retry
             if ([502, 503, 504].includes(response.status) && attempt < maxRetries) {
-              console.log(`  [Internet Archive] HTTP ${response.status} on attempt ${attempt + 1} (${apiType}), retrying with different API...`);
-              await new Promise(resolve => setTimeout(resolve, 2000));
+              console.log(`  [Internet Archive] HTTP ${response.status} on attempt ${attempt + 1}, retrying...`);
+              await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1))); // Exponential backoff
               continue;
             }
             
@@ -1209,12 +1225,12 @@ async function extractViaInternetArchive(tmdbMeta) {
             break;
           } catch (fetchError) {
             if (attempt < maxRetries && fetchError.name !== 'AbortError') {
-              console.log(`  [Internet Archive] Network error on attempt ${attempt + 1} (${apiType}): ${fetchError.message}, trying different API...`);
-              await new Promise(resolve => setTimeout(resolve, 2000));
+              console.log(`  [Internet Archive] Network error on attempt ${attempt + 1}: ${fetchError.message}, retrying...`);
+              await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
               continue;
             }
             if (fetchError.name === 'AbortError') {
-              console.log(`  [Internet Archive] Request aborted (timeout) for ${apiType} API`);
+              console.log(`  [Internet Archive] Request aborted (timeout) on attempt ${attempt + 1}`);
             }
             throw fetchError;
           }
@@ -1226,27 +1242,26 @@ async function extractViaInternetArchive(tmdbMeta) {
         if (!response || !response.ok) {
           const status = response ? response.status : 'NO_RESPONSE';
           const statusText = response ? response.statusText : 'No response';
-          console.log(`  [Internet Archive] ✗ Search failed: HTTP ${status} ${statusText} (${duration}ms) for strategy "${strategy.description}" using ${apiType} API`);
+          console.log(`  [Internet Archive] ✗ Search failed: HTTP ${status} ${statusText} (${duration}ms) for strategy "${strategy.description}" after ${maxRetries + 1} attempts`);
           successTracker.recordFailure('archive', strategy.id);
           continue;
         }
         
-        // Parse response - REST API has different structure
-        const data = await response.json();
-        let docs = [];
-        
-        if (data.response && data.response.docs) {
-          // AdvancedSearch format
-          docs = data.response.docs;
-        } else if (Array.isArray(data)) {
-          // REST API format (array of results)
-          docs = data;
-        } else if (data.items) {
-          // Alternative REST format
-          docs = data.items;
+        // Check content type before parsing
+        const contentType = response.headers.get('content-type') || '';
+        if (!contentType.includes('application/json')) {
+          const text = await response.text();
+          const preview = text.substring(0, 200).replace(/\n/g, ' ');
+          console.log(`  [Internet Archive] ✗ Non-JSON response (${contentType}): ${preview}`);
+          successTracker.recordFailure('archive', strategy.id);
+          continue;
         }
         
-        console.log(`  [Internet Archive] ✓ ${apiType} API returned ${docs.length} results (${duration}ms) for strategy "${strategy.description}"`);
+        // Parse AdvancedSearch API response
+        const data = await response.json();
+        const docs = data.response?.docs || [];
+        
+        console.log(`  [Internet Archive] ✓ AdvancedSearch API returned ${docs.length} results (${duration}ms) for strategy "${strategy.description}"`);
         
         if (docs.length === 0) {
           successTracker.recordFailure('archive', strategy.id);
