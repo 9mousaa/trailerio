@@ -981,7 +981,7 @@ async function extractViaInternetArchive(tmdbMeta) {
       const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(strategy.query)}&fl=identifier,title,description,date,downloads,creator,subject&sort[]=downloads+desc&rows=20&output=json`;
       
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 8000);
+      const timeout = setTimeout(() => controller.abort(), 5000); // Reduced from 8s to 5s to fail faster
       const startTime = Date.now();
       
       try {
@@ -1038,6 +1038,27 @@ async function extractViaInternetArchive(tmdbMeta) {
           const titleWords = normTitle.split(' ').filter(w => w.length > 0);
           const matchingWords = searchWords.filter(word => titleWords.includes(word));
           const wordMatchRatio = searchWords.length > 0 ? matchingWords.length / searchWords.length : 0;
+          
+          // Filter out video game trailers when searching for TV shows or movies
+          // Check if title/description contains game-related terms that indicate it's a video game
+          const allText = `${title} ${description} ${subject}`.toLowerCase();
+          const isVideoGame = /video game|videogame|gameplay|steam|epic games|nintendo|playstation|xbox|pc game|console game|mobile game|game engine|unity|unreal engine/.test(allText);
+          
+          // Check if "game" appears in a way that suggests it's a video game
+          // For "Game of Thrones", the search title itself contains "game", so we need to be careful
+          // Only filter if there are clear game indicators OR if "game" appears but title doesn't match well
+          const hasGameKeyword = /\bgame\b/.test(allText);
+          const searchTitleHasGame = /\bgame\b/.test(normSearchTitle.toLowerCase());
+          
+          // If the search title itself has "game" (like "Game of Thrones"), only filter if there are clear game indicators
+          // Otherwise, if "game" appears standalone and title doesn't closely match, it might be a game
+          const isLikelyGame = isVideoGame || 
+            (hasGameKeyword && !searchTitleHasGame && wordMatchRatio < 0.7); // "game" in result but not in search, and low match
+          
+          if (isLikelyGame) {
+            console.log(`  [Internet Archive] Skipping video game trailer: "${title}"`);
+            continue; // Skip video game trailers
+          }
           
           // Penalize extra words that aren't in the search term (to catch "Batman Beyond: Return of the Joker" for "Joker")
           // Also check for percentage signs, numbers, and other prefixes that indicate it's not the main title
