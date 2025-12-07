@@ -1418,11 +1418,12 @@ app.get('/mux-video', async (req, res) => {
   }
 });
 
+// Handle OPTIONS requests for CORS (AVPlayer may send these)
 app.options('/mux-video', (req, res) => {
   res.set({
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-    'Access-Control-Allow-Headers': 'Range',
+    'Access-Control-Allow-Headers': 'Range, Content-Type',
     'Access-Control-Max-Age': '86400',
   });
   res.status(204).end();
