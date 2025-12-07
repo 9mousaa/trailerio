@@ -22,16 +22,23 @@ app.use((req, res, next) => {
   activeRequests++;
   totalRequests++;
   const requestId = totalRequests;
+  let finished = false;
   console.log(`[REQ ${requestId}] ${req.method} ${req.path} - Active: ${activeRequests}`);
   
   res.on('finish', () => {
-    activeRequests--;
-    console.log(`[REQ ${requestId}] Finished - Active: ${activeRequests}`);
+    if (!finished) {
+      finished = true;
+      activeRequests--;
+      console.log(`[REQ ${requestId}] Finished - Active: ${activeRequests}`);
+    }
   });
   
   res.on('close', () => {
-    activeRequests--;
-    console.log(`[REQ ${requestId}] Closed - Active: ${activeRequests}`);
+    if (!finished) {
+      finished = true;
+      activeRequests--;
+      console.log(`[REQ ${requestId}] Closed - Active: ${activeRequests}`);
+    }
   });
   
   next();
@@ -256,14 +263,30 @@ async function searchITunes(params) {
       const data = await response.json();
       let results = data.results || [];
       
+      console.log(`  [iTunes] Raw API returned ${results.length} results for "${term}" in ${country}`);
+      
       // Filter by kind if specified
       if (filterKind) {
+        const beforeFilter = results.length;
         results = results.filter(r => r.kind === filterKind);
+        console.log(`  [iTunes] After kind filter (${filterKind}): ${results.length} results (was ${beforeFilter})`);
       }
       
       // CRITICAL: Only return results with previewUrl (trailers/previews)
       // This ensures we only get items that actually have video content
+      const beforePreviewFilter = results.length;
       results = results.filter(r => r.previewUrl && r.previewUrl.trim().length > 0);
+      
+      if (beforePreviewFilter > 0 && results.length === 0) {
+        console.log(`  [iTunes] WARNING: ${beforePreviewFilter} results found but NONE have previewUrl!`);
+        // Log first few results to debug
+        const sample = data.results.slice(0, 3).map(r => ({
+          trackName: r.trackName || r.collectionName,
+          kind: r.kind,
+          hasPreviewUrl: !!r.previewUrl
+        }));
+        console.log(`  [iTunes] Sample results:`, JSON.stringify(sample, null, 2));
+      }
       
       return results;
     } catch (e) {
@@ -273,21 +296,28 @@ async function searchITunes(params) {
   };
   
   if (type === 'movie') {
-    // Strategy 1: Regular movie search with movieTerm attribute
-    let results = await trySearch({ media: 'movie', entity: 'movie', attribute: 'movieTerm' }, null);
+    // Strategy 1: moviePreview entity (most specific for trailers)
+    let results = await trySearch({ media: 'movie', entity: 'moviePreview' }, null);
+    if (results.length > 0) {
+      console.log(`  [iTunes] Found ${results.length} moviePreview results with previews`);
+      return results;
+    }
+    
+    // Strategy 2: Regular movie search with movieTerm attribute
+    results = await trySearch({ media: 'movie', entity: 'movie', attribute: 'movieTerm' }, null);
     if (results.length > 0) {
       console.log(`  [iTunes] Found ${results.length} movie results with previews`);
       return results;
     }
     
-    // Strategy 2: Movie search without attribute
+    // Strategy 3: Movie search without attribute
     results = await trySearch({ media: 'movie', entity: 'movie' }, null);
     if (results.length > 0) {
       console.log(`  [iTunes] Found ${results.length} movie results (no attribute)`);
       return results;
     }
     
-    // Strategy 3: Search all movies, filter by kind
+    // Strategy 4: Search all movies, filter by kind
     results = await trySearch({ media: 'movie' }, 'feature-movie');
     if (results.length > 0) {
       console.log(`  [iTunes] Found ${results.length} feature-movie results with previews`);
