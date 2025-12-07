@@ -16,6 +16,9 @@ let totalRequests = 0;
 
 // Success rate tracking for smart sorting
 const successTracker = {
+  // Source-level tracking (overall success rate for each source)
+  sources: new Map(), // 'itunes' | 'piped' | 'invidious' | 'archive' -> { success: number, total: number }
+  // Instance/strategy-level tracking (within each source)
   piped: new Map(), // instance URL -> { success: number, total: number }
   invidious: new Map(), // instance URL -> { success: number, total: number }
   itunes: new Map(), // country code -> { success: number, total: number }
@@ -51,6 +54,38 @@ const successTracker = {
     return [...list].sort((a, b) => {
       const rateA = this.getSuccessRate(type, a);
       const rateB = this.getSuccessRate(type, b);
+      return rateB - rateA; // Sort descending (highest success rate first)
+    });
+  },
+  
+  // Source-level tracking methods
+  recordSourceSuccess(source) {
+    if (!this.sources.has(source)) {
+      this.sources.set(source, { success: 0, total: 0 });
+    }
+    const stats = this.sources.get(source);
+    stats.success++;
+    stats.total++;
+  },
+  
+  recordSourceFailure(source) {
+    if (!this.sources.has(source)) {
+      this.sources.set(source, { success: 0, total: 0 });
+    }
+    const stats = this.sources.get(source);
+    stats.total++;
+  },
+  
+  getSourceSuccessRate(source) {
+    const stats = this.sources.get(source);
+    if (!stats || stats.total === 0) return 0.5; // Default to 50% for untested
+    return stats.success / stats.total;
+  },
+  
+  getSortedSources(availableSources) {
+    return [...availableSources].sort((a, b) => {
+      const rateA = this.getSourceSuccessRate(a);
+      const rateB = this.getSourceSuccessRate(b);
       return rateB - rateA; // Sort descending (highest success rate first)
     });
   }
@@ -1192,82 +1227,108 @@ async function resolvePreview(imdbId, type) {
     return { found: false };
   }
   
-  // PRIORITY 1: Try iTunes first (most reliable, works directly in AVPlayer)
-  console.log('\n========== Trying iTunes first (most reliable) ==========');
-  const itunesResult = await multiPassSearch(tmdbMeta);
-  console.log(`iTunes search result: ${itunesResult.found ? 'FOUND' : 'NOT FOUND'}`);
-  
-  if (itunesResult.found) {
-    setCache(imdbId, {
-      track_id: itunesResult.trackId,
-      preview_url: itunesResult.previewUrl,
-      country: itunesResult.country || 'us',
-      youtube_key: tmdbMeta.youtubeTrailerKey || null
-    });
-    console.log(`✓ Found iTunes preview: ${itunesResult.previewUrl}`);
-    return { ...itunesResult, source: 'itunes' };
-  }
-  
-  // PRIORITY 2: Try public instances (Piped/Invidious)
+  // Build list of available sources based on what we have
+  const availableSources = ['itunes'];
   if (tmdbMeta.youtubeTrailerKey) {
-    console.log('\n========== iTunes not found, trying public instances (Piped/Invidious) ==========');
-    console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
-    
-    const pipedResult = await extractViaPiped(tmdbMeta.youtubeTrailerKey);
-    if (pipedResult) {
-      setCache(imdbId, {
-        track_id: null,
-        preview_url: null,
-        country: 'yt',
-        youtube_key: tmdbMeta.youtubeTrailerKey
-      });
-      console.log(`✓ Got URL from Piped`);
-      const pipedUrl = typeof pipedResult === 'string' ? pipedResult : pipedResult.url;
-      return {
-        found: true,
-        source: 'youtube',
-        previewUrl: pipedUrl,
-        youtubeKey: tmdbMeta.youtubeTrailerKey,
-        country: 'yt'
-      };
-    }
-    
-    const invidiousUrl = await extractViaInvidious(tmdbMeta.youtubeTrailerKey);
-    if (invidiousUrl) {
-      setCache(imdbId, {
-        track_id: null,
-        preview_url: null,
-        country: 'yt',
-        youtube_key: tmdbMeta.youtubeTrailerKey
-      });
-      console.log(`✓ Got URL from Invidious`);
-      return {
-        found: true,
-        source: 'youtube',
-        previewUrl: invidiousUrl,
-        youtubeKey: tmdbMeta.youtubeTrailerKey,
-        country: 'yt'
-      };
-    }
+    availableSources.push('piped', 'invidious');
   }
+  availableSources.push('archive');
   
-  // PRIORITY 3: Try Internet Archive as fallback
-  console.log('\n========== YouTube not found, trying Internet Archive ==========');
-  const archiveUrl = await extractViaInternetArchive(tmdbMeta);
-  if (archiveUrl) {
-    setCache(imdbId, {
-      track_id: null,
-      preview_url: archiveUrl,
-      country: 'archive',
-      youtube_key: tmdbMeta.youtubeTrailerKey || null
-    });
-    console.log(`✓ Got URL from Internet Archive`);
-    return {
-      found: true,
-      source: 'archive',
-      previewUrl: archiveUrl,
-      country: 'archive'
-    };
+  // Sort sources by success rate (highest first)
+  const sortedSources = successTracker.getSortedSources(availableSources);
+  const sourceRates = sortedSources.map(s => {
+    const rate = successTracker.getSourceSuccessRate(s);
+    return `${s.toUpperCase()} (${(rate * 100).toFixed(0)}%)`;
+  }).join(', ');
+  console.log(`\n========== Trying sources in order (sorted by success rate): ${sourceRates} ==========`);
+  
+  // Try each source in sorted order
+  for (const source of sortedSources) {
+    console.log(`\n========== Trying ${source.toUpperCase()} ==========`);
+    
+    if (source === 'itunes') {
+      const itunesResult = await multiPassSearch(tmdbMeta);
+      console.log(`iTunes search result: ${itunesResult.found ? 'FOUND' : 'NOT FOUND'}`);
+      
+      if (itunesResult.found) {
+        setCache(imdbId, {
+          track_id: itunesResult.trackId,
+          preview_url: itunesResult.previewUrl,
+          country: itunesResult.country || 'us',
+          youtube_key: tmdbMeta.youtubeTrailerKey || null
+        });
+        console.log(`✓ Found iTunes preview: ${itunesResult.previewUrl}`);
+        successTracker.recordSourceSuccess('itunes');
+        return { ...itunesResult, source: 'itunes' };
+      } else {
+        successTracker.recordSourceFailure('itunes');
+      }
+    } else if (source === 'piped' && tmdbMeta.youtubeTrailerKey) {
+      console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
+      const pipedResult = await extractViaPiped(tmdbMeta.youtubeTrailerKey);
+      if (pipedResult) {
+        setCache(imdbId, {
+          track_id: null,
+          preview_url: null,
+          country: 'yt',
+          youtube_key: tmdbMeta.youtubeTrailerKey
+        });
+        console.log(`✓ Got URL from Piped`);
+        const pipedUrl = typeof pipedResult === 'string' ? pipedResult : pipedResult.url;
+        successTracker.recordSourceSuccess('piped');
+        return {
+          found: true,
+          source: 'youtube',
+          previewUrl: pipedUrl,
+          youtubeKey: tmdbMeta.youtubeTrailerKey,
+          country: 'yt'
+        };
+      } else {
+        successTracker.recordSourceFailure('piped');
+      }
+    } else if (source === 'invidious' && tmdbMeta.youtubeTrailerKey) {
+      console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
+      const invidiousUrl = await extractViaInvidious(tmdbMeta.youtubeTrailerKey);
+      if (invidiousUrl) {
+        setCache(imdbId, {
+          track_id: null,
+          preview_url: null,
+          country: 'yt',
+          youtube_key: tmdbMeta.youtubeTrailerKey
+        });
+        console.log(`✓ Got URL from Invidious`);
+        successTracker.recordSourceSuccess('invidious');
+        return {
+          found: true,
+          source: 'youtube',
+          previewUrl: invidiousUrl,
+          youtubeKey: tmdbMeta.youtubeTrailerKey,
+          country: 'yt'
+        };
+      } else {
+        successTracker.recordSourceFailure('invidious');
+      }
+    } else if (source === 'archive') {
+      const archiveUrl = await extractViaInternetArchive(tmdbMeta);
+      if (archiveUrl) {
+        setCache(imdbId, {
+          track_id: null,
+          preview_url: archiveUrl,
+          country: 'archive',
+          youtube_key: tmdbMeta.youtubeTrailerKey || null
+        });
+        console.log(`✓ Got URL from Internet Archive`);
+        successTracker.recordSourceSuccess('archive');
+        return {
+          found: true,
+          source: 'archive',
+          previewUrl: archiveUrl,
+          country: 'archive'
+        };
+      } else {
+        successTracker.recordSourceFailure('archive');
+      }
+    }
   }
   
   setCache(imdbId, {
