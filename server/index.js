@@ -1049,8 +1049,17 @@ async function extractViaInternetArchive(tmdbMeta) {
           // For "Game of Thrones", game trailers often have subtitles like "The Wall", "Telltale", etc.
           // Check if title has a subtitle after the main title that suggests it's a game (like "Game of Thrones - The Wall")
           const titleLower = title.toLowerCase();
-          const hasGameSubtitle = /game\s+of\s+thrones\s*-\s*(the\s+wall|telltale|iron\s+from\s+ice|a\s+telltale)/i.test(title) ||
-                                  /\b(telltale|telltale\s+games)\b/i.test(allText);
+          
+          // Check for Telltale Games (the developer of GoT game)
+          const hasTelltale = /\b(telltale|telltale\s+games)\b/i.test(allText);
+          
+          // Check for game-specific subtitles for "Game of Thrones"
+          // Patterns: "Game of Thrones - The Wall", "Game of Thrones: The Wall", etc.
+          // "The Wall" is a specific game episode/location, not part of the TV show
+          const hasGameSubtitle = /game\s+of\s+thrones\s*[-:]\s*(the\s+wall|telltale|iron\s+from\s+ice|a\s+telltale)/i.test(title) ||
+                                  // If searching for "Game of Thrones" and result has "The Wall", it's likely the game
+                                  (searchTitleHasGame && /\bgame\s+of\s+thrones\b/i.test(titleLower) && /\bthe\s+wall\b/i.test(titleLower)) ||
+                                  hasTelltale;
           
           const hasGamePattern = /\b(game|edition|dlc|expansion|pack|bundle)\s+(trailer|teaser|preview)/i.test(title) ||
                                  /\b(trailer|teaser|preview)\s+(for|of)\s+.*\s+game/i.test(title) ||
