@@ -410,20 +410,20 @@ function findBestMatch(results, tmdbMeta) {
 
 const PIPED_INSTANCES = [
   'https://pipedapi.kavin.rocks', // Most reliable
-  'https://pipedapi.r4fo.com',
   'https://pipedapi.in.projectsegfau.lt',
-  'https://piped-api.lunar.icu',
+  'https://api.piped.private.coffee',
+  'https://pipedapi.tokhmi.xyz',
+  'https://pipedapi.r4fo.com',
   'https://pipedapi.moomoo.me',
   'https://pipedapi.syncpundit.io',
-  'https://piped-api.garudalinux.org',
   'https://pipedapi.leptons.xyz',
-  'https://watchapi.whatever.social',
-  'https://pipedapi.tokhmi.xyz',
-  'https://pipedapi.mha.fi',
-  'https://api.piped.private.coffee',
   'https://pipedapi.darkness.services',
-  'https://pipedapi.adminforge.de',
-  // Removed: api.piped.projectsegfau.lt (shutdown)
+  // Removed dead instances:
+  // - piped-api.garudalinux.org (DNS)
+  // - piped-api.lunar.icu (expired cert)
+  // - watchapi.whatever.social (cert mismatch)
+  // - pipedapi.mha.fi (DNS)
+  // - pipedapi.adminforge.de (typo in URL)
 ];
 
 async function extractViaPiped(youtubeKey) {
@@ -549,21 +549,22 @@ const INVIDIOUS_INSTANCES = [
   'https://invidious.kavin.rocks',
   'https://invidious.private.coffee',
   'https://inv.tux.pizza',
-  'https://invidious.jing.rocks',
   'https://invidious.darkness.services',
   'https://invidious.f5.si',
   'https://inv.perditum.com',
   'https://invidious.privacyredirect.com',
-  'https://iv.ggtyler.dev',
-  'https://invidious.einfachzocken.eu',
   'https://invidious.slipfox.xyz',
   'https://inv.zzls.xyz',
-  'https://invidious.baczek.me',
-  'https://yt.drgnz.club',
-  'https://invidious.reallyaweso.me',
   'https://inv.nadeko.net',
-  'https://invidious.nerdvpn.de',
-  // Removed: invidious.fdn.fr (DNS issues)
+  // Removed dead instances:
+  // - invidious.baczek.me (shutdown message)
+  // - invidious.einfachzocken.eu (HTML response)
+  // - invidious.nerdvpn.de (timeout)
+  // - invidious.jing.rocks (DNS)
+  // - invidious.reallyaweso.me (expired cert)
+  // - yt.drgnz.club (DNS)
+  // - iv.ggtyler.dev (HTML response)
+  // - invidious.fdn.fr (DNS)
 ];
 
 async function extractViaInvidious(youtubeKey) {
@@ -776,8 +777,8 @@ async function extractViaInternetArchive(tmdbMeta) {
           }
         }
         
-        // Use higher threshold for better matches (0.7 instead of 0.5)
-        if (bestMatch && bestScore >= 0.7) {
+        // Use threshold for matches (0.6 - balanced between accuracy and coverage)
+        if (bestMatch && bestScore >= 0.6) {
           console.log(`  [Internet Archive] Best match: "${bestMatch.title}" (score: ${bestScore.toFixed(2)})`);
           // Get the video URL from the item metadata
           const identifier = bestMatch.identifier;
