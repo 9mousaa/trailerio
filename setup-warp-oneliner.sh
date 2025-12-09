@@ -32,30 +32,88 @@ cd /tmp || exit 1
 # Register if not already registered
 if [ ! -f "wgcf-account.toml" ]; then
     echo "Registering with Cloudflare Warp..."
-    wgcf register
+    wgcf register || {
+        echo "✗ Error: Failed to register with Cloudflare Warp"
+        exit 1
+    }
     echo "✓ Registered"
 else
-    echo "✓ Already registered"
+    echo "✓ Already registered (wgcf-account.toml exists)"
+    # Verify account file is valid
+    if [ ! -s "wgcf-account.toml" ]; then
+        echo "⚠ Warning: wgcf-account.toml exists but is empty, re-registering..."
+        rm -f wgcf-account.toml
+        wgcf register || {
+            echo "✗ Error: Failed to re-register"
+            exit 1
+        }
+    fi
 fi
+
+# Verify account file exists and has content
+if [ ! -f "wgcf-account.toml" ] || [ ! -s "wgcf-account.toml" ]; then
+    echo "✗ Error: wgcf-account.toml is missing or empty"
+    exit 1
+fi
+echo "✓ Account file verified ($(wc -l < wgcf-account.toml) lines)"
 
 # Generate profile
 echo "Generating WireGuard profile..."
-if [ ! -f "wgcf-profile.conf" ]; then
-    wgcf generate
-    echo "✓ Profile generated"
-else
-    echo "Regenerating profile..."
-    wgcf generate
-    echo "✓ Profile regenerated"
-fi
+PROFILE_FILE="wgcf-profile.conf"
 
-# Verify profile exists
-if [ ! -f "wgcf-profile.conf" ]; then
-    echo "✗ Error: wgcf-profile.conf not found after generation"
-    echo "Current directory: $(pwd)"
-    echo "Files in /tmp:"
-    ls -la /tmp/wgcf* 2>/dev/null || echo "No wgcf files found"
-    exit 1
+# Check wgcf help to see available options
+echo "Checking wgcf version and options..."
+wgcf --version || true
+echo ""
+
+# Run wgcf generate - it should create wgcf-profile.conf in current directory
+echo "Running: wgcf generate"
+wgcf generate 2>&1 | tee /tmp/wgcf-output.log || {
+    EXIT_CODE=$?
+    echo "✗ wgcf generate failed with exit code: $EXIT_CODE"
+    echo "Output:"
+    cat /tmp/wgcf-output.log 2>/dev/null || echo "No output captured"
+    # Try capturing stdout as file content (some versions output to stdout)
+    echo "Attempting to capture as stdout..."
+    wgcf generate > "$PROFILE_FILE" 2>/tmp/wgcf-stderr.log || true
+    if [ -f "$PROFILE_FILE" ] && [ -s "$PROFILE_FILE" ]; then
+        echo "✓ Captured profile from stdout"
+    else
+        echo "✗ Failed to generate profile"
+        cat /tmp/wgcf-stderr.log 2>/dev/null || true
+        exit 1
+    fi
+}
+
+# Check for profile file in current directory first
+if [ -f "$PROFILE_FILE" ]; then
+    echo "✓ Profile found: $PROFILE_FILE ($(wc -l < "$PROFILE_FILE") lines)"
+elif [ -f "/tmp/$PROFILE_FILE" ]; then
+    echo "✓ Profile found in /tmp, copying to current directory"
+    cp "/tmp/$PROFILE_FILE" "$PROFILE_FILE"
+else
+    # Try to find the file anywhere
+    echo "Searching for profile file..."
+    FOUND_FILE=$(find /tmp -name "wgcf-profile.conf" -o -name "*.conf" 2>/dev/null | head -n 1)
+    if [ -n "$FOUND_FILE" ] && [ -f "$FOUND_FILE" ]; then
+        echo "✓ Profile found at: $FOUND_FILE"
+        cp "$FOUND_FILE" "$PROFILE_FILE"
+    else
+        echo "✗ Error: wgcf-profile.conf not found after generation"
+        echo "Current directory: $(pwd)"
+        echo "wgcf generate output:"
+        cat /tmp/wgcf-output.log 2>/dev/null || echo "No output log found"
+        echo ""
+        echo "All files in /tmp:"
+        ls -la /tmp/ | head -20
+        echo ""
+        echo "Files matching 'wgcf' or 'profile':"
+        ls -la /tmp/ | grep -E "(wgcf|profile)" || echo "No matching files"
+        echo ""
+        echo "Checking if wgcf-account.toml exists:"
+        [ -f "wgcf-account.toml" ] && echo "✓ wgcf-account.toml exists" || echo "✗ wgcf-account.toml not found"
+        exit 1
+    fi
 fi
 
 # Extract keys
