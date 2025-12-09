@@ -56,13 +56,33 @@ if ! command -v wgcf &> /dev/null || [ ! -s "$(which wgcf 2>/dev/null)" ]; then
 fi
 
 # Verify wgcf works
-if ! wgcf --version &>/dev/null; then
-    echo "✗ Error: wgcf is not working properly"
+echo "Verifying wgcf installation..."
+VERSION_OUTPUT=$(wgcf --version 2>&1)
+VERSION_EXIT=$?
+
+if [ $VERSION_EXIT -ne 0 ]; then
+    echo "✗ Error: wgcf --version failed (exit code: $VERSION_EXIT)"
+    echo "Output: $VERSION_OUTPUT"
     echo "Binary size: $(wc -c < /usr/local/bin/wgcf 2>/dev/null || echo 0) bytes"
+    echo "Binary type: $(file /usr/local/bin/wgcf 2>&1)"
+    
+    # Check if it's a dynamic binary that needs libraries
+    if ldd /usr/local/bin/wgcf 2>&1 | grep -q "not a dynamic"; then
+        echo "Binary appears to be static, trying to run directly..."
+        /usr/local/bin/wgcf --version 2>&1 || true
+    else
+        echo "Checking required libraries:"
+        ldd /usr/local/bin/wgcf 2>&1 | head -5
+    fi
+    
+    # Try running it directly to see the actual error
+    echo "Direct execution test:"
+    /usr/local/bin/wgcf --version 2>&1 || echo "Direct execution also failed"
+    
     exit 1
 fi
 
-echo "✓ wgcf verified: $(wgcf --version 2>&1 | head -1)"
+echo "✓ wgcf verified: $VERSION_OUTPUT"
 
 # Register and generate
 cd /tmp || exit 1
