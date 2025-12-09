@@ -122,11 +122,23 @@ fi
 
 # Verify account file exists and has content
 if [ ! -f "$ACCOUNT_FILE_PATH" ] || [ ! -s "$ACCOUNT_FILE_PATH" ]; then
-    echo "⚠ Warning: wgcf-account.toml not found, but continuing..."
-    echo "wgcf might be using a different location or already registered"
-    echo "Trying to generate profile anyway..."
-    # Create a dummy account file path for reference
-    ACCOUNT_FILE_PATH="/tmp/wgcf-account.toml"
+    echo "⚠ Warning: wgcf-account.toml not found after registration"
+    echo "Trying wgcf update to refresh account..."
+    cd /tmp || exit 1
+    if wgcf update > /tmp/wgcf-update.log 2>&1; then
+        echo "wgcf update completed, output:"
+        cat /tmp/wgcf-update.log
+        # Check if update created the account file
+        if [ -f "$ACCOUNT_FILE" ] && [ -s "$ACCOUNT_FILE" ]; then
+            echo "✓ Account file created by wgcf update"
+            cp "$ACCOUNT_FILE" "$ACCOUNT_FILE_PATH"
+        fi
+    fi
+    
+    # Final check
+    if [ ! -f "$ACCOUNT_FILE_PATH" ] || [ ! -s "$ACCOUNT_FILE_PATH" ]; then
+        echo "⚠ Still no account file, but continuing with generation..."
+    fi
 else
     echo "✓ Account file verified at $ACCOUNT_FILE_PATH ($(wc -l < "$ACCOUNT_FILE_PATH") lines, $(wc -c < "$ACCOUNT_FILE_PATH") bytes)"
 fi
