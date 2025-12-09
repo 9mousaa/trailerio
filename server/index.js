@@ -1486,7 +1486,7 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
     }
     
     // Add title-based strategies (fallback if no IMDb ID or IMDb ID doesn't match)
-    searchStrategies.push(
+    const titleStrategies = [
       {
         id: 'archive_collection_title_year',
         query: `collection:movie_trailers AND title:${encodeURIComponent(titleQuery)}${yearQuery}`,
@@ -1507,7 +1507,8 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
         query: `title:${encodeURIComponent(titleQuery + ' trailer')}`,
         description: 'Title + "trailer" (no year)'
       }
-    ]); // Fixed: properly closed push() call
+    ];
+    searchStrategies.push(...titleStrategies);
     
     // Add original title strategy if different
     if (tmdbMeta.originalTitle && tmdbMeta.originalTitle !== tmdbMeta.title) {
