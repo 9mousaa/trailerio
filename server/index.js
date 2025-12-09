@@ -1145,6 +1145,22 @@ async function extractViaYtDlp(youtubeKey) {
   try {
     // Check if gluetun proxy is available
     const gluetunProxy = process.env.GLUETUN_HTTP_PROXY || null;
+    
+    // Verify proxy is accessible if set
+    if (gluetunProxy) {
+      try {
+        const proxyTest = await fetch(`${gluetunProxy.replace(/\/$/, '')}/v1/openvpn/status`, {
+          signal: AbortSignal.timeout(2000),
+          method: 'GET'
+        }).catch(() => null);
+        if (!proxyTest || !proxyTest.ok) {
+          console.log(`  [yt-dlp] ⚠ Warning: gluetun proxy at ${gluetunProxy} may not be accessible`);
+        }
+      } catch (proxyError) {
+        console.log(`  [yt-dlp] ⚠ Warning: Could not verify gluetun proxy: ${proxyError.message}`);
+      }
+    }
+    
     const useProxy = gluetunProxy ? `--proxy ${gluetunProxy}` : '';
     
     // Anti-blocking strategies:
@@ -1196,7 +1212,15 @@ async function extractViaYtDlp(youtubeKey) {
       if (raceError.message === 'yt-dlp timeout') {
         console.log(`  [yt-dlp] ✗ TIMEOUT after ${duration}ms`);
       } else {
-        console.log(`  [yt-dlp] ✗ Error: ${raceError.message.substring(0, 200)} (${duration}ms)`);
+        // Show more detailed error information
+        const errorMsg = raceError.message || raceError.toString();
+        // execAsync errors have stdout/stderr in the error object
+        const errorStderr = raceError.stderr || (raceError.cmd ? '' : '');
+        const errorStdout = raceError.stdout || '';
+        const stderrMsg = errorStderr ? `\n    stderr: ${errorStderr.substring(0, 500)}` : '';
+        const stdoutMsg = errorStdout ? `\n    stdout: ${errorStdout.substring(0, 500)}` : '';
+        const cmdMsg = raceError.cmd ? `\n    command: ${raceError.cmd.substring(0, 200)}` : '';
+        console.log(`  [yt-dlp] ✗ Error: ${errorMsg.substring(0, 200)}${cmdMsg}${stderrMsg}${stdoutMsg} (${duration}ms)`);
       }
       successTracker.recordFailure('ytdlp', 'extraction');
       return null;
@@ -1261,7 +1285,9 @@ async function extractViaYtDlp(youtubeKey) {
       console.log(`  [yt-dlp] ✗ yt-dlp not installed or not in PATH`);
     } else {
       const errorMsg = error.message || error.toString();
-      console.log(`  [yt-dlp] ✗ Error: ${errorMsg.substring(0, 200)} (${duration}ms)`);
+      const stderrMsg = error.stderr ? `\n    stderr: ${error.stderr.substring(0, 300)}` : '';
+      const stdoutMsg = error.stdout ? `\n    stdout: ${error.stdout.substring(0, 300)}` : '';
+      console.log(`  [yt-dlp] ✗ Error: ${errorMsg.substring(0, 200)}${stderrMsg}${stdoutMsg} (${duration}ms)`);
     }
     
     successTracker.recordFailure('ytdlp', 'extraction');
@@ -1438,32 +1464,49 @@ async function extractViaInternetArchive(tmdbMeta) {
           
           let score = 0;
           
+          // For short/generic titles (1-2 words), require much stricter matching
+          const searchWords = normSearchTitle.split(' ').filter(w => w.length > 2); // Ignore short words
+          const isShortTitle = searchWords.length <= 2;
+          const titleWords = normTitle.split(' ');
+          const matchingWords = searchWords.filter(word => titleWords.includes(word));
+          const wordMatchRatio = searchWords.length > 0 ? matchingWords.length / searchWords.length : 0;
+          
           // Title matching (most important) - be more strict
           if (normTitle === normSearchTitle) {
             score += 1.0; // Exact match
           } else if (normTitle === normOriginalTitle) {
             score += 0.9; // Exact match with original title
           } else {
-            // Check if title contains the movie title as a complete word (more strict)
-            const searchWords = normSearchTitle.split(' ').filter(w => w.length > 2); // Ignore short words
-            const titleWords = normTitle.split(' ');
-            const matchingWords = searchWords.filter(word => titleWords.includes(word));
-            const wordMatchRatio = searchWords.length > 0 ? matchingWords.length / searchWords.length : 0;
-            
-            if (wordMatchRatio >= 0.8) {
-              // Most words match - likely correct
-              score += 0.7;
-            } else if (wordMatchRatio >= 0.5) {
-              // Half words match - possible match
-              score += 0.4;
-            }
-            
-            // Fuzzy match as secondary check (already calculated above)
-            // Only add fuzzy score if it's high enough and we have some word matches
-            if (bestFuzzy > 0.85 && wordMatchRatio > 0.3) {
-              score += 0.3;
-            } else if (bestFuzzy > 0.9 && wordMatchRatio > 0.5) {
-              score += 0.4;
+            // For short titles, require very high word match ratio
+            if (isShortTitle) {
+              // Short titles like "Stephen" or "Troll 2" need almost perfect word matches
+              if (wordMatchRatio >= 0.9 && searchWords.length === matchingWords.length) {
+                // All words must match for short titles
+                score += 0.7;
+              } else if (wordMatchRatio >= 0.7 && bestFuzzy > 0.9) {
+                // Very high fuzzy + good word match for short titles
+                score += 0.5;
+              } else {
+                // Reject short titles that don't match well
+                continue;
+              }
+            } else {
+              // Longer titles can be more lenient
+              if (wordMatchRatio >= 0.8) {
+                // Most words match - likely correct
+                score += 0.7;
+              } else if (wordMatchRatio >= 0.5) {
+                // Half words match - possible match
+                score += 0.4;
+              }
+              
+              // Fuzzy match as secondary check (already calculated above)
+              // Only add fuzzy score if it's high enough and we have some word matches
+              if (bestFuzzy > 0.85 && wordMatchRatio > 0.3) {
+                score += 0.3;
+              } else if (bestFuzzy > 0.9 && wordMatchRatio > 0.5) {
+                score += 0.4;
+              }
             }
           }
           
