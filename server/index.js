@@ -478,9 +478,11 @@ async function getTMDBMetadata(imdbId, type) {
     v.type === 'Trailer' && 
     v.official === true
   );
+  let youtubeTrailerTitle = null;
   if (trailer) {
     youtubeTrailerKey = trailer.key;
-    console.log(`Found official trailer: ${trailer.name || 'Trailer'}`);
+    youtubeTrailerTitle = trailer.name || null;
+    console.log(`Found official trailer: ${youtubeTrailerTitle || 'Trailer'}`);
   } else {
     // Priority 2: Official Teaser
     trailer = filteredVideos.find(v => 
@@ -489,13 +491,15 @@ async function getTMDBMetadata(imdbId, type) {
     );
     if (trailer) {
       youtubeTrailerKey = trailer.key;
-      console.log(`Found official teaser: ${trailer.name || 'Teaser'}`);
+      youtubeTrailerTitle = trailer.name || null;
+      console.log(`Found official teaser: ${youtubeTrailerTitle || 'Teaser'}`);
     } else {
       // Priority 3: Any Trailer (not official)
       trailer = filteredVideos.find(v => v.type === 'Trailer');
       if (trailer) {
         youtubeTrailerKey = trailer.key;
-        console.log(`Found trailer: ${trailer.name || 'Trailer'}`);
+        youtubeTrailerTitle = trailer.name || null;
+        console.log(`Found trailer: ${youtubeTrailerTitle || 'Trailer'}`);
       } else {
         // Priority 4: Official Clip
         trailer = filteredVideos.find(v => 
@@ -504,13 +508,15 @@ async function getTMDBMetadata(imdbId, type) {
         );
         if (trailer) {
           youtubeTrailerKey = trailer.key;
-          console.log(`Found official clip: ${trailer.name || 'Clip'}`);
+          youtubeTrailerTitle = trailer.name || null;
+          console.log(`Found official clip: ${youtubeTrailerTitle || 'Clip'}`);
         } else {
           // Last resort: Any YouTube video (but prefer official)
           trailer = filteredVideos.find(v => v.official === true) || filteredVideos[0];
           if (trailer) {
             youtubeTrailerKey = trailer.key;
-            console.log(`Found YouTube video: ${trailer.name || 'Video'} (${trailer.type})`);
+            youtubeTrailerTitle = trailer.name || null;
+            console.log(`Found YouTube video: ${youtubeTrailerTitle || 'Video'} (${trailer.type})`);
           }
         }
       }
@@ -541,7 +547,8 @@ async function getTMDBMetadata(imdbId, type) {
     year,
     runtime,
     altTitles: altTitlesArray,
-    youtubeTrailerKey
+    youtubeTrailerKey,
+    youtubeTrailerTitle
   };
 }
 
