@@ -1,6 +1,8 @@
 #!/bin/bash
 # One-liner Cloudflare Warp setup for TrailerIO
-# Run this on your VPS: bash <(curl -fsSL https://raw.githubusercontent.com/9mousaa/trailerio/main/setup-cloudflare-warp.sh) /opt/trailerio
+# Run this on your VPS: bash setup-warp-oneliner.sh /opt/trailerio
+
+set -e
 
 PROJECT_DIR="${1:-/opt/trailerio}"
 cd "$PROJECT_DIR" || exit 1
@@ -15,16 +17,44 @@ if ! command -v wgcf &> /dev/null; then
     wget -q "https://github.com/ViRb3/wgcf/releases/latest/download/wgcf_2.2.21_linux_${ARCH}" -O /tmp/wgcf || \
     wget -q "https://github.com/ViRb3/wgcf/releases/latest/download/wgcf_linux_${ARCH}" -O /tmp/wgcf
     chmod +x /tmp/wgcf && sudo mv /tmp/wgcf /usr/local/bin/wgcf 2>/dev/null || mv /tmp/wgcf /usr/local/bin/wgcf
+    echo "✓ wgcf installed"
+fi
+
+# Verify wgcf works
+if ! wgcf --version &>/dev/null; then
+    echo "✗ Error: wgcf is not working properly"
+    exit 1
 fi
 
 # Register and generate
 cd /tmp || exit 1
-[ ! -f "wgcf-account.toml" ] && wgcf register
-wgcf generate
 
-# Check if profile was generated
+# Register if not already registered
+if [ ! -f "wgcf-account.toml" ]; then
+    echo "Registering with Cloudflare Warp..."
+    wgcf register
+    echo "✓ Registered"
+else
+    echo "✓ Already registered"
+fi
+
+# Generate profile
+echo "Generating WireGuard profile..."
 if [ ! -f "wgcf-profile.conf" ]; then
-    echo "✗ Error: Failed to generate wgcf-profile.conf"
+    wgcf generate
+    echo "✓ Profile generated"
+else
+    echo "Regenerating profile..."
+    wgcf generate
+    echo "✓ Profile regenerated"
+fi
+
+# Verify profile exists
+if [ ! -f "wgcf-profile.conf" ]; then
+    echo "✗ Error: wgcf-profile.conf not found after generation"
+    echo "Current directory: $(pwd)"
+    echo "Files in /tmp:"
+    ls -la /tmp/wgcf* 2>/dev/null || echo "No wgcf files found"
     exit 1
 fi
 
