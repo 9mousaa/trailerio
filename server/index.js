@@ -1369,6 +1369,99 @@ async function extractViaYtDlp(youtubeKey) {
   }
 }
 
+// ============ EMBEDDINGS FOR SEMANTIC MATCHING (Internet Archive fallback) ============
+let embeddingPipeline = null;
+
+async function getEmbeddingModel() {
+  if (!embeddingPipeline) {
+    try {
+      console.log('  [Embeddings] Loading embedding model (Xenova/all-MiniLM-L6-v2)...');
+      const { pipeline } = require('@xenova/transformers');
+      embeddingPipeline = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+      console.log('  [Embeddings] Embedding model loaded.');
+    } catch (error) {
+      console.error('  [Embeddings] Failed to load model:', error.message);
+      embeddingPipeline = null; // Disable embeddings if loading fails
+      return null;
+    }
+  }
+  return embeddingPipeline;
+}
+
+async function embedText(text) {
+  try {
+    const generator = await getEmbeddingModel();
+    if (!generator) return null;
+    const output = await generator(text, { pooling: 'mean', normalize: true });
+    return Array.from(output.data);
+  } catch (error) {
+    console.error('  [Embeddings] Error generating embedding:', error.message);
+    return null;
+  }
+}
+
+function cosineSimilarity(vec1, vec2) {
+  if (!vec1 || !vec2 || vec1.length !== vec2.length) {
+    return 0;
+  }
+  let dotProduct = 0;
+  let magnitude1 = 0;
+  let magnitude2 = 0;
+  for (let i = 0; i < vec1.length; i++) {
+    dotProduct += vec1[i] * vec2[i];
+    magnitude1 += vec1[i] * vec1[i];
+    magnitude2 += vec2[i] * vec2[i];
+  }
+  magnitude1 = Math.sqrt(magnitude1);
+  magnitude2 = Math.sqrt(magnitude2);
+  if (magnitude1 === 0 || magnitude2 === 0) {
+    return 0;
+  }
+  return dotProduct / (magnitude1 * magnitude2);
+}
+
+async function rerankWithEmbeddings(searchQuery, candidates, tmdbMeta) {
+  console.log(`  [Embeddings] Reranking ${candidates.length} candidates for "${searchQuery}"...`);
+  const queryText = `Official movie trailer for ${tmdbMeta.title} (${tmdbMeta.year || ''}). Feature film.`;
+  const queryEmbedding = await embedText(queryText);
+
+  if (!queryEmbedding) {
+    console.log('  [Embeddings] Failed to generate query embedding, skipping reranking.');
+    return candidates;
+  }
+
+  const scoredCandidates = [];
+  for (const candidate of candidates) {
+    // Extract IMDb ID from candidate.doc if available
+    const externalIds = candidate.doc['external-identifier'] 
+      ? (Array.isArray(candidate.doc['external-identifier']) 
+          ? candidate.doc['external-identifier'] 
+          : [candidate.doc['external-identifier']])
+      : [];
+    const docImdbId = externalIds.find(id => id && id.startsWith('urn:imdb:'))?.replace('urn:imdb:', '') || null;
+    
+    const candidateText = `${candidate.title} (${candidate.year || ''}) trailer. IMDb: ${docImdbId || 'N/A'}.`;
+    const candidateEmbedding = await embedText(candidateText);
+
+    if (candidateEmbedding) {
+      const similarity = cosineSimilarity(queryEmbedding, candidateEmbedding);
+      scoredCandidates.push({ candidate, similarity });
+    } else {
+      scoredCandidates.push({ candidate, similarity: 0 }); // Fallback if embedding fails
+    }
+  }
+
+  // Sort by similarity (highest first)
+  scoredCandidates.sort((a, b) => b.similarity - a.similarity);
+
+  console.log('  [Embeddings] Reranking complete. Top 3:');
+  scoredCandidates.slice(0, 3).forEach(sc => {
+    console.log(`    - "${sc.candidate.title}" (Similarity: ${sc.similarity.toFixed(4)})`);
+  });
+
+  return scoredCandidates.map(sc => sc.candidate);
+}
+
 // ============ INTERNET ARCHIVE EXTRACTOR ============
 
 async function extractViaInternetArchive(tmdbMeta, imdbId) {
@@ -1756,7 +1849,7 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
             if (candidates.length > 1) {
               console.log(`  [Internet Archive] Using embeddings to rerank ${candidates.length} uncertain candidates...`);
               const searchText = `${tmdbMeta.title} ${tmdbMeta.year || ''} trailer`.trim();
-              const reranked = await rerankWithEmbeddings(searchText, candidates, 5);
+              const reranked = await rerankWithEmbeddings(searchText, candidates, tmdbMeta);
               
               if (reranked.length > 0) {
                 const topReranked = reranked[0];
