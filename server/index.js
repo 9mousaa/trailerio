@@ -44,6 +44,86 @@ if (!fs.existsSync(dbDir)) {
 
 const db = new Database(dbPath);
 
+// ============ LOGGING UTILITY ============
+const colors = {
+  reset: '\x1b[0m',
+  bright: '\x1b[1m',
+  dim: '\x1b[2m',
+  red: '\x1b[31m',
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  blue: '\x1b[34m',
+  magenta: '\x1b[35m',
+  cyan: '\x1b[36m',
+  white: '\x1b[37m',
+};
+
+const logger = {
+  // Format timestamp
+  timestamp: () => {
+    const now = new Date();
+    return now.toISOString().replace('T', ' ').substring(0, 19);
+  },
+  
+  // Request logs
+  request: (method, path, status, duration) => {
+    const statusColor = status >= 200 && status < 300 ? colors.green : 
+                       status >= 400 && status < 500 ? colors.yellow : colors.red;
+    console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${colors.cyan}${method}${colors.reset} ${path} ${statusColor}${status}${colors.reset} ${colors.dim}(${duration}ms)${colors.reset}`);
+  },
+  
+  // Source extraction logs
+  source: (source, message, success = null) => {
+    const icon = success === true ? '✓' : success === false ? '✗' : '→';
+    const color = success === true ? colors.green : success === false ? colors.red : colors.blue;
+    const sourceName = source.toUpperCase().padEnd(10);
+    console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${color}${icon}${colors.reset} ${colors.bright}[${sourceName}]${colors.reset} ${message}`);
+  },
+  
+  // Cache logs
+  cache: (action, message) => {
+    const icon = action === 'hit' ? '💾' : action === 'miss' ? '🔍' : '🗑️';
+    console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${icon} ${colors.magenta}[CACHE]${colors.reset} ${message}`);
+  },
+  
+  // Info logs
+  info: (message) => {
+    console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${colors.blue}ℹ${colors.reset} ${message}`);
+  },
+  
+  // Success logs
+  success: (message) => {
+    console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${colors.green}✓${colors.reset} ${message}`);
+  },
+  
+  // Warning logs
+  warn: (message) => {
+    console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${colors.yellow}⚠${colors.reset} ${message}`);
+  },
+  
+  // Error logs
+  error: (message, error = null) => {
+    console.error(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${colors.red}✗${colors.reset} ${colors.red}[ERROR]${colors.reset} ${message}`);
+    if (error) {
+      console.error(`${colors.dim}  Stack:${colors.reset} ${error.stack || error.message}`);
+    }
+  },
+  
+  // Debug logs (only in development)
+  debug: (message) => {
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${colors.dim}[DEBUG]${colors.reset} ${message}`);
+    }
+  },
+  
+  // Section separator
+  section: (title) => {
+    console.log(`\n${colors.bright}${colors.cyan}═══════════════════════════════════════════════════════════${colors.reset}`);
+    console.log(`${colors.bright}${colors.cyan}  ${title}${colors.reset}`);
+    console.log(`${colors.bright}${colors.cyan}═══════════════════════════════════════════════════════════${colors.reset}\n`);
+  }
+};
+
 // Optimize database for better performance and memory usage
 db.pragma('journal_mode = WAL'); // Write-Ahead Logging for better concurrency
 db.pragma('synchronous = NORMAL'); // Balance between safety and performance
@@ -95,7 +175,7 @@ for (const row of cacheRows) {
     timestamp: row.timestamp
   });
 }
-console.log(`Loaded ${cache.size} cached items from database (limited to ${MAX_CACHE_SIZE} most recent)`);
+logger.info(`Loaded ${cache.size} cached items from database (limited to ${MAX_CACHE_SIZE} most recent)`);
 
 // Load success tracker from database (limit per type to prevent memory issues)
 const loadSuccessTracker = db.prepare(`
@@ -941,7 +1021,7 @@ async function extractViaPiped(youtubeKey) {
       
       // PRIORITY 1: DASH manifest (best for AVPlayer - native support, adaptive streaming, highest quality)
       if (data.dash) {
-        console.log(`  ✓ [Piped] ${instance}: got DASH manifest (adaptive quality up to highest available + audio)`);
+        logger.source('piped', `${instance}: got DASH manifest (adaptive quality)`, true);
         successTracker.recordSuccess('piped', instance);
         return { url: data.dash, isDash: true };
       }
@@ -1013,11 +1093,11 @@ async function extractViaPiped(youtubeKey) {
     .filter(r => r !== null);
   
   if (successfulResults.length === 0) {
-    console.log(`  ✗ [Piped] All ${sortedInstances.length} instances failed or timed out`);
+    logger.source('piped', `All ${sortedInstances.length} instances failed or timed out`, false);
     return null;
   }
   
-  console.log(`  ✓ [Piped] ${successfulResults.length}/${sortedInstances.length} instances succeeded`);
+  logger.source('piped', `${successfulResults.length}/${sortedInstances.length} instances succeeded`, true);
   
   // Find best quality result (prefer DASH, then highest quality combined stream)
   const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
@@ -2028,11 +2108,11 @@ async function getCachedWithValidation(imdbId) {
   const shouldValidate = sourceType === 'youtube' || hoursSinceCheck > (ttlHours * 0.8); // Validate if 80% through TTL
   
   if (shouldValidate) {
-    console.log(`  [Cache] Validating cached URL for ${imdbId} (${sourceType}, ${hoursSinceCheck.toFixed(1)}h old)...`);
+    logger.cache('validate', `Validating cached URL for ${imdbId} (${sourceType}, ${hoursSinceCheck.toFixed(1)}h old)`);
     const isValid = await validateUrl(cached.preview_url);
     
     if (!isValid) {
-      console.log(`  [Cache] ✗ Cached URL is no longer valid, invalidating cache for ${imdbId}`);
+      logger.cache('miss', `Cached URL is no longer valid, invalidating cache for ${imdbId}`);
       cache.delete(imdbId);
       // Also delete from database
       const deleteStmt = db.prepare('DELETE FROM cache WHERE imdb_id = ?');
@@ -2040,7 +2120,7 @@ async function getCachedWithValidation(imdbId) {
       return null;
     }
     
-    console.log(`  [Cache] ✓ Cached URL is still valid`);
+    logger.cache('hit', `Cached URL is still valid for ${imdbId}`);
   }
   
   return cached;
@@ -2113,7 +2193,7 @@ function setCache(imdbId, data) {
 }
 
 async function resolvePreview(imdbId, type) {
-  console.log(`\n========== Resolving ${imdbId} (${type}) ==========`);
+  logger.section(`RESOLVING: ${imdbId} (${type})`);
   
   // Check cache with validation
   const cached = await getCachedWithValidation(imdbId);
@@ -2162,13 +2242,13 @@ async function resolvePreview(imdbId, type) {
     const rate = successTracker.getSourceSuccessRate(s);
     return `${s.toUpperCase()} (${(rate * 100).toFixed(0)}%)`;
   }).join(', ');
-  console.log(`\n========== Trying sources in order (sorted by success rate): ${sourceRates} ==========`);
+  logger.info(`Trying sources (sorted by success rate): ${sourceRates}`);
   
   // Try each source in sorted order
   const SOURCE_TIMEOUT = 10000; // 10 seconds per source - reduced to prevent overall timeout
   
   for (const source of sortedSources) {
-    console.log(`\n========== Trying ${source.toUpperCase()} ==========`);
+    logger.source(source, `Attempting extraction...`);
     
     try {
       // Wrap each source attempt in a timeout to prevent hanging
@@ -2358,10 +2438,11 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   const { type, id } = req.params;
   const requestStart = Date.now();
   
-  console.log(`\n========== Stream request: type=${type}, id=${id} (Active requests: ${activeRequests}) ==========`);
+  logger.section(`REQUEST: ${type.toUpperCase()} ${id}`);
+  logger.info(`Active requests: ${activeRequests}`);
   
   if (!id.startsWith('tt')) {
-    console.log(`  Skipping non-IMDB ID: ${id}`);
+    logger.warn(`Skipping non-IMDB ID: ${id}`);
     return res.json({ streams: [] });
   }
   
@@ -2447,7 +2528,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         console.log(`Using Piped/Invidious URL directly (already proxied, AVPlayer compatible): ${finalUrl.substring(0, 80)}...`);
       }
       
-      console.log(`  ✓ Returning stream for ${id}: ${finalUrl.substring(0, 80)}...`);
+      logger.success(`Found trailer for ${id}: ${finalUrl.substring(0, 80)}...`);
       console.log(`  [DEBUG] Before res.json() - headersSent: ${res.headersSent}, finished: ${res.finished}`);
       
       if (!res.headersSent) {
@@ -2495,7 +2576,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       }
     }
     
-    console.log(`  ✗ No preview found for ${id}`);
+    logger.warn(`No preview found for ${id}`);
     console.log(`  [DEBUG] Before sending empty response - headersSent: ${res.headersSent}`);
     if (!res.headersSent) {
       try {
@@ -2544,7 +2625,7 @@ app.delete('/cache/:imdbId', (req, res) => {
   deleteStmt.run(imdbId);
   
   if (wasCached) {
-    console.log(`[Cache] Removed cache entry for ${imdbId}`);
+    logger.cache('delete', `Removed cache entry for ${imdbId}`);
     res.json({ success: true, message: `Cache entry for ${imdbId} removed` });
   } else {
     res.json({ success: true, message: `No cache entry found for ${imdbId}` });
@@ -2562,7 +2643,7 @@ app.delete('/cache', (req, res) => {
   const deleteAllStmt = db.prepare('DELETE FROM cache');
   deleteAllStmt.run();
   
-  console.log(`[Cache] Cleared all ${cacheSize} cache entries`);
+  logger.cache('delete', `Cleared all ${cacheSize} cache entries`);
   res.json({ success: true, message: `Cleared ${cacheSize} cache entries` });
 });
 
@@ -2625,10 +2706,12 @@ try {
   console.log(`Database path: ${dbPath}`);
   
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`✓ Stremio addon server running on port ${PORT}`);
-    console.log(`✓ Server listening on 0.0.0.0:${PORT}`);
+    logger.section('SERVER STARTED');
+    logger.success(`Server running on port ${PORT}`);
+    logger.info(`Listening on 0.0.0.0:${PORT}`);
+    logger.info(`Database: ${dbPath}`);
     if (!TMDB_API_KEY) {
-      console.warn('⚠️  TMDB_API_KEY not set. Please set it as an environment variable.');
+      logger.warn('TMDB_API_KEY not set. Please set it as an environment variable.');
     }
   });
   
