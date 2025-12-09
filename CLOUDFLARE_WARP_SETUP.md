@@ -2,7 +2,43 @@
 
 This guide explains how to set up Cloudflare Warp with gluetun for yt-dlp extraction.
 
-## Step 1: Install wgcf (on your host machine)
+## Quick Setup (Automated) - RECOMMENDED
+
+**Option 1: One-liner (easiest)**
+
+Run this single command on your VPS:
+
+```bash
+cd /opt/trailerio && bash <(curl -fsSL https://raw.githubusercontent.com/9mousaa/trailerio/main/setup-warp-oneliner.sh) /opt/trailerio
+```
+
+**Option 2: Using setup script**
+
+If you have the repo cloned:
+
+```bash
+cd /opt/trailerio && bash setup-cloudflare-warp.sh /opt/trailerio
+```
+
+**What it does automatically:**
+1. ✅ Installs wgcf
+2. ✅ Registers with Cloudflare Warp (one-time)
+3. ✅ Generates WireGuard configuration
+4. ✅ Extracts all keys
+5. ✅ Updates your .env file
+6. ✅ Backs up existing .env
+
+**Then restart services:**
+
+```bash
+cd /opt/trailerio && docker compose up -d
+```
+
+---
+
+## Manual Setup (Alternative)
+
+If you prefer to set it up manually:
 
 ```bash
 # Download wgcf (replace with latest version)
