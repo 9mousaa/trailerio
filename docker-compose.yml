@@ -71,6 +71,7 @@ services:
       - "traefik.http.routers.trailerio.entrypoints=websecure"
       - "traefik.http.routers.trailerio.tls.certresolver=letsencrypt"
       - "traefik.http.routers.trailerio.tls=true"
+      - "traefik.http.routers.trailerio.tls.options=default"
       - "traefik.http.services.trailerio.loadbalancer.server.port=80"
       # HTTP to HTTPS redirect
       - "traefik.http.routers.trailerio-http.rule=Host(`trailerio.plaio.cc`)"
@@ -78,6 +79,14 @@ services:
       - "traefik.http.routers.trailerio-http.middlewares=trailerio-redirect"
       - "traefik.http.middlewares.trailerio-redirect.redirectscheme.scheme=https"
       - "traefik.http.middlewares.trailerio-redirect.redirectscheme.permanent=true"
+      # Security headers middleware (optional - nginx already handles this)
+      - "traefik.http.middlewares.trailerio-headers.headers.stsSeconds=31536000"
+      - "traefik.http.middlewares.trailerio-headers.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.trailerio-headers.headers.stsPreload=true"
+      - "traefik.http.middlewares.trailerio-headers.headers.contentTypeNosniff=true"
+      - "traefik.http.middlewares.trailerio-headers.headers.browserXssFilter=true"
+      - "traefik.http.middlewares.trailerio-headers.headers.frameDeny=true"
+      - "traefik.http.routers.trailerio.middlewares=trailerio-headers"
     networks:
       - trailerio-internal
       - plaio_default
