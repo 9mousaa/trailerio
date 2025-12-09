@@ -8,6 +8,10 @@ const { exec } = require('child_process');
 const { promisify } = require('util');
 const execAsync = promisify(exec);
 
+// Embeddings support (lazy loaded)
+let embeddingModel = null;
+let embeddingsEnabled = true; // Can be disabled if model fails to load
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
