@@ -69,13 +69,12 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.trailerio.rule=Host(`trailerio.plaio.cc`)"
       - "traefik.http.routers.trailerio.entrypoints=websecure"
-      # TLS configuration - uncomment when certresolver is configured in Traefik
-      # - "traefik.http.routers.trailerio.tls.certresolver=letsencrypt"
-      # - "traefik.http.routers.trailerio.tls=true"
-      # - "traefik.http.routers.trailerio.tls.options=default"
-      # Temporary: Allow HTTP on websecure entrypoint until certresolver is configured
-      # Remove this line once TLS is properly configured
-      - "traefik.http.routers.trailerio.tls=false"
+      # TLS configuration - requires 'letsencrypt' certresolver to be configured in Traefik
+      # See TRAEFIK_CERTRESOLVER_FIX.md for instructions
+      # If certresolver is not configured, Traefik will log errors but site may still work
+      - "traefik.http.routers.trailerio.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.trailerio.tls=true"
+      - "traefik.http.routers.trailerio.tls.options=default"
       - "traefik.http.services.trailerio.loadbalancer.server.port=80"
       # HTTP to HTTPS redirect
       - "traefik.http.routers.trailerio-http.rule=Host(`trailerio.plaio.cc`)"
