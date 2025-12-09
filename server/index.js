@@ -1999,29 +1999,42 @@ function setCache(imdbId, data) {
   // Save to in-memory cache
   cache.set(imdbId, cacheData);
   
-  // Save to database
-  const stmt = db.prepare(`
-    INSERT INTO cache (imdb_id, preview_url, track_id, country, youtube_key, source_type, source, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(imdb_id) DO UPDATE SET
-      preview_url = excluded.preview_url,
-      track_id = excluded.track_id,
-      country = excluded.country,
-      youtube_key = excluded.youtube_key,
-      source_type = excluded.source_type,
-      source = excluded.source,
-      timestamp = excluded.timestamp
-  `);
-  stmt.run(
-    imdbId,
-    cacheData.preview_url || null,
-    cacheData.track_id || null,
-    cacheData.country || null,
-    cacheData.youtube_key || null,
-    sourceType,
-    cacheData.source || null,
-    timestamp
-  );
+  // Save to database - with error handling to prevent blocking
+  try {
+    const startTime = Date.now();
+    const stmt = db.prepare(`
+      INSERT INTO cache (imdb_id, preview_url, track_id, country, youtube_key, source_type, source, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(imdb_id) DO UPDATE SET
+        preview_url = excluded.preview_url,
+        track_id = excluded.track_id,
+        country = excluded.country,
+        youtube_key = excluded.youtube_key,
+        source_type = excluded.source_type,
+        source = excluded.source,
+        timestamp = excluded.timestamp
+    `);
+    stmt.run(
+      imdbId,
+      cacheData.preview_url || null,
+      cacheData.track_id || null,
+      cacheData.country || null,
+      cacheData.youtube_key || null,
+      sourceType,
+      cacheData.source || null,
+      timestamp
+    );
+    const duration = Date.now() - startTime;
+    if (duration > 50) {
+      console.warn(`[Cache] Slow DB write: ${duration}ms for ${imdbId}`);
+    }
+  } catch (error) {
+    // Don't spam logs for database locked errors
+    if (!error.message.includes('database is locked') && !error.message.includes('SQLITE_BUSY')) {
+      console.error(`[Cache] Database error for ${imdbId}: ${error.message}`);
+    }
+    // Continue - in-memory cache still works
+  }
 }
 
 async function resolvePreview(imdbId, type) {
