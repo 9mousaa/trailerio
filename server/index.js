@@ -14,7 +14,8 @@ const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
 const CACHE_DAYS = 30;
 const MIN_SCORE_THRESHOLD = 0.6;
 const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
-const STREAM_TIMEOUT = 20000; // 20 seconds - reduced to fail faster
+const STREAM_TIMEOUT = 15000; // 15 seconds - ensure Traefik doesn't timeout first (Traefik default is usually 60s, but safer to be shorter)
+const MAX_CONCURRENT_REQUESTS = 5; // Limit concurrent requests to prevent overwhelming system
 
 // Cache TTLs by source type (in hours)
 const CACHE_TTL = {
@@ -123,6 +124,7 @@ console.log(`Loaded ${totalTrackerEntries} success tracker entries from database
 
 let activeRequests = 0;
 let totalRequests = 0;
+const requestQueue = []; // Queue for requests when at max concurrency
 
 // Periodic cache cleanup to prevent memory growth
 function cleanupCache() {
@@ -236,14 +238,28 @@ const successTracker = {
   archive: successTrackerData.archive || new Map(), // strategy ID -> { success: number, total: number }
   ytdlp: successTrackerData.ytdlp || new Map(), // extraction identifier -> { success: number, total: number }
   
-  // Database operations
+  // Database operations - with timeout protection
   _saveToDB(type, identifier, success, total) {
-    const stmt = db.prepare(`
-      INSERT INTO success_tracker (type, identifier, success, total)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(type, identifier) DO UPDATE SET success = ?, total = ?
-    `);
-    stmt.run(type, identifier, success, total, success, total);
+    try {
+      const startTime = Date.now();
+      const stmt = db.prepare(`
+        INSERT INTO success_tracker (type, identifier, success, total)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(type, identifier) DO UPDATE SET success = ?, total = ?
+      `);
+      stmt.run(type, identifier, success, total, success, total);
+      const duration = Date.now() - startTime;
+      // Warn if DB write is slow (might indicate contention)
+      if (duration > 50) {
+        console.warn(`[SuccessTracker] Slow DB write: ${duration}ms for ${type}/${identifier}`);
+      }
+    } catch (error) {
+      // Don't spam logs for database locked errors (common with concurrent writes)
+      if (!error.message.includes('database is locked') && !error.message.includes('SQLITE_BUSY')) {
+        console.error(`[SuccessTracker] Database error: ${error.message}`);
+      }
+      // Continue - in-memory tracking still works
+    }
   },
   
   recordSuccess(type, identifier) {
@@ -334,12 +350,58 @@ cleanupSuccessTracker();
 app.use(cors());
 app.use(express.json());
 
-// Request tracking middleware
+// Request queue management
+function processQueue() {
+  while (requestQueue.length > 0 && activeRequests < MAX_CONCURRENT_REQUESTS) {
+    const { req, res, next } = requestQueue.shift();
+    activeRequests++;
+    next();
+  }
+}
+
+// Request tracking and concurrency limiting middleware
 app.use((req, res, next) => {
-  activeRequests++;
+  // Skip queue for non-stream requests (health, manifest, etc.)
+  if (!req.path.includes('/stream/')) {
+    return next();
+  }
+  
   totalRequests++;
   const requestId = totalRequests;
   let finished = false;
+  
+  // Check if we're at max concurrency
+  if (activeRequests >= MAX_CONCURRENT_REQUESTS) {
+    console.log(`[REQ ${requestId}] Queueing request (${activeRequests} active, ${requestQueue.length} queued)`);
+    requestQueue.push({ req, res, next: () => {
+      activeRequests++;
+      console.log(`[REQ ${requestId}] ${req.method} ${req.path} - Active: ${activeRequests}`);
+      
+      res.on('finish', () => {
+        if (!finished) {
+          finished = true;
+          activeRequests--;
+          console.log(`[REQ ${requestId}] Finished - Active: ${activeRequests}`);
+          processQueue(); // Process next in queue
+        }
+      });
+      
+      res.on('close', () => {
+        if (!finished) {
+          finished = true;
+          activeRequests--;
+          console.log(`[REQ ${requestId}] Closed - Active: ${activeRequests}`);
+          processQueue(); // Process next in queue
+        }
+      });
+      
+      next();
+    }});
+    return;
+  }
+  
+  // Process immediately
+  activeRequests++;
   console.log(`[REQ ${requestId}] ${req.method} ${req.path} - Active: ${activeRequests}`);
   
   res.on('finish', () => {
@@ -347,6 +409,7 @@ app.use((req, res, next) => {
       finished = true;
       activeRequests--;
       console.log(`[REQ ${requestId}] Finished - Active: ${activeRequests}`);
+      processQueue(); // Process next in queue
     }
   });
   
@@ -355,6 +418,7 @@ app.use((req, res, next) => {
       finished = true;
       activeRequests--;
       console.log(`[REQ ${requestId}] Closed - Active: ${activeRequests}`);
+      processQueue(); // Process next in queue
     }
   });
   
@@ -1908,6 +1972,8 @@ async function getCachedWithValidation(imdbId) {
 }
 
 function setCache(imdbId, data) {
+  // Use try-catch with timeout protection for database writes
+  // If DB is locked or slow, skip write (cache is in-memory anyway)
   // Determine source type from preview URL
   let sourceType = 'youtube'; // default
   if (data.preview_url) {
@@ -2011,7 +2077,7 @@ async function resolvePreview(imdbId, type) {
   console.log(`\n========== Trying sources in order (sorted by success rate): ${sourceRates} ==========`);
   
   // Try each source in sorted order
-  const SOURCE_TIMEOUT = 15000; // 15 seconds per source
+  const SOURCE_TIMEOUT = 10000; // 10 seconds per source - reduced to prevent overall timeout
   
   for (const source of sortedSources) {
     console.log(`\n========== Trying ${source.toUpperCase()} ==========`);
@@ -2221,15 +2287,26 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     timeoutFired = true;
     console.log(`  ⚠️ Request timeout for ${id} after ${STREAM_TIMEOUT / 1000}s`);
     if (!res.headersSent) {
-      res.json({ streams: [] });
+      try {
+        res.json({ streams: [] });
+        res.end(); // Force end the response
+      } catch (err) {
+        console.error(`  [DEBUG] Error in timeout handler for ${id}:`, err.message);
+        if (!res.finished) {
+          res.end(); // Force end even if json failed
+        }
+      }
+    } else if (!res.finished) {
+      res.end(); // Force end if headers sent but not finished
     }
   }, STREAM_TIMEOUT);
   
   try {
     // Wrap resolvePreview in a promise race to ensure it doesn't exceed timeout
+    // Use shorter timeout to ensure response is sent before Traefik times out
     const resolvePromise = resolvePreview(id, type);
     const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Request timeout')), STREAM_TIMEOUT - 500)
+      setTimeout(() => reject(new Error('Request timeout')), STREAM_TIMEOUT - 1000) // 1s buffer
     );
     
     let result;
