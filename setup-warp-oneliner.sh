@@ -31,77 +31,109 @@ cd /tmp || exit 1
 
 # Register if not already registered
 ACCOUNT_FILE="wgcf-account.toml"
-if [ ! -f "$ACCOUNT_FILE" ]; then
+ACCOUNT_FILE_PATH="/tmp/$ACCOUNT_FILE"
+
+if [ ! -f "$ACCOUNT_FILE_PATH" ]; then
     echo "Registering with Cloudflare Warp..."
-    wgcf register || {
-        echo "✗ Error: Failed to register with Cloudflare Warp"
-        exit 1
-    }
-    echo "✓ Registration command completed"
+    echo "Running: wgcf register --config $ACCOUNT_FILE_PATH"
     
-    # Wait a moment and check if file was created
-    sleep 1
-    
-    # Check current directory first
-    if [ -f "$ACCOUNT_FILE" ]; then
-        echo "✓ Account file found in current directory"
+    # Try with explicit config path first
+    if wgcf register --config "$ACCOUNT_FILE_PATH" 2>&1 | tee /tmp/wgcf-register.log; then
+        REGISTER_EXIT=$?
+        echo "✓ Registration command completed (exit code: $REGISTER_EXIT)"
     else
-        # Search for the file
-        FOUND_ACCOUNT=$(find /tmp -name "wgcf-account.toml" 2>/dev/null | head -n 1)
-        if [ -n "$FOUND_ACCOUNT" ] && [ -f "$FOUND_ACCOUNT" ]; then
-            echo "✓ Account file found at: $FOUND_ACCOUNT"
-            cp "$FOUND_ACCOUNT" "$ACCOUNT_FILE"
+        # Try without --config flag (some versions don't support it)
+        echo "Trying without --config flag..."
+        if wgcf register 2>&1 | tee /tmp/wgcf-register.log; then
+            REGISTER_EXIT=$?
+            echo "✓ Registration command completed (exit code: $REGISTER_EXIT)"
         else
-            # Check home directory
-            if [ -f "$HOME/wgcf-account.toml" ]; then
-                echo "✓ Account file found in home directory, copying to /tmp"
-                cp "$HOME/wgcf-account.toml" "$ACCOUNT_FILE"
+            REGISTER_EXIT=$?
+            echo "✗ Registration command failed (exit code: $REGISTER_EXIT)"
+            echo "Output:"
+            cat /tmp/wgcf-register.log 2>/dev/null || echo "No output captured"
+        fi
+    fi
+    
+    # Wait a moment for file to be written
+    sleep 2
+    
+    # Check if file was created at the specified path
+    if [ -f "$ACCOUNT_FILE_PATH" ] && [ -s "$ACCOUNT_FILE_PATH" ]; then
+        echo "✓ Account file found at specified path: $ACCOUNT_FILE_PATH"
+    else
+        # Check current directory
+        if [ -f "$ACCOUNT_FILE" ] && [ -s "$ACCOUNT_FILE" ]; then
+            echo "✓ Account file found in current directory"
+            cp "$ACCOUNT_FILE" "$ACCOUNT_FILE_PATH"
+        else
+            # Search for the file in common locations
+            FOUND_ACCOUNT=$(find /tmp /root /home -name "wgcf-account.toml" 2>/dev/null | head -n 1)
+            if [ -n "$FOUND_ACCOUNT" ] && [ -f "$FOUND_ACCOUNT" ]; then
+                echo "✓ Account file found at: $FOUND_ACCOUNT"
+                cp "$FOUND_ACCOUNT" "$ACCOUNT_FILE_PATH"
             else
-                echo "✗ Error: wgcf-account.toml not found after registration"
-                echo "Current directory: $(pwd)"
-                echo "Files in /tmp:"
-                ls -la /tmp/wgcf* 2>/dev/null || echo "No wgcf files found"
-                echo "Files in home:"
-                ls -la "$HOME"/wgcf* 2>/dev/null || echo "No wgcf files in home"
-                exit 1
+                # Check if wgcf outputs to a specific location
+                if [ -f "$HOME/.wgcf/wgcf-account.toml" ]; then
+                    echo "✓ Account file found in ~/.wgcf, copying to /tmp"
+                    cp "$HOME/.wgcf/wgcf-account.toml" "$ACCOUNT_FILE_PATH"
+                elif [ -f "/root/.wgcf/wgcf-account.toml" ]; then
+                    echo "✓ Account file found in /root/.wgcf, copying to /tmp"
+                    cp "/root/.wgcf/wgcf-account.toml" "$ACCOUNT_FILE_PATH"
+                else
+                    echo "✗ Error: wgcf-account.toml not found after registration"
+                    echo "Current directory: $(pwd)"
+                    echo "wgcf register output:"
+                    cat /tmp/wgcf-register.log 2>/dev/null || echo "No output captured"
+                    echo ""
+                    echo "Searching for wgcf files:"
+                    find /tmp /root /home -name "*wgcf*" -o -name "*account*" 2>/dev/null | head -10 || echo "No wgcf files found"
+                    echo ""
+                    echo "Trying to manually check wgcf behavior..."
+                    wgcf status 2>&1 || true
+                    exit 1
+                fi
             fi
         fi
     fi
 else
     echo "✓ Already registered (wgcf-account.toml exists)"
     # Verify account file is valid
-    if [ ! -s "$ACCOUNT_FILE" ]; then
+    if [ ! -s "$ACCOUNT_FILE_PATH" ]; then
         echo "⚠ Warning: wgcf-account.toml exists but is empty, re-registering..."
-        rm -f "$ACCOUNT_FILE"
-        wgcf register || {
-            echo "✗ Error: Failed to re-register"
-            exit 1
-        }
-        sleep 1
+        rm -f "$ACCOUNT_FILE_PATH"
+        wgcf register --config "$ACCOUNT_FILE_PATH" 2>&1 || wgcf register 2>&1
+        sleep 2
     fi
 fi
 
 # Verify account file exists and has content
-if [ ! -f "$ACCOUNT_FILE" ] || [ ! -s "$ACCOUNT_FILE" ]; then
+if [ ! -f "$ACCOUNT_FILE_PATH" ] || [ ! -s "$ACCOUNT_FILE_PATH" ]; then
     echo "✗ Error: wgcf-account.toml is missing or empty"
+    echo "Expected path: $ACCOUNT_FILE_PATH"
     echo "Current directory: $(pwd)"
-    ls -la "$ACCOUNT_FILE" 2>/dev/null || echo "File does not exist"
+    ls -la "$ACCOUNT_FILE_PATH" 2>/dev/null || echo "File does not exist at expected path"
     exit 1
 fi
-echo "✓ Account file verified ($(wc -l < "$ACCOUNT_FILE") lines, $(wc -c < "$ACCOUNT_FILE") bytes)"
+echo "✓ Account file verified at $ACCOUNT_FILE_PATH ($(wc -l < "$ACCOUNT_FILE_PATH") lines, $(wc -c < "$ACCOUNT_FILE_PATH") bytes)"
 
 # Generate profile
 echo "Generating WireGuard profile..."
 PROFILE_FILE="wgcf-profile.conf"
+PROFILE_FILE_PATH="/tmp/$PROFILE_FILE"
 
 # Check wgcf help to see available options
 echo "Checking wgcf version and options..."
 wgcf --version || true
 echo ""
 
-# Run wgcf generate - it should create wgcf-profile.conf in current directory
-echo "Running: wgcf generate"
-wgcf generate 2>&1 | tee /tmp/wgcf-output.log || {
+# Run wgcf generate - specify config file explicitly
+echo "Running: wgcf generate --config $ACCOUNT_FILE_PATH"
+if wgcf generate --config "$ACCOUNT_FILE_PATH" 2>&1 | tee /tmp/wgcf-output.log; then
+    echo "✓ wgcf generate completed with --config flag"
+elif wgcf generate 2>&1 | tee /tmp/wgcf-output.log; then
+    echo "✓ wgcf generate completed without --config flag"
+else
     EXIT_CODE=$?
     echo "✗ wgcf generate failed with exit code: $EXIT_CODE"
     echo "Output:"
@@ -118,19 +150,19 @@ wgcf generate 2>&1 | tee /tmp/wgcf-output.log || {
     fi
 }
 
-# Check for profile file in current directory first
-if [ -f "$PROFILE_FILE" ]; then
-    echo "✓ Profile found: $PROFILE_FILE ($(wc -l < "$PROFILE_FILE") lines)"
-elif [ -f "/tmp/$PROFILE_FILE" ]; then
-    echo "✓ Profile found in /tmp, copying to current directory"
-    cp "/tmp/$PROFILE_FILE" "$PROFILE_FILE"
+# Check for profile file at expected path first
+if [ -f "$PROFILE_FILE_PATH" ]; then
+    echo "✓ Profile found: $PROFILE_FILE_PATH ($(wc -l < "$PROFILE_FILE_PATH") lines)"
+elif [ -f "$PROFILE_FILE" ]; then
+    echo "✓ Profile found in current directory, copying to /tmp"
+    cp "$PROFILE_FILE" "$PROFILE_FILE_PATH"
 else
     # Try to find the file anywhere
     echo "Searching for profile file..."
     FOUND_FILE=$(find /tmp -name "wgcf-profile.conf" -o -name "*.conf" 2>/dev/null | head -n 1)
     if [ -n "$FOUND_FILE" ] && [ -f "$FOUND_FILE" ]; then
         echo "✓ Profile found at: $FOUND_FILE"
-        cp "$FOUND_FILE" "$PROFILE_FILE"
+        cp "$FOUND_FILE" "$PROFILE_FILE_PATH"
     else
         echo "✗ Error: wgcf-profile.conf not found after generation"
         echo "Current directory: $(pwd)"
@@ -149,14 +181,14 @@ else
     fi
 fi
 
-# Extract keys
-PRIVATE_KEY=$(grep "PrivateKey" wgcf-profile.conf | cut -d '=' -f 2 | tr -d ' ')
-ADDRESS=$(grep "Address" wgcf-profile.conf | cut -d '=' -f 2 | tr -d ' ' | head -n 1)
-PUBLIC_KEY=$(grep "PublicKey" wgcf-profile.conf | cut -d '=' -f 2 | tr -d ' ')
-ENDPOINT=$(grep "Endpoint" wgcf-profile.conf | cut -d '=' -f 2 | tr -d ' ')
+# Extract keys from profile file
+PRIVATE_KEY=$(grep "PrivateKey" "$PROFILE_FILE_PATH" | cut -d '=' -f 2 | tr -d ' ')
+ADDRESS=$(grep "Address" "$PROFILE_FILE_PATH" | cut -d '=' -f 2 | tr -d ' ' | head -n 1)
+PUBLIC_KEY=$(grep "PublicKey" "$PROFILE_FILE_PATH" | cut -d '=' -f 2 | tr -d ' ')
+ENDPOINT=$(grep "Endpoint" "$PROFILE_FILE_PATH" | cut -d '=' -f 2 | tr -d ' ')
 ENDPOINT_IP=$(echo "$ENDPOINT" | cut -d ':' -f 1)
 ENDPOINT_PORT=$(echo "$ENDPOINT" | cut -d ':' -f 2)
-PRESHARED_KEY=$(grep "PresharedKey" wgcf-profile.conf | cut -d '=' -f 2 | tr -d ' ' 2>/dev/null || echo "")
+PRESHARED_KEY=$(grep "PresharedKey" "$PROFILE_FILE_PATH" | cut -d '=' -f 2 | tr -d ' ' 2>/dev/null || echo "")
 
 # Validate keys were extracted
 if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ] || [ -z "$ENDPOINT_IP" ]; then
