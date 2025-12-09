@@ -1724,6 +1724,55 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
           }
         }
         
+        // If we have multiple candidates with uncertain scores (0.7-0.9) and no IMDb ID match,
+        // use embeddings to rerank for better accuracy
+        if (docs.length > 1 && bestScore >= 0.7 && bestScore < 0.9 && bestMatch) {
+          // Check if we already had an IMDb ID match (if so, skip embeddings - we're confident)
+          const hadImdbMatch = imdbId && docs.some(doc => {
+            const externalIds = Array.isArray(doc['external-identifier']) ? doc['external-identifier'] : (doc['external-identifier'] ? [doc['external-identifier']] : []);
+            const docImdbId = externalIds.find(id => id && id.startsWith('urn:imdb:'))?.replace('urn:imdb:', '');
+            return docImdbId === imdbId;
+          });
+          
+          if (!hadImdbMatch) {
+            // Collect all candidates with decent scores for reranking
+            const candidates = [];
+            for (const doc of docs) {
+              const title = doc.title || '';
+              const normTitle = normalizeTitle(title);
+              const normSearchTitle = normalizeTitle(tmdbMeta.title);
+              const titleFuzzy = fuzzyMatch(normTitle, normSearchTitle);
+              
+              if (titleFuzzy >= 0.5) { // Only consider reasonable candidates
+                candidates.push({
+                  doc,
+                  title,
+                  year: doc.year || null,
+                  score: titleFuzzy
+                });
+              }
+            }
+            
+            if (candidates.length > 1) {
+              console.log(`  [Internet Archive] Using embeddings to rerank ${candidates.length} uncertain candidates...`);
+              const searchText = `${tmdbMeta.title} ${tmdbMeta.year || ''} trailer`.trim();
+              const reranked = await rerankWithEmbeddings(searchText, candidates, 5);
+              
+              if (reranked.length > 0) {
+                const topReranked = reranked[0];
+                // If embeddings found a different top candidate, use it
+                if (topReranked.doc.identifier !== bestMatch.identifier) {
+                  console.log(`  [Internet Archive] Embeddings reranked: "${topReranked.doc.title}" is now top match (was "${bestMatch.title}")`);
+                  bestMatch = topReranked.doc;
+                  bestScore = 0.8; // Boost score since embeddings confirmed it
+                } else {
+                  console.log(`  [Internet Archive] Embeddings confirmed: "${bestMatch.title}" is the best match`);
+                }
+              }
+            }
+          }
+        }
+        
         // Use higher threshold for matches (0.75 - prioritize accuracy over coverage to avoid false positives)
         // Require strong title matching to ensure relevance
         if (bestMatch) {
