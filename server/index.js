@@ -2719,6 +2719,19 @@ app.get('/stats', (req, res) => {
   });
 });
 
+// Global error handlers to prevent crashes
+process.on('uncaughtException', (error) => {
+  console.error('⚠️  Uncaught Exception:', error.message);
+  console.error('Stack:', error.stack);
+  // Don't exit - keep server running
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('⚠️  Unhandled Rejection at:', promise);
+  console.error('Reason:', reason);
+  // Don't exit - keep server running
+});
+
 app.listen(PORT, () => {
   console.log(`Stremio addon server running on port ${PORT}`);
   if (!TMDB_API_KEY) {
