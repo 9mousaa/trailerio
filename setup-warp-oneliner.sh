@@ -35,64 +35,77 @@ ACCOUNT_FILE_PATH="/tmp/$ACCOUNT_FILE"
 
 if [ ! -f "$ACCOUNT_FILE_PATH" ]; then
     echo "Registering with Cloudflare Warp..."
-    echo "Running: wgcf register --config $ACCOUNT_FILE_PATH"
     
-    # Try with explicit config path first
-    if wgcf register --config "$ACCOUNT_FILE_PATH" 2>&1 | tee /tmp/wgcf-register.log; then
+    # Check wgcf help to see available flags
+    echo "Checking wgcf help..."
+    wgcf --help 2>&1 | head -20 || true
+    echo ""
+    
+    # Try registration - wgcf typically creates file in current directory
+    echo "Running: wgcf register (in /tmp directory)"
+    cd /tmp || exit 1
+    
+    # Capture both stdout and stderr
+    if wgcf register > /tmp/wgcf-register-stdout.log 2> /tmp/wgcf-register-stderr.log; then
         REGISTER_EXIT=$?
         echo "✓ Registration command completed (exit code: $REGISTER_EXIT)"
+        echo "Stdout:"
+        cat /tmp/wgcf-register-stdout.log || echo "(empty)"
+        echo "Stderr:"
+        cat /tmp/wgcf-register-stderr.log || echo "(empty)"
     else
-        # Try without --config flag (some versions don't support it)
-        echo "Trying without --config flag..."
-        if wgcf register 2>&1 | tee /tmp/wgcf-register.log; then
-            REGISTER_EXIT=$?
-            echo "✓ Registration command completed (exit code: $REGISTER_EXIT)"
-        else
-            REGISTER_EXIT=$?
-            echo "✗ Registration command failed (exit code: $REGISTER_EXIT)"
-            echo "Output:"
-            cat /tmp/wgcf-register.log 2>/dev/null || echo "No output captured"
-        fi
+        REGISTER_EXIT=$?
+        echo "✗ Registration command failed (exit code: $REGISTER_EXIT)"
+        echo "Stdout:"
+        cat /tmp/wgcf-register-stdout.log || echo "(empty)"
+        echo "Stderr:"
+        cat /tmp/wgcf-register-stderr.log || echo "(empty)"
     fi
     
     # Wait a moment for file to be written
     sleep 2
     
-    # Check if file was created at the specified path
-    if [ -f "$ACCOUNT_FILE_PATH" ] && [ -s "$ACCOUNT_FILE_PATH" ]; then
+    # Check if stdout contains the account file content (some versions output to stdout)
+    if [ -s /tmp/wgcf-register-stdout.log ]; then
+        if grep -q "license_key\|access_token\|device_id" /tmp/wgcf-register-stdout.log 2>/dev/null; then
+            echo "✓ Found account data in stdout, saving to file..."
+            cat /tmp/wgcf-register-stdout.log > "$ACCOUNT_FILE_PATH"
+        fi
+    fi
+    
+    # Check if file was created in current directory (wgcf creates it in pwd)
+    if [ -f "$ACCOUNT_FILE" ] && [ -s "$ACCOUNT_FILE" ]; then
+        echo "✓ Account file found in current directory: $(pwd)/$ACCOUNT_FILE"
+        cp "$ACCOUNT_FILE" "$ACCOUNT_FILE_PATH"
+    elif [ -f "$ACCOUNT_FILE_PATH" ] && [ -s "$ACCOUNT_FILE_PATH" ]; then
         echo "✓ Account file found at specified path: $ACCOUNT_FILE_PATH"
     else
-        # Check current directory
-        if [ -f "$ACCOUNT_FILE" ] && [ -s "$ACCOUNT_FILE" ]; then
-            echo "✓ Account file found in current directory"
-            cp "$ACCOUNT_FILE" "$ACCOUNT_FILE_PATH"
+        # Search for the file in common locations
+        echo "Searching for account file..."
+        FOUND_ACCOUNT=$(find /tmp /root /home -name "wgcf-account.toml" 2>/dev/null | head -n 1)
+        if [ -n "$FOUND_ACCOUNT" ] && [ -f "$FOUND_ACCOUNT" ]; then
+            echo "✓ Account file found at: $FOUND_ACCOUNT"
+            cp "$FOUND_ACCOUNT" "$ACCOUNT_FILE_PATH"
         else
-            # Search for the file in common locations
-            FOUND_ACCOUNT=$(find /tmp /root /home -name "wgcf-account.toml" 2>/dev/null | head -n 1)
-            if [ -n "$FOUND_ACCOUNT" ] && [ -f "$FOUND_ACCOUNT" ]; then
-                echo "✓ Account file found at: $FOUND_ACCOUNT"
-                cp "$FOUND_ACCOUNT" "$ACCOUNT_FILE_PATH"
+            # Check if wgcf outputs to a specific location
+            if [ -f "$HOME/.wgcf/wgcf-account.toml" ]; then
+                echo "✓ Account file found in ~/.wgcf, copying to /tmp"
+                cp "$HOME/.wgcf/wgcf-account.toml" "$ACCOUNT_FILE_PATH"
+            elif [ -f "/root/.wgcf/wgcf-account.toml" ]; then
+                echo "✓ Account file found in /root/.wgcf, copying to /tmp"
+                cp "/root/.wgcf/wgcf-account.toml" "$ACCOUNT_FILE_PATH"
             else
-                # Check if wgcf outputs to a specific location
-                if [ -f "$HOME/.wgcf/wgcf-account.toml" ]; then
-                    echo "✓ Account file found in ~/.wgcf, copying to /tmp"
-                    cp "$HOME/.wgcf/wgcf-account.toml" "$ACCOUNT_FILE_PATH"
-                elif [ -f "/root/.wgcf/wgcf-account.toml" ]; then
-                    echo "✓ Account file found in /root/.wgcf, copying to /tmp"
-                    cp "/root/.wgcf/wgcf-account.toml" "$ACCOUNT_FILE_PATH"
-                else
-                    echo "✗ Error: wgcf-account.toml not found after registration"
-                    echo "Current directory: $(pwd)"
-                    echo "wgcf register output:"
-                    cat /tmp/wgcf-register.log 2>/dev/null || echo "No output captured"
-                    echo ""
-                    echo "Searching for wgcf files:"
-                    find /tmp /root /home -name "*wgcf*" -o -name "*account*" 2>/dev/null | head -10 || echo "No wgcf files found"
-                    echo ""
-                    echo "Trying to manually check wgcf behavior..."
-                    wgcf status 2>&1 || true
-                    exit 1
-                fi
+                echo "✗ Error: wgcf-account.toml not found after registration"
+                echo "Current directory: $(pwd)"
+                echo "All files in /tmp:"
+                ls -la /tmp/ | grep -E "(wgcf|account)" || echo "No matching files"
+                echo ""
+                echo "Full filesystem search:"
+                find / -name "*wgcf*account*" 2>/dev/null | head -5 || echo "No files found"
+                echo ""
+                echo "Checking if wgcf needs different approach..."
+                wgcf status 2>&1 || echo "wgcf status failed"
+                exit 1
             fi
         fi
     fi
@@ -127,12 +140,16 @@ echo "Checking wgcf version and options..."
 wgcf --version || true
 echo ""
 
-# Run wgcf generate - specify config file explicitly
-echo "Running: wgcf generate --config $ACCOUNT_FILE_PATH"
-if wgcf generate --config "$ACCOUNT_FILE_PATH" 2>&1 | tee /tmp/wgcf-output.log; then
-    echo "✓ wgcf generate completed with --config flag"
-elif wgcf generate 2>&1 | tee /tmp/wgcf-output.log; then
-    echo "✓ wgcf generate completed without --config flag"
+# Run wgcf generate - it reads from current directory by default
+echo "Running: wgcf generate (account file should be in current directory)"
+# Ensure we're in /tmp and account file is there
+cd /tmp || exit 1
+if [ ! -f "$ACCOUNT_FILE" ] && [ -f "$ACCOUNT_FILE_PATH" ]; then
+    cp "$ACCOUNT_FILE_PATH" "$ACCOUNT_FILE"
+fi
+
+if wgcf generate 2>&1 | tee /tmp/wgcf-output.log; then
+    echo "✓ wgcf generate completed"
 else
     EXIT_CODE=$?
     echo "✗ wgcf generate failed with exit code: $EXIT_CODE"
