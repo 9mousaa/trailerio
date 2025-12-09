@@ -1679,18 +1679,31 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
             score += 0.15;
           }
           
-          // Year matching
-          if (tmdbMeta.year) {
-            const yearStr = String(tmdbMeta.year);
-            if (title.includes(yearStr) || description.includes(yearStr) || subject.includes(yearStr)) {
-              score += 0.3;
+          // Year matching (using year field from API)
+          if (tmdbMeta.year && docYear) {
+            const yearDiff = Math.abs(parseInt(docYear) - tmdbMeta.year);
+            if (yearDiff === 0) {
+              score += 0.3; // Exact year match
+            } else if (yearDiff === 1) {
+              score += 0.2; // Within 1 year (common for trailers)
+            } else if (yearDiff <= 3) {
+              score += 0.1; // Within 3 years
+            } else if (yearDiff > 5) {
+              score -= 0.3; // Penalty for very different years
             }
-            // Check date field if available
-            if (doc.date) {
-              const docYear = parseInt(doc.date.substring(0, 4));
-              if (docYear && Math.abs(docYear - tmdbMeta.year) <= 1) {
-                score += 0.2;
-              }
+          } else if (tmdbMeta.year && !docYear) {
+            // No year in result - slight penalty but don't reject
+            score -= 0.1;
+          }
+          
+          // IMDb ID matching bonus (strongest indicator of correctness)
+          if (docImdbId) {
+            if (imdbId && docImdbId === imdbId) {
+              // Exact match - already handled above with early exit, but keep for scoring
+              score += 0.4; // Strong bonus
+            } else {
+              // Has IMDb ID but doesn't match - slight bonus (at least it's a real movie)
+              score += 0.1;
             }
           }
           
@@ -1699,12 +1712,6 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
             const downloads = parseInt(doc.downloads) || 0;
             if (downloads > 1000) score += 0.1;
             if (downloads > 10000) score += 0.1;
-          }
-          
-          // Description/subject matching
-          const allText = `${description} ${subject} ${creator}`.toLowerCase();
-          if (allText.includes(normSearchTitle)) {
-            score += 0.2;
           }
           
           if (score > bestScore) {
