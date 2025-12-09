@@ -1414,7 +1414,7 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
         query: `title:${encodeURIComponent(titleQuery + ' trailer')}`,
         description: 'Title + "trailer" (no year)'
       }
-    ];
+    ]);
     
     // Add original title strategy if different
     if (tmdbMeta.originalTitle && tmdbMeta.originalTitle !== tmdbMeta.title) {
