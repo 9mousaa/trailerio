@@ -18,9 +18,15 @@ if ! command -v wgcf &> /dev/null; then
 fi
 
 # Register and generate
-cd /tmp
+cd /tmp || exit 1
 [ ! -f "wgcf-account.toml" ] && wgcf register
 wgcf generate
+
+# Check if profile was generated
+if [ ! -f "wgcf-profile.conf" ]; then
+    echo "✗ Error: Failed to generate wgcf-profile.conf"
+    exit 1
+fi
 
 # Extract keys
 PRIVATE_KEY=$(grep "PrivateKey" wgcf-profile.conf | cut -d '=' -f 2 | tr -d ' ')
@@ -30,6 +36,12 @@ ENDPOINT=$(grep "Endpoint" wgcf-profile.conf | cut -d '=' -f 2 | tr -d ' ')
 ENDPOINT_IP=$(echo "$ENDPOINT" | cut -d ':' -f 1)
 ENDPOINT_PORT=$(echo "$ENDPOINT" | cut -d ':' -f 2)
 PRESHARED_KEY=$(grep "PresharedKey" wgcf-profile.conf | cut -d '=' -f 2 | tr -d ' ' 2>/dev/null || echo "")
+
+# Validate keys were extracted
+if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ] || [ -z "$ENDPOINT_IP" ]; then
+    echo "✗ Error: Failed to extract keys from wgcf-profile.conf"
+    exit 1
+fi
 
 # Update .env
 ENV_FILE="$PROJECT_DIR/.env"
