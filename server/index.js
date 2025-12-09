@@ -1346,6 +1346,34 @@ async function extractViaInternetArchive(tmdbMeta) {
       });
     }
     
+    // Add TMDB trailer title strategy if available (high priority - exact match)
+    if (tmdbMeta.youtubeTrailerTitle && tmdbMeta.youtubeTrailerTitle.trim().length > 0) {
+      // Clean up the trailer title - remove common prefixes/suffixes that might not be in Archive
+      let trailerTitle = tmdbMeta.youtubeTrailerTitle
+        .replace(/^(Official\s+)?(International\s+)?(Trailer|Teaser|Clip)/i, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      
+      // Only use if it's meaningful (not just "Trailer" or empty)
+      if (trailerTitle.length > 3 && trailerTitle.toLowerCase() !== 'trailer') {
+        const trailerTitleQuery = trailerTitle.replace(/[^\w\s]/g, ' ').trim();
+        searchStrategies.push({
+          id: 'archive_trailer_title',
+          query: `collection:movie_trailers AND title:${encodeURIComponent(trailerTitleQuery)}`,
+          description: `TMDB trailer title "${trailerTitle}" in movie_trailers`
+        });
+        
+        // Also try with year if available
+        if (tmdbMeta.year) {
+          searchStrategies.push({
+            id: 'archive_trailer_title_year',
+            query: `collection:movie_trailers AND title:${encodeURIComponent(trailerTitleQuery)}${yearQuery}`,
+            description: `TMDB trailer title "${trailerTitle}" + year in movie_trailers`
+          });
+        }
+      }
+    }
+    
     // Sort strategies by success rate (highest first)
     const strategyIds = searchStrategies.map(s => s.id);
     const sortedIds = successTracker.sortBySuccessRate('archive', strategyIds);
