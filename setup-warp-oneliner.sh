@@ -9,22 +9,60 @@ cd "$PROJECT_DIR" || exit 1
 
 echo "Setting up Cloudflare Warp for TrailerIO..."
 
-# Install wgcf if not exists
-if ! command -v wgcf &> /dev/null; then
+# Install wgcf if not exists or if it's empty
+if ! command -v wgcf &> /dev/null || [ ! -s "$(which wgcf 2>/dev/null)" ]; then
     echo "Installing wgcf..."
     ARCH=$(uname -m)
     [ "$ARCH" = "x86_64" ] && ARCH="amd64" || ARCH="arm64"
-    wget -q "https://github.com/ViRb3/wgcf/releases/latest/download/wgcf_2.2.21_linux_${ARCH}" -O /tmp/wgcf || \
-    wget -q "https://github.com/ViRb3/wgcf/releases/latest/download/wgcf_linux_${ARCH}" -O /tmp/wgcf
-    chmod +x /tmp/wgcf && sudo mv /tmp/wgcf /usr/local/bin/wgcf 2>/dev/null || mv /tmp/wgcf /usr/local/bin/wgcf
-    echo "✓ wgcf installed"
+    
+    # Try to get latest version from GitHub API
+    LATEST_VERSION=$(curl -s https://api.github.com/repos/ViRb3/wgcf/releases/latest | grep "tag_name" | cut -d '"' -f 4 | sed 's/v//')
+    if [ -z "$LATEST_VERSION" ]; then
+        LATEST_VERSION="2.2.21"
+    fi
+    
+    echo "Downloading wgcf version ${LATEST_VERSION} for ${ARCH}..."
+    
+    # Try multiple download URLs
+    DOWNLOADED=false
+    for URL in \
+        "https://github.com/ViRb3/wgcf/releases/download/v${LATEST_VERSION}/wgcf_${LATEST_VERSION}_linux_${ARCH}" \
+        "https://github.com/ViRb3/wgcf/releases/latest/download/wgcf_${LATEST_VERSION}_linux_${ARCH}" \
+        "https://github.com/ViRb3/wgcf/releases/latest/download/wgcf_linux_${ARCH}"; do
+        echo "Trying: $URL"
+        if wget -q --timeout=10 "$URL" -O /tmp/wgcf && [ -s /tmp/wgcf ]; then
+            DOWNLOADED=true
+            echo "✓ Downloaded successfully ($(wc -c < /tmp/wgcf) bytes)"
+            break
+        fi
+    done
+    
+    if [ "$DOWNLOADED" = false ] || [ ! -s /tmp/wgcf ]; then
+        echo "✗ Error: Failed to download wgcf"
+        echo "Please download manually from: https://github.com/ViRb3/wgcf/releases"
+        exit 1
+    fi
+    
+    chmod +x /tmp/wgcf
+    sudo mv /tmp/wgcf /usr/local/bin/wgcf 2>/dev/null || mv /tmp/wgcf /usr/local/bin/wgcf
+    
+    # Verify installation
+    if [ ! -s /usr/local/bin/wgcf ]; then
+        echo "✗ Error: wgcf binary is empty after installation"
+        exit 1
+    fi
+    
+    echo "✓ wgcf installed ($(wc -c < /usr/local/bin/wgcf) bytes)"
 fi
 
 # Verify wgcf works
 if ! wgcf --version &>/dev/null; then
     echo "✗ Error: wgcf is not working properly"
+    echo "Binary size: $(wc -c < /usr/local/bin/wgcf 2>/dev/null || echo 0) bytes"
     exit 1
 fi
+
+echo "✓ wgcf verified: $(wgcf --version 2>&1 | head -1)"
 
 # Register and generate
 cd /tmp || exit 1
