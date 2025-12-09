@@ -46,16 +46,32 @@ else
 fi
 echo ""
 
-echo "6. Testing backend from host network..."
-if curl -s http://localhost:3001/health 2>/dev/null; then
-  echo "  ✓ Backend accessible from host"
+echo "6. Testing backend from web container (nginx proxy)..."
+if docker exec trailerio-web-1 wget -qO- --timeout=5 http://backend:3001/health 2>/dev/null; then
+  echo "  ✓ Web container can reach backend via 'backend' hostname"
+elif docker exec trailerio-web-1 wget -qO- --timeout=5 http://trailerio-backend-1:3001/health 2>/dev/null; then
+  echo "  ✓ Web container can reach backend via container name"
+  echo "  ⚠️  WARNING: 'backend' hostname not resolving, using container name instead"
+  echo "  This might require nginx config update"
 else
-  echo "  ✗ Backend NOT accessible from host"
-  echo "  This could be a network configuration issue"
+  echo "  ✗ Web container CANNOT reach backend"
+  echo "  This is the root cause of 502 errors!"
+  echo ""
+  echo "  Checking DNS resolution..."
+  docker exec trailerio-web-1 getent hosts backend || echo "  ✗ 'backend' hostname not found"
+  docker exec trailerio-web-1 getent hosts trailerio-backend-1 || echo "  ✗ Container name not found"
 fi
 echo ""
 
-echo "7. Checking Traefik routing..."
+echo "7. Testing backend from host network..."
+if curl -s http://localhost:3001/health 2>/dev/null; then
+  echo "  ✓ Backend accessible from host"
+else
+  echo "  ✗ Backend NOT accessible from host (expected - backend is internal only)"
+fi
+echo ""
+
+echo "8. Checking Traefik routing..."
 if docker ps | grep -q traefik; then
   echo "  Traefik container found, checking logs..."
   docker logs traefik --tail=30 2>/dev/null || echo "  Could not read Traefik logs"
@@ -64,15 +80,15 @@ else
 fi
 echo ""
 
-echo "8. Checking backend container resource usage..."
+echo "9. Checking backend container resource usage..."
 docker stats trailerio-backend-1 --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}"
 echo ""
 
-echo "9. Checking for recent errors in backend logs..."
+echo "10. Checking for recent errors in backend logs..."
 docker compose logs backend --since=5m | grep -i "error\|exception\|crash\|fatal" || echo "  No recent errors found"
 echo ""
 
-echo "10. Testing a simple request to backend..."
+echo "11. Testing a simple request to backend..."
 echo "  Making request to /health endpoint..."
 docker exec trailerio-backend-1 wget -qO- --timeout=5 http://localhost:3001/health 2>&1 || echo "  ✗ Request failed or timed out"
 echo ""
