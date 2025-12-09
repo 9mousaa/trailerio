@@ -1192,7 +1192,6 @@ async function extractViaYtDlp(youtubeKey) {
       --format "best[height<=1080][ext=mp4]/best[height<=1080]/bestvideo[height<=1080]+bestaudio/best" \
       --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
       --sleep-interval 2 \
-      --sleep-interval-requests 1 \
       --socket-timeout 10 \
       --get-url \
       "https://www.youtube.com/watch?v=${youtubeKey}"`;
@@ -1506,14 +1505,36 @@ async function extractViaInternetArchive(tmdbMeta) {
           const matchingWords = searchWords.filter(word => titleWords.includes(word));
           const wordMatchRatio = searchWords.length > 0 ? matchingWords.length / searchWords.length : 0;
           
+          // Check if result title has a colon (subtitle) - this often indicates a different movie
+          // e.g., "Rocketman" should not match "Rocketman: Mad Mike's Mission..."
+          const hasSubtitle = normTitle.includes(':');
+          const titlePrefix = hasSubtitle ? normTitle.split(':')[0].trim() : normTitle;
+          
           // Title matching (most important) - be more strict
           if (normTitle === normSearchTitle) {
             score += 1.0; // Exact match
           } else if (normTitle === normOriginalTitle) {
             score += 0.9; // Exact match with original title
           } else {
-            // For short titles, require very high word match ratio
+            // For short titles, require very high word match ratio AND no subtitle mismatch
             if (isShortTitle) {
+              // If result has a subtitle, check if the prefix matches exactly
+              if (hasSubtitle) {
+                // For short titles with subtitles, require exact prefix match
+                // "Rocketman" should match "Rocketman - Official Trailer" but NOT "Rocketman: Mad Mike's..."
+                // unless the subtitle is just "Official Trailer" or similar
+                const subtitle = normTitle.split(':')[1]?.trim().toLowerCase() || '';
+                const isOfficialTrailer = subtitle.includes('official') || subtitle.includes('trailer') || subtitle.includes('teaser');
+                
+                if (titlePrefix !== normSearchTitle && titlePrefix !== normOriginalTitle) {
+                  // Prefix doesn't match - different movie
+                  if (!isOfficialTrailer) {
+                    // Not an official trailer subtitle - reject
+                    continue;
+                  }
+                }
+              }
+              
               // Short titles like "Stephen" or "Troll 2" need almost perfect word matches
               if (wordMatchRatio >= 0.9 && searchWords.length === matchingWords.length) {
                 // All words must match for short titles
