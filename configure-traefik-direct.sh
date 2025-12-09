@@ -2,7 +2,7 @@
 # Direct Traefik SSL Configuration - Actually modifies the container
 set -e
 
-EMAIL="${1:-admin@plaio.cc}"
+EMAIL="${1:-mousa@hey.com}"
 
 echo "=== Direct Traefik SSL Configuration ==="
 echo "Email: $EMAIL"

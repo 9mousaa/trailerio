@@ -4,7 +4,7 @@
 
 set -e
 
-EMAIL="${1:-admin@plaio.cc}"  # Default email or pass as first argument
+EMAIL="${1:-mousa@hey.com}"  # Default email or pass as first argument
 DOMAIN="trailerio.plaio.cc"
 
 echo "=== Auto-Configuring Traefik SSL Certificate Resolver ==="

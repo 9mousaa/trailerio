@@ -4,7 +4,7 @@
 
 set -e
 
-EMAIL="${1:-admin@plaio.cc}"
+EMAIL="${1:-mousa@hey.com}"
 
 echo "=== Simple Traefik SSL Fix ==="
 echo "Email: $EMAIL"
