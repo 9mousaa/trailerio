@@ -2333,11 +2333,6 @@ async function resolvePreview(imdbId, type) {
   return { found: false };
 }
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', version: '2.0.0' });
-});
-
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'trailerio-backend', version: '2.0.0' });
@@ -2622,9 +2617,27 @@ process.on('unhandledRejection', (reason, promise) => {
   // Don't exit - keep server running
 });
 
-app.listen(PORT, () => {
-  console.log(`Stremio addon server running on port ${PORT}`);
-  if (!TMDB_API_KEY) {
-    console.warn('⚠️  TMDB_API_KEY not set. Please set it as an environment variable.');
-  }
-});
+// Start server with error handling
+try {
+  console.log('Starting server...');
+  console.log(`Port: ${PORT}`);
+  console.log(`TMDB_API_KEY: ${TMDB_API_KEY ? 'Set' : 'NOT SET'}`);
+  console.log(`Database path: ${dbPath}`);
+  
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`✓ Stremio addon server running on port ${PORT}`);
+    console.log(`✓ Server listening on 0.0.0.0:${PORT}`);
+    if (!TMDB_API_KEY) {
+      console.warn('⚠️  TMDB_API_KEY not set. Please set it as an environment variable.');
+    }
+  });
+  
+  app.on('error', (error) => {
+    console.error('⚠️  Server error:', error.message);
+    console.error('Stack:', error.stack);
+  });
+} catch (error) {
+  console.error('⚠️  Failed to start server:', error.message);
+  console.error('Stack:', error.stack);
+  process.exit(1);
+}
