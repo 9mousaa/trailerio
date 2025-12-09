@@ -7,14 +7,26 @@ echo ""
 
 # Method 1: Check for Traefik process
 echo "Method 1: Checking for Traefik process..."
-TRAEFIK_PID=$(pgrep -f traefik | head -1)
+TRAEFIK_PID=$(pgrep -f "traefik" | grep -v "$$" | head -1)
 if [ -n "$TRAEFIK_PID" ]; then
-    echo "✓ Found Traefik process (PID: $TRAEFIK_PID)"
-    ps aux | grep $TRAEFIK_PID | grep -v grep
-    echo ""
-    echo "Traefik is running as a process, not in Docker"
-    echo "You'll need to configure it via config file or systemd service"
-    exit 0
+    TRAEFIK_CMD=$(ps -p $TRAEFIK_PID -o cmd= 2>/dev/null | grep -v "find-traefik" | grep -v "bash.*traefik" | head -1)
+    if [ -n "$TRAEFIK_CMD" ] && [[ "$TRAEFIK_CMD" =~ traefik ]]; then
+        echo "✓ Found Traefik process (PID: $TRAEFIK_PID)"
+        ps aux | grep $TRAEFIK_PID | grep -v grep | head -1
+        echo ""
+        echo "Command: $TRAEFIK_CMD"
+        echo ""
+        echo "Traefik is running as a process, not in Docker"
+        echo "Checking for config file in command..."
+        # Extract config file from command if present
+        CONFIG_FILE=$(echo "$TRAEFIK_CMD" | grep -oP '--configfile=\K[^\s]+' || echo "$TRAEFIK_CMD" | grep -oP '-c\s+\K[^\s]+' || echo "")
+        if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
+            echo "  Config file: $CONFIG_FILE"
+        else
+            echo "  Check common locations: /etc/traefik/traefik.yml"
+        fi
+        exit 0
+    fi
 fi
 
 # Method 2: Check Docker containers (all, including stopped)
