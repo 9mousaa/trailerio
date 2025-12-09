@@ -93,8 +93,15 @@ echo "Checking for existing account file..."
 EXISTING_ACCOUNT=$(find /tmp /root /home -name "wgcf-account.toml" 2>/dev/null | head -n 1)
 if [ -n "$EXISTING_ACCOUNT" ] && [ -f "$EXISTING_ACCOUNT" ]; then
     echo "✓ Found existing account file at: $EXISTING_ACCOUNT"
-    cp "$EXISTING_ACCOUNT" "$ACCOUNT_FILE_PATH"
-    echo "✓ Copied to $ACCOUNT_FILE_PATH"
+    # Normalize paths to compare properly
+    EXISTING_NORM=$(readlink -f "$EXISTING_ACCOUNT" 2>/dev/null || echo "$EXISTING_ACCOUNT")
+    TARGET_NORM=$(readlink -f "$ACCOUNT_FILE_PATH" 2>/dev/null || echo "$ACCOUNT_FILE_PATH")
+    if [ "$EXISTING_NORM" != "$TARGET_NORM" ]; then
+        cp "$EXISTING_ACCOUNT" "$ACCOUNT_FILE_PATH" || true
+        echo "✓ Copied to $ACCOUNT_FILE_PATH"
+    else
+        echo "✓ Account file already at target location"
+    fi
 elif [ -f "$ACCOUNT_FILE_PATH" ]; then
     echo "✓ Account file already exists at: $ACCOUNT_FILE_PATH"
 else
