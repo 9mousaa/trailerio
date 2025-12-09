@@ -152,21 +152,37 @@ fi
 
 # Try generate - it might work even without explicit account file if already registered
 echo "Attempting wgcf generate..."
-if wgcf generate 2>&1 | tee /tmp/wgcf-output.log; then
-    echo "✓ wgcf generate completed"
+# Capture stdout directly to profile file (wgcf might output to stdout)
+if wgcf generate > "$PROFILE_FILE_PATH" 2> /tmp/wgcf-generate-stderr.log; then
+    GENERATE_EXIT=$?
+    echo "✓ wgcf generate completed (exit code: $GENERATE_EXIT)"
+    echo "Stderr output:"
+    cat /tmp/wgcf-generate-stderr.log || echo "(empty)"
+    
+    # Check if file was created and has content
+    if [ -f "$PROFILE_FILE_PATH" ] && [ -s "$PROFILE_FILE_PATH" ]; then
+        echo "✓ Profile file created: $PROFILE_FILE_PATH ($(wc -l < "$PROFILE_FILE_PATH") lines)"
+    else
+        echo "⚠ Profile file is empty or missing, trying alternative method..."
+        # Try with tee to capture both file and log
+        wgcf generate 2>&1 | tee "$PROFILE_FILE_PATH" > /tmp/wgcf-output.log
+        if [ -s "$PROFILE_FILE_PATH" ]; then
+            echo "✓ Profile captured via tee"
+        else
+            echo "✗ Failed to generate profile - no output captured"
+            cat /tmp/wgcf-generate-stderr.log 2>/dev/null || true
+            exit 1
+        fi
+    fi
 else
     EXIT_CODE=$?
     echo "✗ wgcf generate failed with exit code: $EXIT_CODE"
-    echo "Output:"
-    cat /tmp/wgcf-output.log 2>/dev/null || echo "No output captured"
-    # Try capturing stdout as file content (some versions output to stdout)
-    echo "Attempting to capture as stdout..."
-    wgcf generate > "$PROFILE_FILE" 2>/tmp/wgcf-stderr.log || true
-    if [ -f "$PROFILE_FILE" ] && [ -s "$PROFILE_FILE" ]; then
-        echo "✓ Captured profile from stdout"
+    echo "Stderr:"
+    cat /tmp/wgcf-generate-stderr.log 2>/dev/null || echo "No stderr captured"
+    echo "Checking if profile was created anyway..."
+    if [ -f "$PROFILE_FILE_PATH" ] && [ -s "$PROFILE_FILE_PATH" ]; then
+        echo "✓ Profile file exists despite error code"
     else
-        echo "✗ Failed to generate profile"
-        cat /tmp/wgcf-stderr.log 2>/dev/null || true
         exit 1
     fi
 fi
