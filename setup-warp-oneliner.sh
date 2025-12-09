@@ -144,7 +144,11 @@ else
     # Check if file was created in current directory (wgcf creates it in pwd)
     if [ -f "$ACCOUNT_FILE" ] && [ -s "$ACCOUNT_FILE" ]; then
         echo "✓ Account file found in current directory: $(pwd)/$ACCOUNT_FILE"
-        cp "$ACCOUNT_FILE" "$ACCOUNT_FILE_PATH"
+        if [ "$ACCOUNT_FILE" != "$ACCOUNT_FILE_PATH" ]; then
+            cp "$ACCOUNT_FILE" "$ACCOUNT_FILE_PATH"
+        else
+            echo "✓ Account file already at target location"
+        fi
     elif [ -f "$ACCOUNT_FILE_PATH" ] && [ -s "$ACCOUNT_FILE_PATH" ]; then
         echo "✓ Account file found at specified path: $ACCOUNT_FILE_PATH"
     else
