@@ -169,7 +169,7 @@ else
         cat /tmp/wgcf-stderr.log 2>/dev/null || true
         exit 1
     fi
-}
+fi
 
 # Check for profile file at expected path first
 if [ -f "$PROFILE_FILE_PATH" ]; then
