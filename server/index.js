@@ -2367,6 +2367,45 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   }
 });
 
+// Cache management endpoints
+app.delete('/cache/:imdbId', (req, res) => {
+  const { imdbId } = req.params;
+  
+  if (!imdbId || !imdbId.match(/^tt\d+$/)) {
+    return res.status(400).json({ error: 'Invalid IMDb ID format' });
+  }
+  
+  // Remove from in-memory cache
+  const wasCached = cache.has(imdbId);
+  cache.delete(imdbId);
+  
+  // Remove from database
+  const deleteStmt = db.prepare('DELETE FROM cache WHERE imdb_id = ?');
+  deleteStmt.run(imdbId);
+  
+  if (wasCached) {
+    console.log(`[Cache] Removed cache entry for ${imdbId}`);
+    res.json({ success: true, message: `Cache entry for ${imdbId} removed` });
+  } else {
+    res.json({ success: true, message: `No cache entry found for ${imdbId}` });
+  }
+});
+
+// Clear all cache entries
+app.delete('/cache', (req, res) => {
+  const cacheSize = cache.size;
+  
+  // Clear in-memory cache
+  cache.clear();
+  
+  // Clear database cache
+  const deleteAllStmt = db.prepare('DELETE FROM cache');
+  deleteAllStmt.run();
+  
+  console.log(`[Cache] Cleared all ${cacheSize} cache entries`);
+  res.json({ success: true, message: `Cleared ${cacheSize} cache entries` });
+});
+
 app.get('/stats', (req, res) => {
   const entries = Array.from(cache.values());
   const totalEntries = entries.length;
