@@ -4,6 +4,9 @@ const fetch = require('node-fetch');
 const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const execAsync = promisify(exec);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -101,10 +104,11 @@ const successTrackerData = {
   invidious: new Map(),
   itunes: new Map(),
   archive: new Map(),
+  ytdlp: new Map(),
   sources: new Map()
 };
 
-const trackerTypes = ['piped', 'invidious', 'itunes', 'archive', 'sources'];
+const trackerTypes = ['piped', 'invidious', 'itunes', 'archive', 'ytdlp', 'sources'];
 for (const type of trackerTypes) {
   const rows = loadSuccessTracker.all(type, MAX_SUCCESS_TRACKER_ENTRIES);
   for (const row of rows) {
@@ -160,7 +164,7 @@ function cleanupCache() {
 
 // Cleanup success tracker to prevent unbounded growth
 function cleanupSuccessTracker() {
-  const trackerTypes = ['piped', 'invidious', 'itunes', 'archive', 'sources'];
+  const trackerTypes = ['piped', 'invidious', 'itunes', 'archive', 'ytdlp', 'sources'];
   
   for (const type of trackerTypes) {
     const map = successTracker[type];
@@ -211,6 +215,7 @@ app.get('/health', (req, res) => {
       invidious: successTracker.invidious.size,
       itunes: successTracker.itunes.size,
       archive: successTracker.archive.size,
+      ytdlp: successTracker.ytdlp.size,
       sources: successTracker.sources.size
     },
     requests: {
@@ -229,6 +234,7 @@ const successTracker = {
   invidious: successTrackerData.invidious || new Map(), // instance URL -> { success: number, total: number }
   itunes: successTrackerData.itunes || new Map(), // country code -> { success: number, total: number }
   archive: successTrackerData.archive || new Map(), // strategy ID -> { success: number, total: number }
+  ytdlp: successTrackerData.ytdlp || new Map(), // extraction identifier -> { success: number, total: number }
   
   // Database operations
   _saveToDB(type, identifier, success, total) {
@@ -1127,6 +1133,142 @@ async function extractViaInvidious(youtubeKey) {
   return null;
 }
 
+// ============ YT-DLP EXTRACTOR (with Cloudflare Warp) ============
+
+async function extractViaYtDlp(youtubeKey) {
+  console.log(`  [yt-dlp] Extracting streamable URL for ${youtubeKey}...`);
+  
+  const startTime = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000); // 12s timeout
+  
+  try {
+    // Check if gluetun proxy is available
+    const gluetunProxy = process.env.GLUETUN_HTTP_PROXY || null;
+    const useProxy = gluetunProxy ? `--proxy ${gluetunProxy}` : '';
+    
+    // Anti-blocking strategies:
+    // 1. Use proper user agent (mimic browser)
+    // 2. Add sleep interval between requests
+    // 3. Use format selection that's less likely to be blocked
+    // 4. Extract info only (no download) - gets streamable URLs
+    // 5. Prefer combined formats (video+audio) for streaming
+    // 6. Use cookies if available (optional - can be added later)
+    
+    // Format selection strategy for streamable URLs:
+    // 1. Prefer combined formats (video+audio) for direct streaming - best for AVPlayer
+    // 2. Fallback to best video+audio combination if no combined available
+    // 3. Limit to 1080p max for reasonable bandwidth
+    // 4. Use --get-url to get direct streamable URL (not download)
+    // Anti-blocking: user-agent, sleep intervals, proper format selection
+    const ytDlpCommand = `yt-dlp ${useProxy} \
+      --no-download \
+      --no-warnings \
+      --quiet \
+      --no-playlist \
+      --format "best[height<=1080][ext=mp4]/best[height<=1080]/bestvideo[height<=1080]+bestaudio/best" \
+      --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+      --sleep-interval 2 \
+      --sleep-interval-requests 1 \
+      --socket-timeout 10 \
+      --get-url \
+      "https://www.youtube.com/watch?v=${youtubeKey}"`;
+    
+    console.log(`  [yt-dlp] Running extraction (proxy: ${gluetunProxy ? 'enabled' : 'disabled'})...`);
+    
+    // Execute yt-dlp with timeout
+    const execPromise = execAsync(ytDlpCommand, {
+      timeout: 12000,
+      maxBuffer: 10 * 1024 * 1024 // 10MB buffer
+    });
+    
+    // Race against timeout
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('yt-dlp timeout')), 12000)
+    );
+    
+    let stdout, stderr;
+    try {
+      ({ stdout, stderr } = await Promise.race([execPromise, timeoutPromise]));
+    } catch (raceError) {
+      clearTimeout(timeout);
+      const duration = Date.now() - startTime;
+      if (raceError.message === 'yt-dlp timeout') {
+        console.log(`  [yt-dlp] ✗ TIMEOUT after ${duration}ms`);
+      } else {
+        console.log(`  [yt-dlp] ✗ Error: ${raceError.message.substring(0, 200)} (${duration}ms)`);
+      }
+      successTracker.recordFailure('ytdlp', 'extraction');
+      return null;
+    }
+    
+    clearTimeout(timeout);
+    const duration = Date.now() - startTime;
+    
+    if (stderr && !stderr.includes('WARNING') && stderr.trim().length > 0) {
+      console.log(`  [yt-dlp] Warning: ${stderr.substring(0, 200)}`);
+    }
+    
+    const url = stdout.trim();
+    
+    if (!url || !url.startsWith('http')) {
+      console.log(`  [yt-dlp] ✗ No valid URL extracted (${duration}ms)`);
+      successTracker.recordFailure('ytdlp', 'extraction');
+      return null;
+    }
+    
+    // Validate URL is accessible (quick HEAD request)
+    try {
+      const validateController = new AbortController();
+      const validateTimeout = setTimeout(() => validateController.abort(), 5000);
+      
+      const headResponse = await fetch(url, {
+        method: 'HEAD',
+        headers: { 'Range': 'bytes=0-1' },
+        signal: validateController.signal
+      });
+      
+      clearTimeout(validateTimeout);
+      
+      if (!headResponse.ok && headResponse.status !== 206) {
+        console.log(`  [yt-dlp] ✗ URL not accessible: HTTP ${headResponse.status} (${duration}ms)`);
+        successTracker.recordFailure('ytdlp', 'extraction');
+        return null;
+      }
+    } catch (validateError) {
+      // URL validation failed, but URL might still work for streaming
+      // Log warning but don't fail - YouTube URLs can be valid even if HEAD fails
+      console.log(`  [yt-dlp] ⚠ URL validation failed (may still work): ${validateError.message}`);
+    }
+    
+    console.log(`  [yt-dlp] ✓ Got streamable URL (${duration}ms, proxy: ${gluetunProxy ? 'yes' : 'no'})`);
+    successTracker.recordSuccess('ytdlp', 'extraction');
+    
+    // Return URL with quality info (yt-dlp format selection ensures good quality)
+    return {
+      url: url,
+      quality: 'best', // yt-dlp selects best available up to 1080p
+      isDash: url.includes('.mpd') || url.includes('manifest')
+    };
+    
+  } catch (error) {
+    clearTimeout(timeout);
+    const duration = Date.now() - startTime;
+    
+    if (error.signal === 'SIGTERM' || error.killed) {
+      console.log(`  [yt-dlp] ✗ TIMEOUT after ${duration}ms`);
+    } else if (error.message && error.message.includes('not found')) {
+      console.log(`  [yt-dlp] ✗ yt-dlp not installed or not in PATH`);
+    } else {
+      const errorMsg = error.message || error.toString();
+      console.log(`  [yt-dlp] ✗ Error: ${errorMsg.substring(0, 200)} (${duration}ms)`);
+    }
+    
+    successTracker.recordFailure('ytdlp', 'extraction');
+    return null;
+  }
+}
+
 // ============ INTERNET ARCHIVE EXTRACTOR ============
 
 async function extractViaInternetArchive(tmdbMeta) {
@@ -1756,7 +1898,8 @@ async function resolvePreview(imdbId, type) {
     availableSources.push('itunes'); // iTunes works for TV shows
   }
   if (tmdbMeta.youtubeTrailerKey) {
-    availableSources.push('piped', 'invidious');
+    // Add ytdlp first (most reliable with Cloudflare Warp), then Piped/Invidious
+    availableSources.push('ytdlp', 'piped', 'invidious');
   }
   availableSources.push('archive');
   
@@ -1824,6 +1967,35 @@ async function resolvePreview(imdbId, type) {
             };
           } else {
             successTracker.recordSourceFailure('piped');
+            return null;
+          }
+        } else if (source === 'ytdlp') {
+          if (!tmdbMeta.youtubeTrailerKey) {
+            console.log(`  Skipping yt-dlp: no YouTube key available`);
+            successTracker.recordSourceFailure('ytdlp');
+            return null;
+          }
+          console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
+          const ytdlpResult = await extractViaYtDlp(tmdbMeta.youtubeTrailerKey);
+          if (ytdlpResult && ytdlpResult.url) {
+            setCache(imdbId, {
+              track_id: null,
+              preview_url: ytdlpResult.url,
+              country: 'yt',
+              youtube_key: tmdbMeta.youtubeTrailerKey,
+              source: 'youtube'
+            });
+            console.log(`✓ Got URL from yt-dlp`);
+            successTracker.recordSourceSuccess('ytdlp');
+            return {
+              found: true,
+              source: 'youtube',
+              previewUrl: ytdlpResult.url,
+              youtubeKey: tmdbMeta.youtubeTrailerKey,
+              country: 'yt'
+            };
+          } else {
+            successTracker.recordSourceFailure('ytdlp');
             return null;
           }
         } else if (source === 'invidious') {

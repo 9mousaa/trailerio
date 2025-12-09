@@ -6,16 +6,16 @@ import Coverage from "./pages/Coverage";
 import NotFound from "./pages/NotFound";
 
 const App = () => (
-  <TooltipProvider>
-    <Toaster />
-    <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<Index />} />
-        <Route path="/coverage" element={<Coverage />} />
-        <Route path="*" element={<NotFound />} />
-      </Routes>
-    </BrowserRouter>
-  </TooltipProvider>
+    <TooltipProvider>
+      <Toaster />
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<Index />} />
+          <Route path="/coverage" element={<Coverage />} />
+          <Route path="*" element={<NotFound />} />
+        </Routes>
+      </BrowserRouter>
+    </TooltipProvider>
 );
 
 export default App;

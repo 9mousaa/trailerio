@@ -1,5 +1,37 @@
 
 services:
+  # Gluetun service for Cloudflare Warp (optional - set WireGuard keys in .env to enable)
+  # If keys are not set, gluetun will fail to start but backend will work without it
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      # Cloudflare Warp configuration (set these in .env file - see CLOUDFLARE_WARP_SETUP.md)
+      - VPN_SERVICE_PROVIDER=custom
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY:-}
+      - WIREGUARD_ADDRESSES=${WIREGUARD_ADDRESSES:-}
+      - WIREGUARD_PUBLIC_KEY=${WIREGUARD_PUBLIC_KEY:-}
+      - WIREGUARD_PRESHARED_KEY=${WIREGUARD_PRESHARED_KEY:-}
+      - WIREGUARD_ENDPOINT_IP=${WIREGUARD_ENDPOINT_IP:-}
+      - WIREGUARD_ENDPOINT_PORT=${WIREGUARD_ENDPOINT_PORT:-}
+      # Enable HTTP proxy for yt-dlp
+      - HTTP_CONTROL_SERVER_LOG=on
+    restart: unless-stopped  # Restart if it crashes (but backend works without it)
+    networks:
+      - trailerio-internal
+    # Health check
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/v1/openvpn/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   backend:
     build:
       context: .
@@ -9,6 +41,8 @@ services:
       - NODE_ENV=production
       - PORT=3001
       - TMDB_API_KEY=${TMDB_API_KEY:-}
+      # Use gluetun HTTP proxy for yt-dlp if gluetun is running (optional)
+      - GLUETUN_HTTP_PROXY=${WIREGUARD_PRIVATE_KEY:+http://gluetun:8000}
     env_file:
       - .env
     # Ensure .env file exists (create from .env.example if missing)
@@ -18,6 +52,8 @@ services:
     networks:
       - trailerio-internal
       - plaio_default
+    # Don't depend on gluetun - backend works fine without it
+    # If gluetun is running, yt-dlp will use it via GLUETUN_HTTP_PROXY env var
 
   web:
     build:
