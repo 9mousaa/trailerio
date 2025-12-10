@@ -3180,10 +3180,14 @@ function _flushCacheWrites() {
   }
 }
 
-async function resolvePreview(imdbId, type) {
-  logger.section(`RESOLVING: ${imdbId} (${type})`);
+async function resolvePreview(imdbId, type, episodeInfo = null) {
+  const episodeContext = episodeInfo ? ` (S${episodeInfo.season}E${episodeInfo.episode})` : '';
+  logger.section(`RESOLVING: ${imdbId} (${type})${episodeContext}`);
   
-  // Check cache with validation
+  // For first episode of series, prioritize show trailer over episode previews
+  const isFirstEpisode = episodeInfo?.isFirstEpisode === true;
+  
+  // Check cache with validation (use show ID for caching, not episode ID)
   const cached = await getCachedWithValidation(imdbId);
   
   if (cached) {
@@ -3976,13 +3980,30 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   const { type, id } = req.params;
   const requestStart = Date.now();
   
-  logger.section(`REQUEST: ${type.toUpperCase()} ${id}`);
-  logger.info(`Active requests: ${activeRequests}`);
+  // Parse Stremio episode format: tt10986410:1:1 (show:season:episode)
+  let showImdbId = id;
+  let season = null;
+  let episode = null;
+  let isFirstEpisode = false;
   
-  if (!id.startsWith('tt')) {
-    logger.warn(`Skipping non-IMDB ID: ${id}`);
+  if (id.includes(':')) {
+    const parts = id.split(':');
+    if (parts.length >= 3) {
+      showImdbId = parts[0]; // Extract show IMDb ID
+      season = parseInt(parts[1]);
+      episode = parseInt(parts[2]);
+      isFirstEpisode = (season === 1 && episode === 1);
+      logger.info(`Parsed episode request: Show ${showImdbId}, Season ${season}, Episode ${episode}${isFirstEpisode ? ' (FIRST EPISODE - will return show trailer)' : ''}`);
+    }
+  }
+  
+  if (!showImdbId.startsWith('tt')) {
+    logger.warn(`Skipping non-IMDB ID: ${showImdbId}`);
     return res.json({ streams: [] });
   }
+  
+  logger.section(`REQUEST: ${type.toUpperCase()} ${id}${season !== null ? ` (S${season}E${episode})` : ''}`);
+  logger.info(`Active requests: ${activeRequests}`);
   
   let timeoutFired = false;
   const timeout = setTimeout(() => {
@@ -4006,7 +4027,8 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   try {
     // Wrap resolvePreview in a promise race to ensure it doesn't exceed timeout
     // Use shorter timeout to ensure response is sent before Traefik times out
-    const resolvePromise = resolvePreview(id, type);
+    // For series episodes, use the show IMDb ID (not the episode ID)
+    const resolvePromise = resolvePreview(showImdbId, type, { season, episode, isFirstEpisode });
     const timeoutPromise = new Promise((_, reject) => 
       setTimeout(() => reject(new Error('Request timeout')), STREAM_TIMEOUT - 1000) // 1s buffer
     );
