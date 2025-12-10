@@ -20,17 +20,21 @@ services:
       - WIREGUARD_PRESHARED_KEY=${WIREGUARD_PRESHARED_KEY:-}
       - WIREGUARD_ENDPOINT_IP=${WIREGUARD_ENDPOINT_IP:-}
       - WIREGUARD_ENDPOINT_PORT=${WIREGUARD_ENDPOINT_PORT:-}
-      # Enable HTTP proxy for yt-dlp (on port 8888, not 8000 which is control server)
+      # Enable HTTP proxy for yt-dlp
+      # Based on gluetun source code, variable is HTTPPROXY (no underscore)
       - HTTP_CONTROL_SERVER_LOG=on
-      - HTTP_PROXY=on
-      - HTTP_PROXY_PORT=8888
-      - HTTP_PROXY_LOG=on
+      - HTTPPROXY=on
+      - HTTPPROXY_PORT=8888
+      - HTTPPROXY_LOG=on
       # Enable SOCKS5 proxy (for yt-dlp)
-      # Note: SOCKS5 might not be supported for WireGuard, so we also enable HTTP proxy
       - SOCKS5=on
       - SOCKS5_LISTENING_ADDRESS=0.0.0.0
       - SOCKS5_PORT=1080
     restart: unless-stopped  # Restart if it crashes (but backend works without it)
+    # Expose proxy ports (containers on same network can access without exposing, but it helps)
+    ports:
+      - "8888:8888/tcp"  # HTTP proxy
+      - "1080:1080/tcp"  # SOCKS5 proxy
     networks:
       - trailerio-internal
     # Health check
