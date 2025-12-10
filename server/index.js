@@ -1968,15 +1968,16 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
         let bestScore = 0;
         
         for (const doc of docs) {
+          const docTitle = doc.title || '';
+          const docYear = doc.year || null;
+          
           // Skip YouTube shorts, clips, and non-trailer content
-          const title = (doc.title || '').toLowerCase();
-          if (title.includes('#shorts') || title.includes('shorts') || 
-              (title.includes('clip') && !title.includes('trailer')) ||
-              title.includes('behind the scenes') || title.includes('featurette')) {
+          const titleLower = docTitle.toLowerCase();
+          if (titleLower.includes('#shorts') || titleLower.includes('shorts') || 
+              (titleLower.includes('clip') && !titleLower.includes('trailer')) ||
+              titleLower.includes('behind the scenes') || titleLower.includes('featurette')) {
             continue; // Skip shorts and non-trailer content
           }
-          const title = doc.title || '';
-          const docYear = doc.year || null;
           
           // Extract IMDb ID from external-identifier if present (for better matching)
           const externalIds = Array.isArray(doc['external-identifier']) ? doc['external-identifier'] : (doc['external-identifier'] ? [doc['external-identifier']] : []);
@@ -1984,7 +1985,7 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
           
           // GOLD STANDARD: If this result has an IMDb ID and it matches, this is definitely correct
           if (imdbId && docImdbId && docImdbId === imdbId) {
-            console.log(`  [Internet Archive] ✓ Found exact IMDb ID match: ${imdbId} for "${title}"`);
+            console.log(`  [Internet Archive] ✓ Found exact IMDb ID match: ${imdbId} for "${docTitle}"`);
             // This is the best possible match - use it immediately
             bestMatch = doc;
             bestScore = 1.0; // Perfect score
@@ -1992,7 +1993,7 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
           }
           
           // Use fuzzy matching for better accuracy
-          const normTitle = normalizeTitle(title);
+          const normTitle = normalizeTitle(docTitle);
           const normSearchTitle = normalizeTitle(tmdbMeta.title);
           const normOriginalTitle = normalizeTitle(tmdbMeta.originalTitle);
           
@@ -2052,6 +2053,8 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
               }
             }
           }
+          
+          // Use docTitle (not title) for all references below
           
           // Title matching (most important) - be more strict
           if (normTitle === normSearchTitle) {
