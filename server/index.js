@@ -1300,9 +1300,10 @@ async function extractViaYtDlp(youtubeKey) {
   try {
     // Check if gluetun is available
     // Port 8000 is the control server, not the HTTP proxy
-    // Use SOCKS5 proxy (port 1080) which is more reliable and doesn't have auth issues
+    // HTTP proxy is on port 8888, SOCKS5 on port 1080
+    // Try HTTP proxy first (more reliable), fallback to SOCKS5, then direct
     let proxyAvailable = false;
-    let gluetunProxy = 'socks5://gluetun:1080'; // Use SOCKS5 by default
+    let gluetunProxy = 'http://gluetun:8888'; // Use HTTP proxy (port 8888, not 8000)
     
     try {
       // Check gluetun's control API to see if it's running and configured
