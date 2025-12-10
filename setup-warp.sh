@@ -128,8 +128,8 @@ if preshared_match:
 else:
     print("export PRESHARED_KEY=''")
 
-# Address can appear multiple times (IPv4 and IPv6), collect all
-# Only extract from lines that start with "Address" (WireGuard config format)
+# Address can appear on a single line with multiple addresses separated by commas
+# Format: Address = 172.16.0.2/32, 2606:4700:.../128
 address_lines = []
 for line in content.split('\n'):
     line_stripped = line.strip()
@@ -140,10 +140,13 @@ for line in content.split('\n'):
             parts = line_stripped.split('=', 1)
             if len(parts) == 2:
                 addr_part = parts[1].split('#')[0].strip()
-                # Remove any trailing commas or semicolons
-                addr_part = addr_part.rstrip(',;')
-                if addr_part and '/' in addr_part:
-                    address_lines.append(addr_part)
+                # Split by comma to get individual addresses
+                # Each address might have spaces around it
+                individual_addresses = [a.strip() for a in addr_part.split(',')]
+                # Add all addresses that contain a /
+                for addr in individual_addresses:
+                    if addr and '/' in addr:
+                        address_lines.append(addr)
 
 # Validate each address - must be a real IP address with CIDR
 valid_addresses = []
