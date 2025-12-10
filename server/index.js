@@ -1658,127 +1658,120 @@ async function extractViaYtDlp(youtubeKey) {
 }
 
 // Generic extractor that works with any URL supported by yt-dlp
+// OPTIMIZED: Try direct connection first (faster), proxy as fallback
 async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
   console.log(`  [yt-dlp] Extracting streamable URL from ${siteName}: ${videoUrl}...`);
   
   const startTime = Date.now();
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000); // 12s timeout
+  const EXTRACTION_TIMEOUT = 5000; // 5 seconds (matches source timeout)
+  const gluetunProxy = 'http://gluetun:8888';
   
-  try {
-    // Check if gluetun is available
-    let proxyAvailable = false;
-    let gluetunProxy = 'http://gluetun:8888';
-    
-    try {
-      const gluetunStatus = await fetch('http://gluetun:8000/v1/openvpn/status', {
-        signal: AbortSignal.timeout(2000),
-        method: 'GET'
-      }).catch(() => null);
-      
-      if (gluetunStatus !== null) {
-        proxyAvailable = true;
-        console.log(`  [yt-dlp] ✓ Gluetun detected, using HTTP proxy at ${gluetunProxy}`);
-      } else {
-        console.log(`  [yt-dlp] ⚠ Gluetun not reachable, using direct connection`);
-      }
-    } catch (proxyError) {
-      proxyAvailable = false;
-      console.log(`  [yt-dlp] ⚠ Gluetun check failed: ${proxyError.message}, using direct connection`);
-    }
-    
-    // Use HTTP proxy if available
-    let useProxy = '';
-    if (proxyAvailable) {
-      useProxy = `--proxy ${gluetunProxy}`;
-    }
-    
-    // Format selection strategy for streamable URLs:
-    // Prefer combined formats (video+audio) for direct streaming
-    // Limit to 1080p max for reasonable bandwidth
-    const ytDlpCommand = `yt-dlp ${useProxy} \
+  // Optimized yt-dlp command (removed unnecessary delays, simplified format)
+  const buildCommand = (useProxy) => {
+    const proxyFlag = useProxy ? `--proxy ${gluetunProxy}` : '';
+    // Simplified format: prefer mp4, limit to 1080p, fallback to best
+    // Removed sleep-interval (unnecessary delay), increased socket-timeout for reliability
+    return `yt-dlp ${proxyFlag} \
       --no-download \
       --no-warnings \
       --quiet \
       --no-playlist \
-      --format "best[height<=1080][ext=mp4]/best[height<=1080]/bestvideo[height<=1080]+bestaudio/best" \
+      --format "best[height<=1080][ext=mp4]/best[height<=1080]/best" \
       --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-      --sleep-interval 2 \
-      --socket-timeout 10 \
+      --socket-timeout 15 \
       --extractor-args "youtube:player_client=android,web" \
       --get-url \
-      "${videoUrl}"`;
+      "${videoUrl}"`.replace(/\s+/g, ' ').trim();
+  };
+  
+  // Try direct connection first (faster, more reliable)
+  const tryExtraction = async (useProxy, attemptName) => {
+    const command = buildCommand(useProxy);
+    console.log(`  [yt-dlp] Attempt ${attemptName} (proxy: ${useProxy ? 'enabled' : 'disabled'})...`);
     
-    console.log(`  [yt-dlp] Running extraction (proxy: ${proxyAvailable ? 'enabled' : 'disabled'})...`);
-    
-    // Execute yt-dlp with timeout
-    const execPromise = execAsync(ytDlpCommand, {
-      timeout: 12000,
-      maxBuffer: 10 * 1024 * 1024 // 10MB buffer
-    });
-    
-    // Race against timeout
-    const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('yt-dlp timeout')), 12000)
-    );
-    
-    let stdout, stderr;
     try {
-      ({ stdout, stderr } = await Promise.race([execPromise, timeoutPromise]));
-    } catch (raceError) {
-      clearTimeout(timeout);
+      const execPromise = execAsync(command, {
+        timeout: EXTRACTION_TIMEOUT,
+        maxBuffer: 10 * 1024 * 1024
+      });
+      
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('yt-dlp timeout')), EXTRACTION_TIMEOUT)
+      );
+      
+      const { stdout, stderr } = await Promise.race([execPromise, timeoutPromise]);
+      
+      if (stderr && !stderr.includes('WARNING') && stderr.trim().length > 0) {
+        console.log(`  [yt-dlp] Warning: ${stderr.substring(0, 200)}`);
+      }
+      
+      const url = stdout.trim();
+      if (url && url.startsWith('http')) {
+        const duration = Date.now() - startTime;
+        console.log(`  [yt-dlp] ✓ Got URL (${duration}ms, ${attemptName})`);
+        return url;
+      }
+      
+      return null;
+    } catch (error) {
       const duration = Date.now() - startTime;
+      const errorMsg = (error.stderr || error.message || '').toString();
       
-      // If HTTP proxy failed, try direct connection as fallback
-      const errorMsg = (raceError.stderr || raceError.message || '').toString();
-      
-      // Age-restricted videos can't be extracted without cookies - skip proxy retry for these
+      // Age-restricted videos can't be extracted without cookies
       if (errorMsg.includes('Sign in to confirm your age') || errorMsg.includes('age-restricted')) {
-        logger.warn('yt-dlp', `Age-restricted video (requires cookies): ${videoUrl}`);
-        return null; // Can't extract age-restricted videos without cookies
-      }
-      
-      if (proxyAvailable && (errorMsg.includes('401') || errorMsg.includes('Unauthorized') || errorMsg.includes('Tunnel connection failed') || errorMsg.includes('Connection refused'))) {
-        console.log(`  [yt-dlp] ⚠ SOCKS5 proxy failed, trying direct connection (no proxy)...`);
-        // Retry without proxy
-        const noProxyCommand = ytDlpCommand.replace(`--proxy ${gluetunProxy}`, '');
-        try {
-          const noProxyExecPromise = execAsync(noProxyCommand, {
-            timeout: 12000,
-            maxBuffer: 10 * 1024 * 1024
-          });
-          const noProxyTimeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('yt-dlp timeout')), 12000)
-          );
-          ({ stdout, stderr } = await Promise.race([noProxyExecPromise, noProxyTimeoutPromise]));
-          console.log(`  [yt-dlp] ✓ Direct connection worked!`);
-        } catch (noProxyError) {
-          // Direct connection also failed, log and continue with original error
-          const noProxyErrorMsg = (noProxyError.stderr || noProxyError.message || '').toString();
-          console.log(`  [yt-dlp] ✗ Direct connection also failed: ${noProxyErrorMsg.substring(0, 200)}`);
-          // Fall through to original error handling
-        }
-      }
-      
-      // If we still don't have stdout (SOCKS5 didn't work or wasn't tried), handle the error
-      if (!stdout) {
-        if (raceError.message === 'yt-dlp timeout') {
-          console.log(`  [yt-dlp] ✗ TIMEOUT after ${duration}ms`);
-        } else {
-          // Show more detailed error information
-          const errorMsg = raceError.message || raceError.toString();
-          // execAsync errors have stdout/stderr in the error object
-          const errorStderr = raceError.stderr || (raceError.cmd ? '' : '');
-          const errorStdout = raceError.stdout || '';
-          const stderrMsg = errorStderr ? `\n    stderr: ${errorStderr.substring(0, 500)}` : '';
-          const stdoutMsg = errorStdout ? `\n    stdout: ${errorStdout.substring(0, 500)}` : '';
-          const cmdMsg = raceError.cmd ? `\n    command: ${raceError.cmd.substring(0, 200)}` : '';
-          console.log(`  [yt-dlp] ✗ Error: ${errorMsg.substring(0, 200)}${cmdMsg}${stderrMsg}${stdoutMsg} (${duration}ms)`);
-        }
-        successTracker.recordFailure('ytdlp', 'extraction');
+        console.log(`  [yt-dlp] ⚠ Age-restricted video (requires cookies): ${videoUrl}`);
         return null;
       }
+      
+      // Log timeout or other errors
+      if (error.message === 'yt-dlp timeout' || errorMsg.includes('timeout') || errorMsg.includes('timed out')) {
+        console.log(`  [yt-dlp] ✗ ${attemptName} timed out after ${duration}ms`);
+      } else {
+        const stderrMsg = error.stderr ? `\n    stderr: ${error.stderr.substring(0, 300)}` : '';
+        console.log(`  [yt-dlp] ✗ ${attemptName} failed: ${errorMsg.substring(0, 200)}${stderrMsg}`);
+      }
+      
+      return null;
     }
+  };
+  
+  // Strategy 1: Try direct connection first (faster, more reliable)
+  let result = await tryExtraction(false, 'direct');
+  if (result) {
+    successTracker.recordSuccess('ytdlp', 'extraction');
+    return { url: result, quality: 'best', isDash: false };
+  }
+  
+  // Strategy 2: If direct failed, try with proxy (for geo-blocked content)
+  // Check if gluetun is available first
+  let proxyAvailable = false;
+  try {
+    const gluetunStatus = await fetch('http://gluetun:8000/v1/openvpn/status', {
+      signal: AbortSignal.timeout(1000), // Quick check
+      method: 'GET'
+    }).catch(() => null);
+    
+    if (gluetunStatus !== null) {
+      proxyAvailable = true;
+      console.log(`  [yt-dlp] Trying with proxy (gluetun:8888) as fallback...`);
+    }
+  } catch (proxyError) {
+    // Proxy not available, skip
+  }
+  
+  if (proxyAvailable) {
+    result = await tryExtraction(true, 'proxy');
+    if (result) {
+      successTracker.recordSuccess('ytdlp', 'extraction');
+      return { url: result, quality: 'best', isDash: false };
+    }
+  }
+  
+  // Both attempts failed
+  const duration = Date.now() - startTime;
+  console.log(`  [yt-dlp] ✗ All extraction attempts failed after ${duration}ms`);
+  successTracker.recordFailure('ytdlp', 'extraction');
+  return null;
     
     clearTimeout(timeout);
     const duration = Date.now() - startTime;
