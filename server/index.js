@@ -23,15 +23,10 @@ const MAX_CONCURRENT_REQUESTS = 5; // Limit concurrent requests to prevent overw
 
 // Cache TTLs by source type (in hours)
 const CACHE_TTL = {
-  youtube: 2,      // YouTube URLs (Piped/Invidious/yt-dlp) expire quickly - 2 hours
+  youtube: 2,      // YouTube URLs (Piped/Invidious) expire quickly - 2 hours
   itunes: 168,     // iTunes URLs are stable - 7 days (168 hours)
   archive: 720     // Archive URLs are permanent - 30 days (720 hours)
 };
-
-// Cache source types we support:
-// 1. youtube: Piped, Invidious, yt-dlp (direct YouTube stream URLs)
-// 2. itunes: iTunes preview URLs (video-ssl.itunes.apple.com)
-// 3. archive: Internet Archive URLs (archive.org/download/...)
 
 // Memory management: Cache size limits
 const MAX_CACHE_SIZE = 10000; // Maximum cache entries in memory
@@ -287,16 +282,10 @@ function cleanupSuccessTracker() {
   }
 }
 
-// Health check endpoint (for Docker health checks and monitoring)
-// Must return 200 status for Docker to consider service healthy
+// Memory monitoring endpoint (for debugging)
 app.get('/health', (req, res) => {
   const memUsage = process.memoryUsage();
-  res.status(200).json({ 
-    status: 'healthy', 
-    service: 'trailerio-backend', 
-    version: '2.0.0',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
+  res.json({
     memory: {
       rss: `${Math.round(memUsage.rss / 1024 / 1024)}MB`,
       heapTotal: `${Math.round(memUsage.heapTotal / 1024 / 1024)}MB`,
@@ -1538,59 +1527,39 @@ async function extractViaYtDlp(youtubeKey) {
   const timeout = setTimeout(() => controller.abort(), 12000); // 12s timeout
   
   try {
-    // CRITICAL: Gluetun proxy is REQUIRED - never run yt-dlp without it
-    // Port 8000 is the control server, port 8888 is the HTTP proxy
-    const gluetunProxy = process.env.GLUETUN_HTTP_PROXY || 'http://gluetun:8888';
+    // Check if gluetun is available
+    // Port 8000 is the control server, not the HTTP proxy
+    // HTTP proxy is on port 8888, SOCKS5 on port 1080
+    // Try HTTP proxy first (more reliable), fallback to SOCKS5, then direct
     let proxyAvailable = false;
-    let proxyError = null;
+    let gluetunProxy = 'http://gluetun:8888'; // Use HTTP proxy on port 8888
     
-    // Verify gluetun is running and proxy is accessible
     try {
-      // Check gluetun's control API to verify it's running
+      // Check gluetun's control API to see if it's running and configured
       const gluetunStatus = await fetch('http://gluetun:8000/v1/openvpn/status', {
-        signal: AbortSignal.timeout(3000),
+        signal: AbortSignal.timeout(2000),
         method: 'GET'
-      });
+      }).catch(() => null);
       
-      if (gluetunStatus && gluetunStatus.ok) {
-        // Gluetun is running, verify HTTP proxy is accessible
-        try {
-          // Test proxy by making a simple request through it
-          const proxyTest = await fetch('http://httpbin.org/ip', {
-            signal: AbortSignal.timeout(5000),
-            method: 'GET',
-            // Note: We can't easily test the proxy from Node.js without additional setup
-            // But if gluetun status is OK, proxy should be available
-          }).catch(() => null);
-          
-          proxyAvailable = true;
-          console.log(`  [yt-dlp] ✓ Gluetun is healthy, HTTP proxy available at ${gluetunProxy}`);
-        } catch (testError) {
-          proxyError = testError;
-          console.log(`  [yt-dlp] ⚠ Proxy test failed: ${testError.message}, but gluetun is running`);
-          // If gluetun is running, assume proxy is available (it's configured)
-          proxyAvailable = true;
-        }
+      // If we get any response (even error), gluetun is running
+      // HTTP proxy should be available if gluetun is running with HTTPPROXY=on
+      if (gluetunStatus !== null) {
+        proxyAvailable = true;
+        console.log(`  [yt-dlp] ✓ Gluetun detected, using HTTP proxy at ${gluetunProxy}`);
       } else {
-        throw new Error(`Gluetun status check returned ${gluetunStatus.status}`);
+        console.log(`  [yt-dlp] ⚠ Gluetun not reachable, using direct connection`);
       }
-    } catch (checkError) {
-      proxyError = checkError;
-      console.error(`  [yt-dlp] ✗ CRITICAL: Gluetun is not available: ${checkError.message}`);
-      console.error(`  [yt-dlp] ✗ Cannot run yt-dlp without Cloudflare Warp proxy - aborting`);
-      successTracker.recordFailure('ytdlp', 'no-proxy');
-      return null; // NEVER run without proxy
+    } catch (proxyError) {
+      // Gluetun not available or not configured, will use direct connection
+      proxyAvailable = false;
+      console.log(`  [yt-dlp] ⚠ Gluetun check failed: ${proxyError.message}, using direct connection`);
     }
     
-    // CRITICAL: If proxy is not available, abort immediately
-    if (!proxyAvailable) {
-      console.error(`  [yt-dlp] ✗ CRITICAL: Proxy not available - refusing to run yt-dlp without Cloudflare Warp`);
-      successTracker.recordFailure('ytdlp', 'no-proxy');
-      return null;
+    // Use HTTP proxy (port 8888, configured via Cloudflare Warp)
+    let useProxy = '';
+    if (proxyAvailable) {
+      useProxy = `--proxy ${gluetunProxy}`;
     }
-    
-    // Use HTTP proxy (REQUIRED)
-    const useProxy = `--proxy ${gluetunProxy}`;
     
     // Anti-blocking strategies:
     // 1. Use proper user agent (mimic browser)
@@ -1619,7 +1588,7 @@ async function extractViaYtDlp(youtubeKey) {
       --get-url \
       "https://www.youtube.com/watch?v=${youtubeKey}"`;
     
-    console.log(`  [yt-dlp] Running extraction with Cloudflare Warp proxy (REQUIRED)...`);
+    console.log(`  [yt-dlp] Running extraction (proxy: ${proxyAvailable ? 'enabled' : 'disabled'})...`);
     
     // Execute yt-dlp with timeout
     const execPromise = execAsync(ytDlpCommand, {
@@ -1639,25 +1608,38 @@ async function extractViaYtDlp(youtubeKey) {
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
       
-      // CRITICAL: Never fallback to direct connection - proxy is required
+      // If HTTP proxy failed, try direct connection as fallback
       const errorMsg = (raceError.stderr || raceError.message || '').toString();
       
-      // Age-restricted videos can't be extracted without cookies
+      // Age-restricted videos can't be extracted without cookies - skip proxy retry for these
       if (errorMsg.includes('Sign in to confirm your age') || errorMsg.includes('age-restricted')) {
-        console.log(`  [yt-dlp] ✗ Age-restricted video (requires cookies): ${youtubeKey}`);
-        successTracker.recordFailure('ytdlp', 'age-restricted');
+        logger.warn('yt-dlp', `Age-restricted video (requires cookies): ${youtubeKey}`);
         return null; // Can't extract age-restricted videos without cookies
       }
       
-      // If proxy connection failed, log and abort (never try direct connection)
-      if (errorMsg.includes('401') || errorMsg.includes('Unauthorized') || errorMsg.includes('Tunnel connection failed') || errorMsg.includes('Connection refused') || errorMsg.includes('proxy')) {
-        console.error(`  [yt-dlp] ✗ CRITICAL: Proxy connection failed - ${errorMsg.substring(0, 200)}`);
-        console.error(`  [yt-dlp] ✗ Refusing to use direct connection - Cloudflare Warp proxy is required`);
-        successTracker.recordFailure('ytdlp', 'proxy-failed');
-        return null;
+      if (proxyAvailable && (errorMsg.includes('401') || errorMsg.includes('Unauthorized') || errorMsg.includes('Tunnel connection failed') || errorMsg.includes('Connection refused'))) {
+        console.log(`  [yt-dlp] ⚠ SOCKS5 proxy failed, trying direct connection (no proxy)...`);
+        // Retry without proxy
+        const noProxyCommand = ytDlpCommand.replace(`--proxy ${gluetunProxy}`, '');
+        try {
+          const noProxyExecPromise = execAsync(noProxyCommand, {
+            timeout: 12000,
+            maxBuffer: 10 * 1024 * 1024
+          });
+          const noProxyTimeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('yt-dlp timeout')), 12000)
+          );
+          ({ stdout, stderr } = await Promise.race([noProxyExecPromise, noProxyTimeoutPromise]));
+          console.log(`  [yt-dlp] ✓ Direct connection worked!`);
+        } catch (noProxyError) {
+          // Direct connection also failed, log and continue with original error
+          const noProxyErrorMsg = (noProxyError.stderr || noProxyError.message || '').toString();
+          console.log(`  [yt-dlp] ✗ Direct connection also failed: ${noProxyErrorMsg.substring(0, 200)}`);
+          // Fall through to original error handling
+        }
       }
       
-      // Handle other errors
+      // If we still don't have stdout (SOCKS5 didn't work or wasn't tried), handle the error
       if (!stdout) {
         if (raceError.message === 'yt-dlp timeout') {
           console.log(`  [yt-dlp] ✗ TIMEOUT after ${duration}ms`);
@@ -1985,6 +1967,12 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
             score += 0.5; // Strong indicator this is correct
           }
           
+          // CRITICAL: Reject if IMDb ID exists but doesn't match (for any title length)
+          if (imdbId && docImdbId && docImdbId !== imdbId) {
+            // Different IMDb ID - definitely wrong movie/show
+            continue; // Reject immediately
+          }
+          
           // For short/generic titles (1-2 words), require much stricter matching
           const searchWords = normSearchTitle.split(' ').filter(w => w.length > 2); // Ignore short words
           const isShortTitle = searchWords.length <= 2;
@@ -2003,25 +1991,19 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
           // e.g., "Coco" should NOT match "Coco Chanel" or "Coco Before Chanel"
           if (isSingleWord) {
             const searchWord = searchWords[0];
-            // Check if the search word appears at the START of the title
+            // Check if the search word appears at the START of the title (or is the whole title)
             const titleStartsWithSearch = normTitle.startsWith(searchWord + ' ') || 
-                                         normTitle.startsWith(searchWord + ':') ||
-                                         normTitle.startsWith(searchWord + '-') ||
-                                         normTitle === searchWord;
+                                          normTitle.startsWith(searchWord + ':') ||
+                                          normTitle.startsWith(searchWord + '-') ||
+                                          normTitle === searchWord;
             
             if (!titleStartsWithSearch) {
               // Search word appears but not at start - likely a different movie/show
-              // Only allow if IMDb ID matches exactly
+              // Only allow if IMDb ID matches exactly (already checked above)
               if (!imdbId || !docImdbId || docImdbId !== imdbId) {
                 continue; // Reject - this is a false positive
               }
             }
-          }
-          
-          // CRITICAL: Reject if IMDb ID exists but doesn't match (for any title length)
-          if (imdbId && docImdbId && docImdbId !== imdbId) {
-            // Different IMDb ID - definitely wrong movie
-            continue;
           }
           
           // Title matching (most important) - be more strict
@@ -2110,7 +2092,7 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
             score += 0.15;
           }
           
-          // Year matching (using year field from API)
+          // Year matching (using year field from API) - stricter for short/generic titles
           if (tmdbMeta.year && docYear) {
             const yearDiff = Math.abs(parseInt(docYear) - tmdbMeta.year);
             if (yearDiff === 0) {
@@ -2120,11 +2102,20 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
             } else if (yearDiff <= 3) {
               score += 0.1; // Within 3 years
             } else if (yearDiff > 5) {
+              // For short/generic titles, reject if year is very different
+              if (isShortTitle && yearDiff > 10) {
+                // Very different year for short title - likely wrong movie
+                continue; // Reject
+              }
               score -= 0.3; // Penalty for very different years
             }
           } else if (tmdbMeta.year && !docYear) {
-            // No year in result - slight penalty but don't reject
-            score -= 0.1;
+            // No year in result - for short titles, this is risky
+            if (isShortTitle && !imdbId) {
+              // Short title without year and no IMDb ID - reject to avoid false positives
+              continue;
+            }
+            score -= 0.1; // Slight penalty
           }
           
           // IMDb ID matching bonus (strongest indicator of correctness)
@@ -2459,72 +2450,41 @@ function getCached(imdbId) {
   return null;
 }
 
-// Background validation queue (non-blocking)
-const validationQueue = new Set();
-
 async function getCachedWithValidation(imdbId) {
   const cached = getCached(imdbId);
   if (!cached || !cached.preview_url) {
     return cached;
   }
   
+  // For YouTube URLs, always validate (they expire quickly)
+  // For other sources, only validate if cache is getting old
   const hoursSinceCheck = (Date.now() - cached.timestamp) / (1000 * 60 * 60);
   const sourceType = cached.source_type || 'youtube';
   const ttlHours = CACHE_TTL[sourceType] || CACHE_TTL.youtube;
-  const agePercent = (hoursSinceCheck / ttlHours) * 100;
-  
-  // INSTANT RETURN: If cache is fresh (< 10% of TTL), return immediately without validation
-  // This makes cached results feel instant (< 1ms)
-  if (agePercent < 10) {
-    logger.cache('hit', `Instant cache hit for ${imdbId} (${sourceType}, ${hoursSinceCheck.toFixed(1)}h old, ${agePercent.toFixed(0)}% of TTL)`);
-    return cached;
-  }
-  
-  // For very fresh cache (< 30% of TTL), return immediately and validate in background
-  if (agePercent < 30) {
-    // Validate in background (non-blocking)
-    if (!validationQueue.has(imdbId)) {
-      validationQueue.add(imdbId);
-      validateUrl(cached.preview_url, 2000).then(isValid => {
-        validationQueue.delete(imdbId);
-        if (!isValid) {
-          cache.delete(imdbId);
-          const deleteStmt = db.prepare('DELETE FROM cache WHERE imdb_id = ?');
-          deleteStmt.run(imdbId);
-        }
-      }).catch(() => {
-        validationQueue.delete(imdbId);
-      });
-    }
-    
-    return cached; // Return immediately
-  }
-  
-  // For stale cache (> 30% of TTL), validate synchronously but with shorter timeout
-  // YouTube URLs: validate if > 20% of TTL (they expire quickly)
-  // Other sources: validate if > 80% of TTL
-  const shouldValidate = sourceType === 'youtube' ? agePercent > 20 : agePercent > 80;
+  const shouldValidate = sourceType === 'youtube' || hoursSinceCheck > (ttlHours * 0.8); // Validate if 80% through TTL
   
   if (shouldValidate) {
-    const isValid = await validateUrl(cached.preview_url, 2000); // Shorter timeout for faster response
+    logger.cache('validate', `Validating cached URL for ${imdbId} (${sourceType}, ${hoursSinceCheck.toFixed(1)}h old)`);
+    const isValid = await validateUrl(cached.preview_url);
     
     if (!isValid) {
-      logger.cache('miss', `${imdbId}: URL invalid`);
+      logger.cache('miss', `Cached URL is no longer valid, invalidating cache for ${imdbId}`);
       cache.delete(imdbId);
+      // Also delete from database
       const deleteStmt = db.prepare('DELETE FROM cache WHERE imdb_id = ?');
       deleteStmt.run(imdbId);
       return null;
     }
+    
+    logger.cache('hit', `Cached URL is still valid for ${imdbId}`);
   }
   
   return cached;
 }
 
 function setCache(imdbId, data) {
-  if (!imdbId || !data.preview_url) {
-    return; // Skip if missing required data
-  }
-  
+  // Use try-catch with timeout protection for database writes
+  // If DB is locked or slow, skip write (cache is in-memory anyway)
   // Determine source type from preview URL
   let sourceType = 'youtube'; // default
   if (data.preview_url) {
@@ -2532,16 +2492,11 @@ function setCache(imdbId, data) {
       sourceType = 'itunes';
     } else if (data.preview_url.includes('archive.org')) {
       sourceType = 'archive';
-    } else if (data.preview_url.includes('googlevideo.com') || 
-                data.preview_url.includes('youtube.com') || 
-                data.preview_url.includes('youtu.be') ||
-                data.preview_url.includes('youtube-nocookie.com')) {
-      // YouTube URLs from yt-dlp (googlevideo.com), piped, invidious
-      sourceType = 'youtube';
     } else {
-      sourceType = 'youtube'; // Default to youtube for any other URL
+      sourceType = 'youtube'; // Piped/Invidious
     }
   } else if (data.source) {
+    // Use source from data if available
     sourceType = data.source === 'youtube' ? 'youtube' : data.source;
   }
   
@@ -2552,45 +2507,45 @@ function setCache(imdbId, data) {
     timestamp: timestamp
   };
   
-  // Save to in-memory cache FIRST (instant access)
+  // Save to in-memory cache
   cache.set(imdbId, cacheData);
   
-  // Save to database ASYNCHRONOUSLY (non-blocking)
-  // Use setImmediate to defer DB write, making cache saves instant
-  setImmediate(() => {
-    try {
-      const stmt = db.prepare(`
-        INSERT INTO cache (imdb_id, preview_url, track_id, country, youtube_key, source_type, source, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(imdb_id) DO UPDATE SET
-          preview_url = excluded.preview_url,
-          track_id = excluded.track_id,
-          country = excluded.country,
-          youtube_key = excluded.youtube_key,
-          source_type = excluded.source_type,
-          source = excluded.source,
-          timestamp = excluded.timestamp
-      `);
-      stmt.run(
-        imdbId,
-        cacheData.preview_url || null,
-        cacheData.track_id || null,
-        cacheData.country || null,
-        cacheData.youtube_key || null,
-        sourceType,
-        cacheData.source || null,
-        timestamp
-      );
-    } catch (error) {
-      // Silently fail - in-memory cache is what matters for speed
-      if (!error.message.includes('database is locked') && !error.message.includes('SQLITE_BUSY')) {
-        // Only log non-locking errors occasionally
-        if (Math.random() < 0.01) { // Log 1% of errors to avoid spam
-          console.error(`[Cache] Database error for ${imdbId}: ${error.message}`);
-        }
-      }
+  // Save to database - with error handling to prevent blocking
+  try {
+    const startTime = Date.now();
+    const stmt = db.prepare(`
+      INSERT INTO cache (imdb_id, preview_url, track_id, country, youtube_key, source_type, source, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(imdb_id) DO UPDATE SET
+        preview_url = excluded.preview_url,
+        track_id = excluded.track_id,
+        country = excluded.country,
+        youtube_key = excluded.youtube_key,
+        source_type = excluded.source_type,
+        source = excluded.source,
+        timestamp = excluded.timestamp
+    `);
+    stmt.run(
+      imdbId,
+      cacheData.preview_url || null,
+      cacheData.track_id || null,
+      cacheData.country || null,
+      cacheData.youtube_key || null,
+      sourceType,
+      cacheData.source || null,
+      timestamp
+    );
+    const duration = Date.now() - startTime;
+    if (duration > 50) {
+      console.warn(`[Cache] Slow DB write: ${duration}ms for ${imdbId}`);
     }
-  });
+  } catch (error) {
+    // Don't spam logs for database locked errors
+    if (!error.message.includes('database is locked') && !error.message.includes('SQLITE_BUSY')) {
+      console.error(`[Cache] Database error for ${imdbId}: ${error.message}`);
+    }
+    // Continue - in-memory cache still works
+  }
 }
 
 async function resolvePreview(imdbId, type) {
@@ -2602,17 +2557,7 @@ async function resolvePreview(imdbId, type) {
   if (cached) {
     if (cached.preview_url) {
       const sourceType = cached.source_type || 'unknown';
-      const hoursSinceCheck = (Date.now() - cached.timestamp) / (1000 * 60 * 60);
-      const ttlHours = CACHE_TTL[sourceType] || CACHE_TTL.youtube;
-      const agePercent = (hoursSinceCheck / ttlHours) * 100;
-      
-      // Log cache hit with age info
-      if (agePercent < 10) {
-        logger.cache('hit', `${imdbId} → ${sourceType.toUpperCase()} (instant, ${hoursSinceCheck.toFixed(1)}h old)`);
-      } else {
-        logger.cache('hit', `${imdbId} → ${sourceType.toUpperCase()} (${hoursSinceCheck.toFixed(1)}h old)`);
-      }
-      
+      console.log(`Cache hit: returning cached ${sourceType} preview (validated)`);
       return {
         found: true,
         source: cached.source || (sourceType === 'itunes' ? 'itunes' : sourceType === 'archive' ? 'archive' : 'youtube'),
@@ -2905,23 +2850,12 @@ async function resolvePreview(imdbId, type) {
   return { found: false };
 }
 
-// Root endpoint - simple health check
+// Root endpoint
 app.get('/', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    service: 'trailerio-backend', 
-    version: '2.0.0',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime()
-  });
+  res.json({ status: 'ok', service: 'trailerio-backend', version: '2.0.0' });
 });
 
-// Manifest endpoint - must be accessible for Stremio addon
-// This endpoint is critical and must never fail
 app.get('/manifest.json', (req, res) => {
-  // Set proper headers for manifest
-  res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
   res.json({
     id: "com.trailer.preview",
     name: "Trailer Preview",
