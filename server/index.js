@@ -2760,18 +2760,16 @@ async function resolvePreview(imdbId, type) {
   
   // Try top sources in parallel
   if (topSources.length > 0) {
-    logger.info(`Trying ${topSources.length} sources in parallel: ${topSources.join(', ')}`);
     const parallelResults = await Promise.allSettled(topSources.map(attemptSource));
     
     // Find first successful result
     for (const result of parallelResults) {
       if (result.status === 'fulfilled' && result.value && result.value.found) {
-        logger.success(`Found via parallel attempt: ${result.value.source}`);
+        logger.success(`Found: ${result.value.source}`);
         return result.value;
       }
     }
     
-    logger.info(`Parallel attempts failed, trying ${fallbackSources.length} fallback sources sequentially`);
   }
   
   // Fallback: Try remaining sources sequentially
