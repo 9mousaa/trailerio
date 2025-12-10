@@ -15,7 +15,6 @@ let embeddingsEnabled = true; // Can be disabled if model fails to load
 const app = express();
 const PORT = process.env.PORT || 3001;
 const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
-const MDBLIST_API_KEY = process.env.MDBLIST_API_KEY || '';
 const CACHE_DAYS = 30;
 const MIN_SCORE_THRESHOLD = 0.6;
 const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
@@ -24,10 +23,15 @@ const MAX_CONCURRENT_REQUESTS = 5; // Limit concurrent requests to prevent overw
 
 // Cache TTLs by source type (in hours)
 const CACHE_TTL = {
-  youtube: 2,      // YouTube URLs (Piped/Invidious) expire quickly - 2 hours
+  youtube: 2,      // YouTube URLs (Piped/Invidious/yt-dlp) expire quickly - 2 hours
   itunes: 168,     // iTunes URLs are stable - 7 days (168 hours)
   archive: 720     // Archive URLs are permanent - 30 days (720 hours)
 };
+
+// Cache source types we support:
+// 1. youtube: Piped, Invidious, yt-dlp (direct YouTube stream URLs)
+// 2. itunes: iTunes preview URLs (video-ssl.itunes.apple.com)
+// 3. archive: Internet Archive URLs (archive.org/download/...)
 
 // Memory management: Cache size limits
 const MAX_CACHE_SIZE = 10000; // Maximum cache entries in memory
@@ -45,7 +49,7 @@ if (!fs.existsSync(dbDir)) {
 
 const db = new Database(dbPath);
 
-// ============ DASHBOARD LOGGER ============
+// ============ LOGGING UTILITY ============
 const colors = {
   reset: '\x1b[0m',
   bright: '\x1b[1m',
@@ -57,121 +61,71 @@ const colors = {
   magenta: '\x1b[35m',
   cyan: '\x1b[36m',
   white: '\x1b[37m',
-  bgGreen: '\x1b[42m',
-  bgRed: '\x1b[41m',
-  bgYellow: '\x1b[43m',
-  bgBlue: '\x1b[44m',
-};
-
-const box = {
-  tl: '┌', tr: '┐', bl: '└', br: '┘',
-  h: '─', v: '│', 
-  t: '┬', b: '┴', l: '├', r: '┤', c: '┼'
 };
 
 const logger = {
+  // Format timestamp
   timestamp: () => {
     const now = new Date();
-    return now.toISOString().replace('T', ' ').substring(11, 19);
+    return now.toISOString().replace('T', ' ').substring(0, 19);
   },
   
-  // Dashboard-style request log
+  // Request logs
   request: (method, path, status, duration) => {
     const statusColor = status >= 200 && status < 300 ? colors.green : 
                        status >= 400 && status < 500 ? colors.yellow : colors.red;
-    const statusIcon = status >= 200 && status < 300 ? '✓' : status >= 400 && status < 500 ? '⚠' : '✗';
-    const time = duration < 1000 ? `${duration}ms` : `${(duration/1000).toFixed(1)}s`;
-    console.log(`${colors.dim}${box.v}${colors.reset} ${colors.cyan}${method.padEnd(4)}${colors.reset} ${path.padEnd(30)} ${statusColor}${statusIcon} ${status}${colors.reset} ${colors.dim}${time}${colors.reset}`);
+    console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${colors.cyan}${method}${colors.reset} ${path} ${statusColor}${status}${colors.reset} ${colors.dim}(${duration}ms)${colors.reset}`);
   },
   
-  // Beautiful source status card
+  // Source extraction logs
   source: (source, message, success = null) => {
-    const sourceMap = {
-      'ytdlp': { icon: '🎬', name: 'YT-DLP', color: colors.cyan },
-      'piped': { icon: '🔷', name: 'PIPED', color: colors.blue },
-      'invidious': { icon: '🔶', name: 'INVIDIOUS', color: colors.yellow },
-      'itunes': { icon: '🍎', name: 'ITUNES', color: colors.magenta },
-      'archive': { icon: '📚', name: 'ARCHIVE', color: colors.green }
-    };
-    
-    const config = sourceMap[source.toLowerCase()] || { icon: '⚙️', name: source.toUpperCase(), color: colors.white };
-    
-    if (success === true) {
-      console.log(`${colors.dim}${box.v}${colors.reset} ${config.icon} ${config.color}${config.name}${colors.reset} ${colors.green}${message}${colors.reset}`);
-    } else if (success === false) {
-      console.log(`${colors.dim}${box.v}${colors.reset} ${config.icon} ${config.color}${config.name}${colors.reset} ${colors.red}${message}${colors.reset}`);
-    } else {
-      console.log(`${colors.dim}${box.v}${colors.reset} ${config.icon} ${config.color}${config.name}${colors.reset} ${colors.dim}${message}${colors.reset}`);
-    }
+    const icon = success === true ? '✓' : success === false ? '✗' : '→';
+    const color = success === true ? colors.green : success === false ? colors.red : colors.blue;
+    const sourceName = source.toUpperCase().padEnd(10);
+    console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${color}${icon}${colors.reset} ${colors.bright}[${sourceName}]${colors.reset} ${message}`);
   },
   
-  // Cache hit/miss with visual indicator
+  // Cache logs
   cache: (action, message) => {
-    if (action === 'hit') {
-      console.log(`${colors.dim}${box.v}${colors.reset} ${colors.green}⚡ CACHE${colors.reset} ${colors.bright}${message}${colors.reset}`);
-    } else if (action === 'miss') {
-      console.log(`${colors.dim}${box.v}${colors.reset} ${colors.yellow}🔍 MISS${colors.reset} ${message}`);
-    } else {
-      console.log(`${colors.dim}${box.v}${colors.reset} ${colors.magenta}🗑️  ${action.toUpperCase()}${colors.reset} ${message}`);
-    }
+    const icon = action === 'hit' ? '💾' : action === 'miss' ? '🔍' : '🗑️';
+    console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${icon} ${colors.magenta}[CACHE]${colors.reset} ${message}`);
   },
   
-  // Info with clean formatting
+  // Info logs
   info: (message) => {
-    console.log(`${colors.dim}${box.v}${colors.reset} ${colors.blue}ℹ${colors.reset} ${message}`);
+    console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${colors.blue}ℹ${colors.reset} ${message}`);
   },
   
-  // Success with celebration
+  // Success logs
   success: (message) => {
-    console.log(`${colors.dim}${box.v}${colors.reset} ${colors.green}✓ SUCCESS${colors.reset} ${colors.bright}${message}${colors.reset}`);
+    console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${colors.green}✓${colors.reset} ${message}`);
   },
   
-  // Warning with attention
+  // Warning logs
   warn: (message) => {
-    console.log(`${colors.dim}${box.v}${colors.reset} ${colors.yellow}⚠ WARN${colors.reset} ${message}`);
+    console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${colors.yellow}⚠${colors.reset} ${message}`);
   },
   
-  // Error with emphasis
+  // Error logs
   error: (message, error = null) => {
-    console.log(`${colors.dim}${box.v}${colors.reset} ${colors.red}${colors.bright}✗ ERROR${colors.reset} ${colors.red}${message}${colors.reset}`);
+    console.error(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${colors.red}✗${colors.reset} ${colors.red}[ERROR]${colors.reset} ${message}`);
     if (error) {
-      console.log(`${colors.dim}${box.v}${colors.reset} ${colors.dim}  ${error.message || error}${colors.reset}`);
+      console.error(`${colors.dim}  Stack:${colors.reset} ${error.stack || error.message}`);
     }
   },
   
-  // Request card - beautiful boxed request
-  requestCard: (type, id, active) => {
-    const typeColor = type === 'MOVIE' ? colors.cyan : colors.magenta;
-    const typeIcon = type === 'MOVIE' ? '🎬' : '📺';
-    console.log(`\n${colors.dim}${box.tl}${box.h.repeat(68)}${box.tr}${colors.reset}`);
-    console.log(`${colors.dim}${box.v}${colors.reset} ${typeIcon} ${typeColor}${type}${colors.reset} ${colors.bright}${id}${colors.reset} ${colors.dim}${' '.repeat(40 - id.length)}active: ${active}${colors.reset} ${colors.dim}${box.v}${colors.reset}`);
-    console.log(`${colors.dim}${box.l}${box.h.repeat(68)}${box.r}${colors.reset}`);
-  },
-  
-  // Source attempt with progress
-  sourceAttempt: (source, duration) => {
-    const sourceMap = {
-      'ytdlp': { icon: '🎬', name: 'YT-DLP', color: colors.cyan },
-      'piped': { icon: '🔷', name: 'PIPED', color: colors.blue },
-      'invidious': { icon: '🔶', name: 'INVIDIOUS', color: colors.yellow },
-      'itunes': { icon: '🍎', name: 'ITUNES', color: colors.magenta },
-      'archive': { icon: '📚', name: 'ARCHIVE', color: colors.green }
-    };
-    const config = sourceMap[source.toLowerCase()] || { icon: '⚙️', name: source.toUpperCase(), color: colors.white };
-    const time = duration < 1000 ? `${duration}ms` : `${(duration/1000).toFixed(1)}s`;
-    console.log(`${colors.dim}${box.v}${colors.reset}   ${config.icon} ${config.color}${config.name}${colors.reset} ${colors.dim}(${time})${colors.reset}`);
-  },
-  
-  // Section separator (beautiful)
-  section: (title) => {
-    // Removed - using requestCard instead
-  },
-  
-  // Debug (only in development)
+  // Debug logs (only in development)
   debug: (message) => {
     if (process.env.NODE_ENV !== 'production') {
-      console.log(`${colors.dim}${box.v}${colors.reset} ${colors.dim}[DEBUG]${colors.reset} ${message}`);
+      console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${colors.dim}[DEBUG]${colors.reset} ${message}`);
     }
+  },
+  
+  // Section separator
+  section: (title) => {
+    console.log(`\n${colors.bright}${colors.cyan}═══════════════════════════════════════════════════════════${colors.reset}`);
+    console.log(`${colors.bright}${colors.cyan}  ${title}${colors.reset}`);
+    console.log(`${colors.bright}${colors.cyan}═══════════════════════════════════════════════════════════${colors.reset}\n`);
   }
 };
 
@@ -367,7 +321,7 @@ const circuitBreakers = {
   piped: new Map(), // instance URL -> { failures: number, lastFailure: timestamp, open: boolean }
   invidious: new Map(), // instance URL -> { failures: number, lastFailure: timestamp, open: boolean }
   CIRCUIT_OPEN_THRESHOLD: 5, // Open circuit after 5 consecutive failures
-  CIRCUIT_RESET_TIME: 2 * 60 * 1000, // Reset after 2 minutes (faster recovery)
+  CIRCUIT_RESET_TIME: 10 * 60 * 1000, // Reset after 10 minutes
 };
 
 // Source response time tracking (for dynamic timeouts)
@@ -623,7 +577,84 @@ setInterval(() => {
 cleanupCache();
 cleanupSuccessTracker();
 
-// Cache warming disabled - removed to prevent issues
+// Cache warming: Pre-cache popular content
+async function warmCache() {
+  if (!TMDB_API_KEY) {
+    console.log('[Cache Warming] TMDB_API_KEY not set, skipping cache warming');
+    return;
+  }
+  
+  console.log('[Cache Warming] Starting cache warming for popular content...');
+  
+  try {
+    // Get popular movies and TV shows from TMDB
+    const [moviesResponse, tvResponse] = await Promise.allSettled([
+      fetch(`https://api.themoviedb.org/3/movie/popular?api_key=${TMDB_API_KEY}&page=1&limit=50`),
+      fetch(`https://api.themoviedb.org/3/tv/popular?api_key=${TMDB_API_KEY}&page=1&limit=50`)
+    ]);
+    
+    const popularItems = [];
+    
+    if (moviesResponse.status === 'fulfilled' && moviesResponse.value.ok) {
+      const moviesData = await moviesResponse.value.json();
+      for (const movie of (moviesData.results || []).slice(0, 25)) {
+        if (movie.external_ids?.imdb_id) {
+          popularItems.push({ imdbId: movie.external_ids.imdb_id, type: 'movie' });
+        }
+      }
+    }
+    
+    if (tvResponse.status === 'fulfilled' && tvResponse.value.ok) {
+      const tvData = await tvResponse.value.json();
+      for (const show of (tvData.results || []).slice(0, 25)) {
+        if (show.external_ids?.imdb_id) {
+          popularItems.push({ imdbId: show.external_ids.imdb_id, type: 'series' });
+        }
+      }
+    }
+    
+    console.log(`[Cache Warming] Found ${popularItems.length} popular items to cache`);
+    
+    // Cache items sequentially to avoid overwhelming the system
+    let cached = 0;
+    let skipped = 0;
+    
+    for (const item of popularItems) {
+      // Check if already cached
+      const existing = getCached(item.imdbId);
+      if (existing && existing.preview_url) {
+        skipped++;
+        continue;
+      }
+      
+      try {
+        // Resolve preview (this will cache it)
+        // Convert 'series' to 'series' (already correct) or 'movie' to 'movie'
+        const resolveType = item.type === 'series' ? 'series' : 'movie';
+        await resolvePreview(item.imdbId, resolveType);
+        cached++;
+        
+        // Small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } catch (error) {
+        console.log(`[Cache Warming] Failed to cache ${item.imdbId}: ${error.message}`);
+      }
+    }
+    
+    console.log(`[Cache Warming] Complete: ${cached} cached, ${skipped} already cached, ${popularItems.length - cached - skipped} failed`);
+  } catch (error) {
+    console.error(`[Cache Warming] Error: ${error.message}`);
+  }
+}
+
+// Run cache warming on startup (after 30 seconds) and then every 6 hours
+setTimeout(() => {
+  warmCache();
+}, 30 * 1000); // 30 seconds after startup
+
+setInterval(() => {
+  warmCache();
+}, 6 * 60 * 60 * 1000); // Every 6 hours
 
 app.use(cors());
 app.use(express.json());
@@ -824,6 +855,7 @@ async function getTMDBMetadata(imdbId, type) {
   if (trailer) {
     youtubeTrailerKey = trailer.key;
     youtubeTrailerTitle = trailer.name || null;
+    console.log(`Found official trailer: ${youtubeTrailerTitle || 'Trailer'}`);
   } else {
     // Priority 2: Official Teaser
     trailer = filteredVideos.find(v => 
@@ -833,12 +865,14 @@ async function getTMDBMetadata(imdbId, type) {
     if (trailer) {
       youtubeTrailerKey = trailer.key;
       youtubeTrailerTitle = trailer.name || null;
+      console.log(`Found official teaser: ${youtubeTrailerTitle || 'Teaser'}`);
     } else {
       // Priority 3: Any Trailer (not official)
       trailer = filteredVideos.find(v => v.type === 'Trailer');
       if (trailer) {
         youtubeTrailerKey = trailer.key;
         youtubeTrailerTitle = trailer.name || null;
+        console.log(`Found trailer: ${youtubeTrailerTitle || 'Trailer'}`);
       } else {
         // Priority 4: Official Clip
         trailer = filteredVideos.find(v => 
@@ -848,12 +882,14 @@ async function getTMDBMetadata(imdbId, type) {
         if (trailer) {
           youtubeTrailerKey = trailer.key;
           youtubeTrailerTitle = trailer.name || null;
+          console.log(`Found official clip: ${youtubeTrailerTitle || 'Clip'}`);
         } else {
           // Last resort: Any YouTube video (but prefer official)
           trailer = filteredVideos.find(v => v.official === true) || filteredVideos[0];
           if (trailer) {
             youtubeTrailerKey = trailer.key;
             youtubeTrailerTitle = trailer.name || null;
+            console.log(`Found YouTube video: ${youtubeTrailerTitle || 'Video'} (${trailer.type})`);
           }
         }
       }
@@ -874,6 +910,7 @@ async function getTMDBMetadata(imdbId, type) {
     }
   }
   
+  console.log(`TMDB: "${mainTitle}" (${year}), YouTube: ${youtubeTrailerKey || 'none'}, altTitles: ${altTitlesArray.length}`);
   
   return {
     tmdbId,
@@ -933,11 +970,13 @@ async function searchITunes(params) {
       const data = await response.json();
       let results = data.results || [];
       
+      console.log(`  [iTunes] Raw API returned ${results.length} results for "${term}" in ${country}`);
       
       // Filter by kind if specified
       if (filterKind) {
         const beforeFilter = results.length;
         results = results.filter(r => r.kind === filterKind);
+        console.log(`  [iTunes] After kind filter (${filterKind}): ${results.length} results (was ${beforeFilter})`);
       }
       
       // CRITICAL: Only return results with previewUrl (trailers/previews)
@@ -965,26 +1004,34 @@ async function searchITunes(params) {
   
   if (type === 'movie') {
     // Strategy 1: Search all movie media types (no entity filter) - this gets everything
+    console.log(`  [iTunes] Strategy 1: Searching with media=movie (no entity filter)`);
     let results = await trySearch({ media: 'movie' }, null);
     if (results.length > 0) {
+      console.log(`  [iTunes] Found ${results.length} movie results with previews (no entity filter)`);
       return results;
     }
     
     // Strategy 2: Regular movie search with movieTerm attribute
+    console.log(`  [iTunes] Strategy 2: Searching with media=movie, entity=movie, attribute=movieTerm`);
     results = await trySearch({ media: 'movie', entity: 'movie', attribute: 'movieTerm' }, null);
     if (results.length > 0) {
+      console.log(`  [iTunes] Found ${results.length} movie results with previews`);
       return results;
     }
     
     // Strategy 3: Movie search without attribute
+    console.log(`  [iTunes] Strategy 3: Searching with media=movie, entity=movie (no attribute)`);
     results = await trySearch({ media: 'movie', entity: 'movie' }, null);
     if (results.length > 0) {
+      console.log(`  [iTunes] Found ${results.length} movie results (no attribute)`);
       return results;
     }
     
     // Strategy 4: Search all movies, filter by kind
+    console.log(`  [iTunes] Strategy 4: Searching with media=movie, filtering by kind=feature-movie`);
     results = await trySearch({ media: 'movie' }, 'feature-movie');
     if (results.length > 0) {
+      console.log(`  [iTunes] Found ${results.length} feature-movie results with previews`);
       return results;
     }
   } else {
@@ -992,18 +1039,21 @@ async function searchITunes(params) {
     // Strategy 1: tvEpisode with showTerm attribute
     let results = await trySearch({ media: 'tvShow', entity: 'tvEpisode', attribute: 'showTerm' }, null);
     if (results.length > 0) {
+      console.log(`  [iTunes] Found ${results.length} tvEpisode results`);
       return results;
     }
     
     // Strategy 2: tvEpisode without attribute
     results = await trySearch({ media: 'tvShow', entity: 'tvEpisode' }, null);
     if (results.length > 0) {
+      console.log(`  [iTunes] Found ${results.length} tvEpisode results (no attribute)`);
       return results;
     }
     
     // Strategy 3: Search all TV, filter by kind
     results = await trySearch({ media: 'tvShow' }, 'tv-episode');
     if (results.length > 0) {
+      console.log(`  [iTunes] Found ${results.length} tv-episode results with previews`);
       return results;
     }
   }
@@ -1103,6 +1153,7 @@ function findBestMatch(results, tmdbMeta) {
     const trackName = item.trackName || item.collectionName || 'Unknown';
     const itunesYear = item.releaseDate ? item.releaseDate.substring(0, 4) : 'N/A';
     
+    console.log(`  Score ${score.toFixed(2)}: "${trackName}" (${itunesYear})`);
     
     if (score > bestScore) {
       bestScore = score;
@@ -1111,6 +1162,7 @@ function findBestMatch(results, tmdbMeta) {
   }
   
   if (bestScore >= MIN_SCORE_THRESHOLD && bestItem) {
+    console.log(`✓ Best match score: ${bestScore.toFixed(2)}`);
     return { score: bestScore, item: bestItem };
   }
   
@@ -1166,6 +1218,7 @@ async function extractViaPiped(youtubeKey) {
       
       if (!response.ok) {
         const statusText = response.statusText || 'Unknown';
+        console.log(`  [Piped] ✗ ${instance}: HTTP ${response.status} ${statusText} (${duration}ms)`);
         successTracker.recordFailure('piped', instance);
         return null;
       }
@@ -1175,6 +1228,7 @@ async function extractViaPiped(youtubeKey) {
       if (!contentType.includes('application/json')) {
         const text = await response.text();
         const preview = text.substring(0, 150).replace(/\n/g, ' ');
+        console.log(`  [Piped] ✗ ${instance}: non-JSON response (${contentType || 'no content-type'}): ${preview}`);
         successTracker.recordFailure('piped', instance);
         return null;
       }
@@ -1471,6 +1525,7 @@ async function extractViaInvidious(youtubeKey) {
 // ============ YT-DLP EXTRACTOR (with Cloudflare Warp) ============
 
 async function extractViaYtDlp(youtubeKey) {
+  console.log(`  [yt-dlp] Extracting streamable URL for ${youtubeKey}...`);
   
   const startTime = Date.now();
   const controller = new AbortController();
@@ -1495,11 +1550,14 @@ async function extractViaYtDlp(youtubeKey) {
       // HTTP proxy should be available if gluetun is running with HTTPPROXY=on
       if (gluetunStatus !== null) {
         proxyAvailable = true;
+        console.log(`  [yt-dlp] ✓ Gluetun detected, using HTTP proxy at ${gluetunProxy}`);
       } else {
+        console.log(`  [yt-dlp] ⚠ Gluetun not reachable, using direct connection`);
       }
     } catch (proxyError) {
       // Gluetun not available or not configured, will use direct connection
       proxyAvailable = false;
+      console.log(`  [yt-dlp] ⚠ Gluetun check failed: ${proxyError.message}, using direct connection`);
     }
     
     // Use HTTP proxy (port 8888, configured via Cloudflare Warp)
@@ -1535,16 +1593,17 @@ async function extractViaYtDlp(youtubeKey) {
       --get-url \
       "https://www.youtube.com/watch?v=${youtubeKey}"`;
     
+    console.log(`  [yt-dlp] Running extraction (proxy: ${proxyAvailable ? 'enabled' : 'disabled'})...`);
     
-    // Execute yt-dlp with timeout (longer for proxy connections)
+    // Execute yt-dlp with timeout
     const execPromise = execAsync(ytDlpCommand, {
-      timeout: 20000, // 20 seconds - longer for proxy
+      timeout: 12000,
       maxBuffer: 10 * 1024 * 1024 // 10MB buffer
     });
     
     // Race against timeout
     const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('yt-dlp timeout')), 20000) // 20 seconds
+      setTimeout(() => reject(new Error('yt-dlp timeout')), 12000)
     );
     
     let stdout, stderr;
@@ -1564,20 +1623,23 @@ async function extractViaYtDlp(youtubeKey) {
       }
       
       if (proxyAvailable && (errorMsg.includes('401') || errorMsg.includes('Unauthorized') || errorMsg.includes('Tunnel connection failed') || errorMsg.includes('Connection refused'))) {
+        console.log(`  [yt-dlp] ⚠ SOCKS5 proxy failed, trying direct connection (no proxy)...`);
         // Retry without proxy
         const noProxyCommand = ytDlpCommand.replace(`--proxy ${gluetunProxy}`, '');
         try {
           const noProxyExecPromise = execAsync(noProxyCommand, {
-            timeout: 20000, // 20 seconds
+            timeout: 12000,
             maxBuffer: 10 * 1024 * 1024
           });
           const noProxyTimeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('yt-dlp timeout')), 20000) // 20 seconds
+            setTimeout(() => reject(new Error('yt-dlp timeout')), 12000)
           );
           ({ stdout, stderr } = await Promise.race([noProxyExecPromise, noProxyTimeoutPromise]));
+          console.log(`  [yt-dlp] ✓ Direct connection worked!`);
         } catch (noProxyError) {
           // Direct connection also failed, log and continue with original error
           const noProxyErrorMsg = (noProxyError.stderr || noProxyError.message || '').toString();
+          console.log(`  [yt-dlp] ✗ Direct connection also failed: ${noProxyErrorMsg.substring(0, 200)}`);
           // Fall through to original error handling
         }
       }
@@ -1585,6 +1647,7 @@ async function extractViaYtDlp(youtubeKey) {
       // If we still don't have stdout (SOCKS5 didn't work or wasn't tried), handle the error
       if (!stdout) {
         if (raceError.message === 'yt-dlp timeout') {
+          console.log(`  [yt-dlp] ✗ TIMEOUT after ${duration}ms`);
         } else {
           // Show more detailed error information
           const errorMsg = raceError.message || raceError.toString();
@@ -2140,6 +2203,7 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
             });
             clearTimeout(metaTimeout);
             if (!metaResponse.ok) {
+              console.log(`  [Internet Archive] Metadata fetch failed: HTTP ${metaResponse.status} for "${bestMatch.title}"`);
               successTracker.recordFailure('archive', strategy.id);
               continue;
             }
@@ -2147,6 +2211,7 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
             // Check response size to prevent memory issues
             const contentLength = metaResponse.headers.get('content-length');
             if (contentLength && parseInt(contentLength) > MAX_JSON_RESPONSE_SIZE) {
+              console.log(`  [Internet Archive] Metadata too large (${Math.round(parseInt(contentLength) / 1024 / 1024)}MB), skipping`);
               successTracker.recordFailure('archive', strategy.id);
               continue;
             }
@@ -2236,6 +2301,7 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
           }
         } else if (bestMatch) {
           // Match found but score too low (bestScore < 0.75) - rejected to avoid false positives
+          console.log(`  [Internet Archive] ✗ Rejected match: "${bestMatch.title}" (score: ${bestScore.toFixed(2)} < 0.75 threshold)`);
           successTracker.recordFailure('archive', strategy.id);
         } else {
           // No match found at all
@@ -2243,6 +2309,7 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
         }
       } catch (e) {
         clearTimeout(timeout);
+        console.log(`  [Internet Archive] Search error for strategy "${strategy.description}": ${e.message || 'timeout'}`);
         successTracker.recordFailure('archive', strategy.id);
         continue;
       }
@@ -2342,8 +2409,7 @@ async function multiPassSearch(tmdbMeta) {
 }
 
 // Quick URL validation - checks if URL is still accessible
-// Optimized for speed: shorter timeout, accepts 403 for YouTube (they block HEAD but URLs work)
-async function validateUrl(url, timeout = 2000) {
+async function validateUrl(url, timeout = 3000) {
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
@@ -2358,15 +2424,10 @@ async function validateUrl(url, timeout = 2000) {
     
     clearTimeout(timeoutId);
     
-    // Accept 200 (OK), 206 (Partial Content), or 403 (YouTube/googlevideo often blocks HEAD but URL works)
-    // 403 is common for YouTube URLs - they block HEAD requests but streaming works fine
-    // googlevideo.com URLs (from yt-dlp) also return 403 on HEAD but work for streaming
-    const isValid = response.ok || response.status === 206 || 
-                   (response.status === 403 && (url.includes('youtube.com') || url.includes('googlevideo.com')));
-    
-    return isValid;
+    // Accept 200 (OK) or 206 (Partial Content) as valid
+    return response.ok || response.status === 206;
   } catch (error) {
-    // URL is not accessible or timeout
+    // URL is not accessible
     return false;
   }
 }
@@ -2379,15 +2440,8 @@ function getCached(imdbId) {
     const ttlHours = CACHE_TTL[sourceType] || CACHE_TTL.youtube;
     
     if (hoursSinceCheck < ttlHours) {
-      // Cache found and valid
       return cached;
-    } else {
-      // Cache expired - remove it
-      cache.delete(imdbId);
-      logger.cache('miss', `Cache expired for ${imdbId} (${sourceType}, ${hoursSinceCheck.toFixed(1)}h old, TTL: ${ttlHours}h)`);
     }
-  } else {
-    // Not in cache
   }
   return null;
 }
@@ -2415,7 +2469,6 @@ async function getCachedWithValidation(imdbId) {
   
   // For very fresh cache (< 30% of TTL), return immediately and validate in background
   if (agePercent < 30) {
-    
     // Validate in background (non-blocking)
     if (!validationQueue.has(imdbId)) {
       validationQueue.add(imdbId);
@@ -2449,8 +2502,6 @@ async function getCachedWithValidation(imdbId) {
       deleteStmt.run(imdbId);
       return null;
     }
-    
-  } else {
   }
   
   return cached;
@@ -2458,12 +2509,9 @@ async function getCachedWithValidation(imdbId) {
 
 function setCache(imdbId, data) {
   if (!imdbId || !data.preview_url) {
-    console.warn(`[Cache] Skipping cache for ${imdbId}: missing imdbId or preview_url`);
-    return;
+    return; // Skip if missing required data
   }
   
-  // Use try-catch with timeout protection for database writes
-  // If DB is locked or slow, skip write (cache is in-memory anyway)
   // Determine source type from preview URL
   let sourceType = 'youtube'; // default
   if (data.preview_url) {
@@ -2472,18 +2520,15 @@ function setCache(imdbId, data) {
     } else if (data.preview_url.includes('archive.org')) {
       sourceType = 'archive';
     } else if (data.preview_url.includes('googlevideo.com') || 
-               data.preview_url.includes('youtube.com') || 
-               data.preview_url.includes('youtu.be') ||
-               data.preview_url.includes('youtube-nocookie.com')) {
+                data.preview_url.includes('youtube.com') || 
+                data.preview_url.includes('youtu.be') ||
+                data.preview_url.includes('youtube-nocookie.com')) {
       // YouTube URLs from yt-dlp (googlevideo.com), piped, invidious
-      // These are direct stream URLs but still YouTube sources
       sourceType = 'youtube';
     } else {
-      // Default to youtube for any other URL (likely YouTube stream URLs)
-      sourceType = 'youtube';
+      sourceType = 'youtube'; // Default to youtube for any other URL
     }
   } else if (data.source) {
-    // Use source from data if available (explicit source takes precedence)
     sourceType = data.source === 'youtube' ? 'youtube' : data.source;
   }
   
@@ -2496,58 +2541,55 @@ function setCache(imdbId, data) {
   
   // Save to in-memory cache FIRST (instant access)
   cache.set(imdbId, cacheData);
-  // Cache saved (no log - too verbose)
   
-  // Save to database - with error handling to prevent blocking
-  try {
-    const startTime = Date.now();
-    const stmt = db.prepare(`
-      INSERT INTO cache (imdb_id, preview_url, track_id, country, youtube_key, source_type, source, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(imdb_id) DO UPDATE SET
-        preview_url = excluded.preview_url,
-        track_id = excluded.track_id,
-        country = excluded.country,
-        youtube_key = excluded.youtube_key,
-        source_type = excluded.source_type,
-        source = excluded.source,
-        timestamp = excluded.timestamp
-    `);
-    stmt.run(
-      imdbId,
-      cacheData.preview_url || null,
-      cacheData.track_id || null,
-      cacheData.country || null,
-      cacheData.youtube_key || null,
-      sourceType,
-      cacheData.source || null,
-      timestamp
-    );
-    const duration = Date.now() - startTime;
-    if (duration > 50) {
-      console.warn(`[Cache] Slow DB write: ${duration}ms for ${imdbId}`);
+  // Save to database ASYNCHRONOUSLY (non-blocking)
+  // Use setImmediate to defer DB write, making cache saves instant
+  setImmediate(() => {
+    try {
+      const stmt = db.prepare(`
+        INSERT INTO cache (imdb_id, preview_url, track_id, country, youtube_key, source_type, source, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(imdb_id) DO UPDATE SET
+          preview_url = excluded.preview_url,
+          track_id = excluded.track_id,
+          country = excluded.country,
+          youtube_key = excluded.youtube_key,
+          source_type = excluded.source_type,
+          source = excluded.source,
+          timestamp = excluded.timestamp
+      `);
+      stmt.run(
+        imdbId,
+        cacheData.preview_url || null,
+        cacheData.track_id || null,
+        cacheData.country || null,
+        cacheData.youtube_key || null,
+        sourceType,
+        cacheData.source || null,
+        timestamp
+      );
+    } catch (error) {
+      // Silently fail - in-memory cache is what matters for speed
+      if (!error.message.includes('database is locked') && !error.message.includes('SQLITE_BUSY')) {
+        // Only log non-locking errors occasionally
+        if (Math.random() < 0.01) { // Log 1% of errors to avoid spam
+          console.error(`[Cache] Database error for ${imdbId}: ${error.message}`);
+        }
+      }
     }
-    // Always log successful cache saves (not just debug)
-    // DB save complete (no log - too verbose)
-  } catch (error) {
-    // Don't spam logs for database locked errors
-    if (!error.message.includes('database is locked') && !error.message.includes('SQLITE_BUSY')) {
-      console.error(`[Cache] Database error for ${imdbId}: ${error.message}`);
-    }
-    // Continue - in-memory cache still works
-  }
+  });
 }
 
 async function resolvePreview(imdbId, type) {
-  // Check cache with validation (optimized for instant returns)
+  logger.section(`RESOLVING: ${imdbId} (${type})`);
+  
+  // Check cache with validation
   const cached = await getCachedWithValidation(imdbId);
   
   if (cached) {
     if (cached.preview_url) {
       const sourceType = cached.source_type || 'unknown';
-      logger.cache('hit', `${imdbId} → ${sourceType.toUpperCase()}`);
-      console.log(`${colors.dim}${box.bl}${box.h.repeat(68)}${box.br}${colors.reset}\n`);
-      
+      console.log(`Cache hit: returning cached ${sourceType} preview (validated)`);
       return {
         found: true,
         source: cached.source || (sourceType === 'itunes' ? 'itunes' : sourceType === 'archive' ? 'archive' : 'youtube'),
@@ -2557,6 +2599,11 @@ async function resolvePreview(imdbId, type) {
       };
     }
     // If cache exists but has no preview_url, don't use negative cache - always search again
+    if (!cached.preview_url) {
+      console.log('Cache hit: no preview_url found previously, but searching again anyway...');
+    } else {
+      console.log('Cache expired, refreshing...');
+    }
   }
   
   const tmdbMeta = await getTMDBMetadata(imdbId, type);
@@ -2580,6 +2627,12 @@ async function resolvePreview(imdbId, type) {
   // Sort sources by success rate, quality, and content type (highest first)
   const contentType = type === 'series' ? 'series' : 'movie';
   const sortedSources = successTracker.getSortedSources(availableSources, contentType);
+  const sourceRates = sortedSources.map(s => {
+    const rate = successTracker.getSourceSuccessRate(s);
+    const quality = qualityTracker.getAvgQuality(s);
+    return `${s.toUpperCase()} (${(rate * 100).toFixed(0)}%, q:${quality.toFixed(1)})`;
+  }).join(', ');
+  logger.info(`Trying sources (sorted by success rate + quality + content type): ${sourceRates}`);
   
   // PARALLEL SOURCE ATTEMPTS: Try top 3 sources simultaneously
   const PARALLEL_SOURCES = 3;
@@ -2589,10 +2642,10 @@ async function resolvePreview(imdbId, type) {
   // Helper function to attempt a source with timeout and response time tracking
   const attemptSource = async (source) => {
     const startTime = Date.now();
+    logger.source(source, `Attempting extraction...`);
     
     // Get dynamic timeout for this source
-    // yt-dlp needs longer timeout (20s) due to proxy, others can be faster
-    const defaultTimeout = source === 'ytdlp' ? 20000 : 10000;
+    const defaultTimeout = 10000; // 10 seconds default
     const sourceTimeout = sourceResponseTimes.getTimeout(source, defaultTimeout);
     
     try {
@@ -2600,6 +2653,7 @@ async function resolvePreview(imdbId, type) {
       const sourceAttempt = async () => {
         if (source === 'itunes') {
           const itunesResult = await multiPassSearch(tmdbMeta);
+          console.log(`iTunes search result: ${itunesResult.found ? 'FOUND' : 'NOT FOUND'}`);
           
           if (itunesResult.found) {
             const duration = Date.now() - startTime;
@@ -2613,8 +2667,7 @@ async function resolvePreview(imdbId, type) {
               youtube_key: tmdbMeta.youtubeTrailerKey || null,
               source: 'itunes'
             });
-            logger.sourceAttempt('itunes', duration);
-            logger.source('itunes', `Found`, true);
+            console.log(`✓ Found iTunes preview: ${itunesResult.previewUrl}`);
             successTracker.recordSourceSuccess('itunes');
             return { ...itunesResult, source: 'itunes', quality: '480p' };
           } else {
@@ -2625,9 +2678,11 @@ async function resolvePreview(imdbId, type) {
           }
         } else if (source === 'piped') {
           if (!tmdbMeta.youtubeTrailerKey) {
+            console.log(`  Skipping Piped: no YouTube key available`);
             successTracker.recordSourceFailure('piped');
             return null;
           }
+          console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
           const pipedResult = await extractViaPiped(tmdbMeta.youtubeTrailerKey);
           if (pipedResult) {
             const duration = Date.now() - startTime;
@@ -2644,8 +2699,7 @@ async function resolvePreview(imdbId, type) {
               youtube_key: tmdbMeta.youtubeTrailerKey,
               source: 'youtube'
             });
-            logger.sourceAttempt('piped', duration);
-            logger.source('piped', `Found`, true);
+            console.log(`✓ Got URL from Piped`);
             successTracker.recordSourceSuccess('piped');
             return {
               found: true,
@@ -2663,9 +2717,11 @@ async function resolvePreview(imdbId, type) {
           }
         } else if (source === 'ytdlp') {
           if (!tmdbMeta.youtubeTrailerKey) {
+            console.log(`  Skipping yt-dlp: no YouTube key available`);
             successTracker.recordSourceFailure('ytdlp');
             return null;
           }
+          console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
           const ytdlpResult = await extractViaYtDlp(tmdbMeta.youtubeTrailerKey);
           if (ytdlpResult && ytdlpResult.url) {
             const duration = Date.now() - startTime;
@@ -2681,8 +2737,7 @@ async function resolvePreview(imdbId, type) {
               youtube_key: tmdbMeta.youtubeTrailerKey,
               source: 'youtube'
             });
-            logger.sourceAttempt('ytdlp', duration);
-            logger.source('ytdlp', `Found`, true);
+            console.log(`✓ Got URL from yt-dlp`);
             successTracker.recordSourceSuccess('ytdlp');
             return {
               found: true,
@@ -2700,9 +2755,11 @@ async function resolvePreview(imdbId, type) {
           }
         } else if (source === 'invidious') {
           if (!tmdbMeta.youtubeTrailerKey) {
+            console.log(`  Skipping Invidious: no YouTube key available`);
             successTracker.recordSourceFailure('invidious');
             return null;
           }
+          console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
           const invidiousResult = await extractViaInvidious(tmdbMeta.youtubeTrailerKey);
           if (invidiousResult) {
             const duration = Date.now() - startTime;
@@ -2719,8 +2776,7 @@ async function resolvePreview(imdbId, type) {
               youtube_key: tmdbMeta.youtubeTrailerKey,
               source: 'youtube'
             });
-            logger.sourceAttempt('invidious', duration);
-            logger.source('invidious', `Found`, true);
+            console.log(`✓ Got URL from Invidious`);
             successTracker.recordSourceSuccess('invidious');
             return {
               found: true,
@@ -2753,8 +2809,7 @@ async function resolvePreview(imdbId, type) {
               youtube_key: tmdbMeta.youtubeTrailerKey || null,
               source: 'archive'
             });
-            logger.sourceAttempt('archive', duration);
-            logger.source('archive', `Found`, true);
+            console.log(`✓ Got URL from Internet Archive`);
             successTracker.recordSourceSuccess('archive');
             return {
               found: true,
@@ -2800,17 +2855,18 @@ async function resolvePreview(imdbId, type) {
   
   // Try top sources in parallel
   if (topSources.length > 0) {
+    logger.info(`Trying ${topSources.length} sources in parallel: ${topSources.join(', ')}`);
     const parallelResults = await Promise.allSettled(topSources.map(attemptSource));
     
     // Find first successful result
     for (const result of parallelResults) {
       if (result.status === 'fulfilled' && result.value && result.value.found) {
-        logger.success(`Found via ${result.value.source.toUpperCase()}`);
-        console.log(`${colors.dim}${box.bl}${box.h.repeat(68)}${box.br}${colors.reset}\n`);
+        logger.success(`Found via parallel attempt: ${result.value.source}`);
         return result.value;
       }
     }
     
+    logger.info(`Parallel attempts failed, trying ${fallbackSources.length} fallback sources sequentially`);
   }
   
   // Fallback: Try remaining sources sequentially
@@ -2822,32 +2878,16 @@ async function resolvePreview(imdbId, type) {
   }
   
   // Don't cache negative results - always search again on next request
-  logger.warn('No preview found from any source');
-  console.log(`${colors.dim}${box.bl}${box.h.repeat(68)}${box.br}${colors.reset}\n`);
+  console.log('No preview found from iTunes, YouTube, or Internet Archive');
   return { found: false };
 }
-
-// Health check endpoint (for Traefik and Docker)
-app.get('/health', (req, res) => {
-  res.status(200).json({ 
-    status: 'healthy', 
-    service: 'trailerio-backend', 
-    version: '2.0.0',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime()
-  });
-});
 
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'trailerio-backend', version: '2.0.0' });
 });
 
-// Manifest endpoint - must be accessible for Stremio addon
 app.get('/manifest.json', (req, res) => {
-  // Set proper headers for manifest
-  res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
   res.json({
     id: "com.trailer.preview",
     name: "Trailer Preview",
@@ -2867,19 +2907,18 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   const { type, id } = req.params;
   const requestStart = Date.now();
   
-  logger.requestCard(type.toUpperCase(), id, activeRequests);
+  logger.section(`REQUEST: ${type.toUpperCase()} ${id}`);
+  logger.info(`Active requests: ${activeRequests}`);
   
   if (!id.startsWith('tt')) {
     logger.warn(`Skipping non-IMDB ID: ${id}`);
-    console.log(`${colors.dim}${box.bl}${box.h.repeat(68)}${box.br}${colors.reset}\n`);
     return res.json({ streams: [] });
   }
   
   let timeoutFired = false;
   const timeout = setTimeout(() => {
     timeoutFired = true;
-    logger.warn(`Request timeout after ${STREAM_TIMEOUT / 1000}s`);
-    console.log(`${colors.dim}${box.bl}${box.h.repeat(68)}${box.br}${colors.reset}\n`);
+    console.log(`  ⚠️ Request timeout for ${id} after ${STREAM_TIMEOUT / 1000}s`);
     if (!res.headersSent) {
       try {
         res.json({ streams: [] });
@@ -2921,6 +2960,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     
     if (!result) {
       // This shouldn't happen, but handle it just in case
+      console.log(`  ⚠️ No result returned for ${id}`);
       clearTimeout(timeout);
       if (!res.headersSent) {
         res.json({ streams: [] });
@@ -2957,8 +2997,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         console.log(`Using Piped/Invidious URL directly (already proxied, AVPlayer compatible): ${finalUrl.substring(0, 80)}...`);
       }
       
-      logger.success(`Trailer found: ${finalUrl.substring(0, 60)}...`);
-      console.log(`${colors.dim}${box.bl}${box.h.repeat(68)}${box.br}${colors.reset}\n`);
+      logger.success(`Found trailer for ${id}: ${finalUrl.substring(0, 80)}...`);
       console.log(`  [DEBUG] Before res.json() - headersSent: ${res.headersSent}, finished: ${res.finished}`);
       
       if (!res.headersSent) {
@@ -3006,8 +3045,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       }
     }
     
-      logger.warn(`No preview found`);
-      console.log(`${colors.dim}${box.bl}${box.h.repeat(68)}${box.br}${colors.reset}\n`);
+    logger.warn(`No preview found for ${id}`);
     console.log(`  [DEBUG] Before sending empty response - headersSent: ${res.headersSent}`);
     if (!res.headersSent) {
       try {
@@ -3131,18 +3169,16 @@ process.on('unhandledRejection', (reason, promise) => {
 
 // Start server with error handling
 try {
+  console.log('Starting server...');
+  console.log(`Port: ${PORT}`);
+  console.log(`TMDB_API_KEY: ${TMDB_API_KEY ? 'Set' : 'NOT SET'}`);
+  console.log(`Database path: ${dbPath}`);
+  
   app.listen(PORT, '0.0.0.0', () => {
-    // Beautiful startup dashboard
-    console.log(`\n${colors.bright}${colors.cyan}${box.tl}${box.h.repeat(70)}${box.tr}${colors.reset}`);
-    console.log(`${colors.bright}${colors.cyan}${box.v}${colors.reset} ${colors.bright}${colors.white}🚀 TRAILERIO BACKEND${colors.reset} ${' '.repeat(48)} ${colors.bright}${colors.cyan}${box.v}${colors.reset}`);
-    console.log(`${colors.bright}${colors.cyan}${box.l}${box.h.repeat(70)}${box.r}${colors.reset}`);
-    console.log(`${colors.bright}${colors.cyan}${box.v}${colors.reset} ${colors.green}✓${colors.reset} Server running on ${colors.bright}port ${PORT}${colors.reset} ${' '.repeat(40)} ${colors.bright}${colors.cyan}${box.v}${colors.reset}`);
-    console.log(`${colors.bright}${colors.cyan}${box.v}${colors.reset} ${colors.blue}ℹ${colors.reset} Listening on ${colors.dim}0.0.0.0:${PORT}${colors.reset} ${' '.repeat(38)} ${colors.bright}${colors.cyan}${box.v}${colors.reset}`);
-    console.log(`${colors.bright}${colors.cyan}${box.v}${colors.reset} ${colors.magenta}💾${colors.reset} Database: ${colors.dim}${dbPath}${colors.reset} ${' '.repeat(30)} ${colors.bright}${colors.cyan}${box.v}${colors.reset}`);
-    console.log(`${colors.bright}${colors.cyan}${box.v}${colors.reset} ${TMDB_API_KEY ? `${colors.green}✓` : `${colors.red}✗`}${colors.reset} TMDB API Key ${TMDB_API_KEY ? colors.green + 'Set' : colors.red + 'NOT SET'}${colors.reset} ${' '.repeat(42)} ${colors.bright}${colors.cyan}${box.v}${colors.reset}`);
-    console.log(`${colors.bright}${colors.cyan}${box.v}${colors.reset} ${colors.yellow}📊${colors.reset} Cache: ${colors.bright}${cache.size}${colors.reset} items loaded ${' '.repeat(40)} ${colors.bright}${colors.cyan}${box.v}${colors.reset}`);
-    console.log(`${colors.bright}${colors.cyan}${box.bl}${box.h.repeat(70)}${box.br}${colors.reset}\n`);
-    
+    logger.section('SERVER STARTED');
+    logger.success(`Server running on port ${PORT}`);
+    logger.info(`Listening on 0.0.0.0:${PORT}`);
+    logger.info(`Database: ${dbPath}`);
     if (!TMDB_API_KEY) {
       logger.warn('TMDB_API_KEY not set. Please set it as an environment variable.');
     }
