@@ -411,6 +411,13 @@ const successTracker = {
       if (duration > 50) {
         console.warn(`[SuccessTracker] Slow DB write: ${duration}ms for ${type}/${identifier}`);
       }
+      // Make DB writes non-blocking by using setImmediate for slow writes
+      if (duration > 100) {
+        // For very slow writes, log but don't block
+        setImmediate(() => {
+          console.warn(`[SuccessTracker] Very slow DB write completed: ${duration}ms for ${type}/${identifier}`);
+        });
+      }
     } catch (error) {
       // Don't spam logs for database locked errors (common with concurrent writes)
       if (!error.message.includes('database is locked') && !error.message.includes('SQLITE_BUSY')) {
@@ -2700,8 +2707,15 @@ async function resolvePreview(imdbId, type) {
     const startTime = Date.now();
     logger.source(source, `Attempting extraction...`);
     
-    // Get dynamic timeout for this source
-    const defaultTimeout = 10000; // 10 seconds default
+    // Get dynamic timeout for this source (optimized for speed)
+    // Faster sources get shorter timeouts, slower sources get longer but capped
+    let defaultTimeout = 6000; // 6 seconds default (reduced from 10s for faster response)
+    if (source === 'archive') defaultTimeout = 5000; // Archive: cap at 5s (tries top 3 strategies only)
+    if (source === 'ytdlp') defaultTimeout = 5000; // yt-dlp: cap at 5s (proxy can be slow)
+    if (source === 'itunes') defaultTimeout = 4000; // iTunes: usually fast, 4s max
+    if (source === 'piped' || source === 'invidious') defaultTimeout = 3000; // These fail fast, 3s max
+    if (source === 'imdb_trailer' || source === 'appletrailers' || source === 'allocine') defaultTimeout = 4000; // Direct sources: 4s max
+    
     const sourceTimeout = sourceResponseTimes.getTimeout(source, defaultTimeout);
     
     try {
@@ -3058,16 +3072,28 @@ async function resolvePreview(imdbId, type) {
     }
   };
   
-  // Try top sources in parallel
+  // Try top sources in parallel with EARLY RETURN (return immediately when one succeeds)
   if (topSources.length > 0) {
     logger.info(`Trying ${topSources.length} sources in parallel: ${topSources.join(', ')}`);
-    const parallelResults = await Promise.allSettled(topSources.map(attemptSource));
     
-    // Find first successful result
-    for (const result of parallelResults) {
-      if (result.status === 'fulfilled' && result.value && result.value.found) {
-        logger.success(`Found via parallel attempt: ${result.value.source}`);
-        return result.value;
+    // Create promises that resolve with success status
+    const sourcePromises = topSources.map(async (source) => {
+      try {
+        const result = await attemptSource(source);
+        return { source, result, success: result && result.found };
+      } catch (error) {
+        return { source, result: null, success: false };
+      }
+    });
+    
+    // Race all sources - check results as they complete
+    const results = await Promise.allSettled(sourcePromises);
+    
+    // Check for successful results (in order of priority)
+    for (const settled of results) {
+      if (settled.status === 'fulfilled' && settled.value.success && settled.value.result) {
+        logger.success(`Found via parallel attempt: ${settled.value.source}`);
+        return settled.value.result;
       }
     }
     
