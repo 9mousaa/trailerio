@@ -2004,30 +2004,65 @@ async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
   // Get available proxies sorted by success rate
   const availableProxies = proxyTracker.getAvailableProxies();
   
-  // Check which proxies are actually available (health check)
+  // Check which proxies are actually available (health check with better error handling)
   const proxyChecks = await Promise.allSettled(
     availableProxies.map(async (instance) => {
       try {
-        const status = await fetch(instance.status, {
-          signal: AbortSignal.timeout(1000),
-          method: 'GET'
-        }).catch(() => null);
-        return status !== null ? instance : null;
-      } catch {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 2000); // 2 second timeout
+        
+        try {
+          const response = await fetch(instance.status, {
+            signal: controller.signal,
+            method: 'GET',
+            headers: { 'Accept': 'application/json' }
+          });
+          clearTimeout(timeout);
+          
+          if (response && response.ok) {
+            console.log(`  [yt-dlp] ✓ Proxy ${instance.name} is healthy`);
+            return instance;
+          } else {
+            console.log(`  [yt-dlp] ⚠ Proxy ${instance.name} health check returned ${response?.status || 'no response'}`);
+            return null;
+          }
+        } catch (error) {
+          clearTimeout(timeout);
+          // Log the error for debugging
+          if (error.name !== 'AbortError') {
+            console.log(`  [yt-dlp] ⚠ Proxy ${instance.name} health check failed: ${error.message}`);
+          }
+          return null;
+        }
+      } catch (error) {
+        console.log(`  [yt-dlp] ⚠ Proxy ${instance.name} health check error: ${error.message}`);
         return null;
       }
     })
   );
   
   const workingProxies = proxyChecks
-    .map((result, index) => result.status === 'fulfilled' && result.value ? result.value : null)
+    .map((result, index) => {
+      if (result.status === 'fulfilled' && result.value) {
+        return result.value;
+      } else if (result.status === 'rejected') {
+        console.log(`  [yt-dlp] ⚠ Proxy check rejected: ${result.reason?.message || 'unknown error'}`);
+      }
+      return null;
+    })
     .filter(p => p !== null);
   
-  // Fallback to direct if no proxies available
-  if (workingProxies.length === 0) {
-    console.log(`  [yt-dlp] ⚠ No Cloudflare Warp proxies available, will try direct (may get blocked)`);
+  // If health check failed but we have proxy instances configured, try them anyway
+  // Health check might fail due to network issues, but proxies might still work
+  const proxiesToTry = workingProxies.length > 0 ? workingProxies : availableProxies;
+  
+  if (workingProxies.length === 0 && availableProxies.length > 0) {
+    console.log(`  [yt-dlp] ⚠ Health check failed for all proxies, but will try them anyway (${availableProxies.length} configured)`);
+    console.log(`  [yt-dlp] ⚠ Proxy instances: ${availableProxies.map(p => `${p.name} (${p.proxy})`).join(', ')}`);
+  } else if (workingProxies.length > 0) {
+    console.log(`  [yt-dlp] ✓ Found ${workingProxies.length}/${availableProxies.length} Cloudflare Warp proxy(ies) available: ${workingProxies.map(p => p.name).join(', ')}`);
   } else {
-    console.log(`  [yt-dlp] ✓ Found ${workingProxies.length} Cloudflare Warp proxy(ies) available`);
+    console.log(`  [yt-dlp] ⚠ No Cloudflare Warp proxies configured, will try direct (may get blocked)`);
   }
   
   // Optimized yt-dlp command (use proxy if available)
@@ -2131,7 +2166,8 @@ async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
   };
   
   // Strategy 1: Try each available proxy in order (sorted by success rate)
-  for (const proxyInstance of workingProxies) {
+  // Use proxiesToTry which includes all configured proxies even if health check failed
+  for (const proxyInstance of proxiesToTry) {
     const result = await tryExtraction(proxyInstance, `proxy (${proxyInstance.name})`);
     if (result) {
       successTracker.recordSuccess('ytdlp', 'extraction');
@@ -2142,7 +2178,11 @@ async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
   }
   
   // Strategy 2: If all proxies failed, try direct connection as last resort
-  console.log(`  [yt-dlp] All proxies failed, trying direct connection...`);
+  if (proxiesToTry.length > 0) {
+    console.log(`  [yt-dlp] All ${proxiesToTry.length} proxy(ies) failed, trying direct connection...`);
+  } else {
+    console.log(`  [yt-dlp] No proxies configured, trying direct connection...`);
+  }
   const result = await tryExtraction(null, 'direct');
   if (result) {
     successTracker.recordSuccess('ytdlp', 'extraction');
