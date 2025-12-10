@@ -1888,11 +1888,26 @@ async function extractViaYtDlp(youtubeKey) {
       
       // If we get any response (even error), gluetun is running
       // HTTP proxy should be available if gluetun is running with HTTPPROXY=on
+      // Note: gluetun may be "unhealthy" but still functional for proxying
       if (gluetunStatus !== null) {
         proxyAvailable = true;
         console.log(`  [yt-dlp] ✓ Gluetun detected, using HTTP proxy at ${gluetunProxy}`);
       } else {
-        console.log(`  [yt-dlp] ⚠ Gluetun not reachable, using direct connection`);
+        // Try to check if proxy port is accessible directly
+        try {
+          const proxyTest = await fetch('http://gluetun:8888', {
+            method: 'CONNECT',
+            signal: AbortSignal.timeout(2000)
+          }).catch(() => null);
+          if (proxyTest !== null) {
+            proxyAvailable = true;
+            console.log(`  [yt-dlp] ✓ Gluetun proxy port accessible, using HTTP proxy at ${gluetunProxy}`);
+          } else {
+            console.log(`  [yt-dlp] ⚠ Gluetun not reachable, using direct connection`);
+          }
+        } catch (e) {
+          console.log(`  [yt-dlp] ⚠ Gluetun not reachable, using direct connection`);
+        }
       }
     } catch (proxyError) {
       // Gluetun not available or not configured, will use direct connection
@@ -1933,16 +1948,18 @@ async function extractViaYtDlp(youtubeKey) {
       --extractor-args "youtube:player_client=android,web" \
       "https://www.youtube.com/watch?v=${youtubeKey}"`;
     
+    // Simplified format selection for faster extraction
+    // Try simpler formats first to avoid timeouts
     const ytDlpCommand = `yt-dlp ${useProxy} \
       --no-download \
       --no-warnings \
       --quiet \
       --no-playlist \
-      --format "best[height<=1080][ext=mp4]/best[height<=1080]/bestvideo[height<=1080]+bestaudio/best" \
+      --format "best[height<=720]/best[height<=480]/best" \
       --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-      --sleep-interval 2 \
-      --socket-timeout 10 \
-      --extractor-args "youtube:player_client=android,web" \
+      --sleep-interval 1 \
+      --socket-timeout 8 \
+      --extractor-args "youtube:player_client=android" \
       --get-url \
       "https://www.youtube.com/watch?v=${youtubeKey}"`;
     
