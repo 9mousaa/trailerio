@@ -25,9 +25,11 @@ services:
       - HTTP_PROXY=on
       - HTTP_PROXY_PORT=8000
       - HTTP_PROXY_LOG=on
-      # Also enable SOCKS5 proxy (might work better than HTTP proxy)
-      - SOCKS5_SERVER=on
-      - SOCKS5_SERVER_PORT=1080
+      # Enable SOCKS5 proxy (for yt-dlp)
+      # Note: SOCKS5 requires VPN to be connected first
+      - SOCKS5=on
+      - SOCKS5_LISTENING_ADDRESS=0.0.0.0
+      - SOCKS5_PORT=1080
     restart: unless-stopped  # Restart if it crashes (but backend works without it)
     networks:
       - trailerio-internal
