@@ -118,6 +118,7 @@ fi
 echo "✅ Keys extracted successfully"
 echo "   Private: ${PRIVATE_KEY:0:20}... (${#PRIVATE_KEY} chars)"
 echo "   Public: ${PUBLIC_KEY:0:20}... (${#PUBLIC_KEY} chars)"
+echo "   Addresses: ${ADDRESSES}"
 echo "   Endpoint: ${ENDPOINT}"
 
 # Resolve endpoint to IPv4
