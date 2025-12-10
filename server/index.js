@@ -1902,9 +1902,11 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
       const rate = successTracker.getSuccessRate('archive', s.id);
       return `${s.description} (${(rate * 100).toFixed(0)}%)`;
     }).join(', ');
-    console.log(`  [Internet Archive] Trying ${sortedStrategies.length} strategies (sorted by success rate - top 3: ${strategyRates})...`);
+    // Limit to top 3 strategies for speed (instead of trying all 7)
+    const strategiesToTry = sortedStrategies.slice(0, 3);
+    console.log(`  [Internet Archive] Trying ${strategiesToTry.length} strategies (top 3 by success rate: ${strategyRates})...`);
     
-    for (const strategy of sortedStrategies) {
+    for (const strategy of strategiesToTry) {
       // Use AdvancedSearch API (the correct API for Internet Archive)
       // Optimized field list: only request what we need (30% faster responses)
       // Added external-identifier to get IMDb IDs for better matching
