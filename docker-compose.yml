@@ -65,6 +65,13 @@ services:
     networks:
       - trailerio-internal
       - plaio_default
+    # Health check to ensure backend is ready before routing traffic
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s  # Give backend 10s to start before first check
     # Don't depend on gluetun - backend works fine without it
     # If gluetun is running, yt-dlp will use it via GLUETUN_HTTP_PROXY env var
 
@@ -76,7 +83,8 @@ services:
     environment:
       - NODE_ENV=production
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy  # Wait for backend to be healthy before starting
     labels:
       # Traefik configuration
       - "traefik.enable=true"

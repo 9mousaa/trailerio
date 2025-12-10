@@ -2827,12 +2827,27 @@ async function resolvePreview(imdbId, type) {
   return { found: false };
 }
 
+// Health check endpoint (for Traefik and Docker)
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'healthy', 
+    service: 'trailerio-backend', 
+    version: '2.0.0',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
+
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'trailerio-backend', version: '2.0.0' });
 });
 
+// Manifest endpoint - must be accessible for Stremio addon
 app.get('/manifest.json', (req, res) => {
+  // Set proper headers for manifest
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
   res.json({
     id: "com.trailer.preview",
     name: "Trailer Preview",
