@@ -2097,13 +2097,18 @@ async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
       
       return null;
     } catch (error) {
+      // Record failure for this proxy
+      if (proxyInstance) {
+        proxyTracker.recordFailure(proxyInstance.name);
+      }
+      
       const duration = Date.now() - startTime;
       const errorMsg = (error.stderr || error.message || '').toString();
       
       // Bot detection - YouTube is blocking
       if (errorMsg.includes('Sign in to confirm') || errorMsg.includes('not a bot') || errorMsg.includes('bot')) {
         console.log(`  [yt-dlp] ⚠ Bot detection triggered (YouTube blocking): ${videoUrl}`);
-        console.log(`  [yt-dlp] Try: Use different proxy or add cookies`);
+        console.log(`  [yt-dlp] Will try next proxy in rotation`);
         return null;
       }
       
@@ -2125,23 +2130,26 @@ async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
     }
   };
   
-  // Strategy 1: ALWAYS try with proxy first (to avoid YouTube blocking)
-  if (proxyAvailable) {
-    let result = await tryExtraction(true, 'proxy');
+  // Strategy 1: Try each available proxy in order (sorted by success rate)
+  for (const proxyInstance of workingProxies) {
+    const result = await tryExtraction(proxyInstance, `proxy (${proxyInstance.name})`);
     if (result) {
       successTracker.recordSuccess('ytdlp', 'extraction');
       return { url: result, quality: 'best', isDash: false };
     }
+    // If this proxy failed, try next one
+    console.log(`  [yt-dlp] Proxy ${proxyInstance.name} failed, trying next...`);
   }
   
-  // Strategy 2: If proxy failed or unavailable, try direct (fallback)
-  let result = await tryExtraction(false, 'direct');
+  // Strategy 2: If all proxies failed, try direct connection as last resort
+  console.log(`  [yt-dlp] All proxies failed, trying direct connection...`);
+  const result = await tryExtraction(null, 'direct');
   if (result) {
     successTracker.recordSuccess('ytdlp', 'extraction');
     return { url: result, quality: 'best', isDash: false };
   }
   
-  // Both attempts failed
+  // All attempts failed
   const duration = Date.now() - startTime;
   console.log(`  [yt-dlp] ✗ All extraction attempts failed after ${duration}ms`);
   successTracker.recordFailure('ytdlp', 'extraction');
