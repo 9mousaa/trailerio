@@ -1655,85 +1655,15 @@ async function extractViaInvidious(youtubeKey) {
 // These functions search each site and return the actual trailer page URL
 
 async function resolveRottenTomatoesSlug(tmdbMeta, imdbId) {
-  // RottenTomatoes uses slugs like "interstellar" or "interstellar_2014"
-  // Try to find the movie via search API or scraping
-  try {
-    const searchUrl = `https://www.rottentomatoes.com/api/private/v1.0/search?q=${encodeURIComponent(tmdbMeta.title)}`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
-    
-    const response = await fetch(searchUrl, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
-    });
-    clearTimeout(timeout);
-    
-    if (response.ok) {
-      const data = await response.json();
-      // Look for movies in results
-      const movies = data.movies || [];
-      for (const movie of movies) {
-        const movieYear = movie.year ? parseInt(movie.year) : null;
-        const titleMatch = normalizeTitle(movie.name || '') === normalizeTitle(tmdbMeta.title);
-        const yearMatch = !tmdbMeta.year || !movieYear || Math.abs(movieYear - tmdbMeta.year) <= 1;
-        
-        if (titleMatch && yearMatch && movie.url) {
-          // Extract slug from URL like "/m/interstellar" or "/m/interstellar_2014"
-          return `https://www.rottentomatoes.com${movie.url}`;
-        }
-      }
-    }
-  } catch (error) {
-    // Fallback: try constructing slug from title
-  }
-  
-  // Fallback: construct slug from title (may not work, but worth trying)
-  const slug = tmdbMeta.title.toLowerCase()
-    .replace(/[^a-z0-9\s]/g, '')
-    .replace(/\s+/g, '_')
-    .replace(/_+/g, '_');
-  return `https://www.rottentomatoes.com/m/${slug}`;
+  // RottenTomatoes: yt-dlp does NOT have a dedicated extractor
+  // These sites typically embed YouTube videos anyway
+  // DISABLED - not supported by yt-dlp
+  return null;
 }
 
 async function resolveMetacriticSlug(tmdbMeta, imdbId) {
-  // Metacritic uses slugs like "interstellar" or "interstellar-2014"
-  try {
-    const searchUrl = `https://www.metacritic.com/search/movie/${encodeURIComponent(tmdbMeta.title)}/results`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
-    
-    const response = await fetch(searchUrl, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
-    });
-    clearTimeout(timeout);
-    
-    if (response.ok) {
-      const html = await response.text();
-      // Look for movie links in search results
-      // Metacritic movie URLs: /movie/interstellar or /movie/interstellar-2014
-      const movieLinkRegex = /href="(\/movie\/[^"]+)"/g;
-      const matches = [...html.matchAll(movieLinkRegex)];
-      
-      for (const match of matches) {
-        const movieUrl = match[1];
-        // Try to match title in URL
-        const urlSlug = movieUrl.toLowerCase();
-        const titleSlug = tmdbMeta.title.toLowerCase().replace(/[^a-z0-9]/g, '-');
-        if (urlSlug.includes(titleSlug)) {
-          return `https://www.metacritic.com${movieUrl}`;
-        }
-      }
-    }
-  } catch (error) {
-    // Fallback: try constructing slug from title
-  }
-  
-  // Fallback: construct slug from title
+  // Metacritic: yt-dlp may not have a dedicated extractor
+  // Try constructing URL - if yt-dlp doesn't support it, it will fail gracefully
   const slug = tmdbMeta.title.toLowerCase()
     .replace(/[^a-z0-9\s]/g, '')
     .replace(/\s+/g, '-')
@@ -1742,131 +1672,34 @@ async function resolveMetacriticSlug(tmdbMeta, imdbId) {
 }
 
 async function resolveAppleTrailersUrl(tmdbMeta, imdbId) {
-  // Apple Trailers structure: https://trailers.apple.com/trailers/{studio}/{title}/
-  // We need to search and find the actual trailer page
-  try {
-    const searchUrl = `https://trailers.apple.com/trailers/home/scripts/quickfind.php?q=${encodeURIComponent(tmdbMeta.title)}`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
-    
-    const response = await fetch(searchUrl, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
-    });
-    clearTimeout(timeout);
-    
-    if (response.ok) {
-      const data = await response.json();
-      // Look for matching movie in results
-      if (Array.isArray(data) && data.length > 0) {
-        for (const item of data) {
-          const titleMatch = normalizeTitle(item.title || '') === normalizeTitle(tmdbMeta.title);
-          if (titleMatch && item.location) {
-            return `https://trailers.apple.com${item.location}`;
-          }
-        }
-        // If no exact match, return first result
-        if (data[0] && data[0].location) {
-          return `https://trailers.apple.com${data[0].location}`;
-        }
-      }
-    }
-  } catch (error) {
-    // Fallback: try search page (yt-dlp might handle it)
-  }
-  
-  // Fallback: return search page (yt-dlp may be able to extract from it)
-  return `https://trailers.apple.com/trailers/search/?q=${encodeURIComponent(tmdbMeta.title)}`;
+  // Apple Trailers: yt-dlp supports appletrailers extractor
+  // Use yt-dlp's search: appletrailers:search:"title"
+  // This is more reliable than trying to construct URLs manually
+  const searchQuery = `appletrailers:search:"${tmdbMeta.title}"`;
+  return searchQuery; // Return search query for yt-dlp to handle
 }
 
 async function resolveAllocineUrl(tmdbMeta, imdbId) {
-  // Allocine structure: https://www.allocine.fr/film/fichefilm_gen_cfilm={id}.html
-  // We need to search and find the actual movie page
-  try {
-    const searchUrl = `https://www.allocine.fr/rechercher/?q=${encodeURIComponent(tmdbMeta.title)}`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
-    
-    const response = await fetch(searchUrl, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
-    });
-    clearTimeout(timeout);
-    
-    if (response.ok) {
-      const html = await response.text();
-      // Look for movie links in search results
-      // Allocine movie URLs: /film/fichefilm_gen_cfilm={id}.html
-      const movieLinkRegex = /href="(\/film\/fichefilm_gen_cfilm=\d+\.html)"/g;
-      const matches = [...html.matchAll(movieLinkRegex)];
-      
-      if (matches.length > 0) {
-        // Return first match (could be improved with better matching)
-        return `https://www.allocine.fr${matches[0][1]}`;
-      }
-    }
-  } catch (error) {
-    // Fallback: return search page
-  }
-  
-  // Fallback: return search page (yt-dlp may be able to extract from it)
-  return `https://www.allocine.fr/rechercher/?q=${encodeURIComponent(tmdbMeta.title)}`;
+  // Allocine: yt-dlp has allocine extractor but it's unreliable
+  // DISABLED - not reliable enough
+  return null;
 }
 
 async function resolveMoviepilotUrl(tmdbMeta, imdbId) {
-  // Moviepilot structure: https://www.moviepilot.de/movies/{slug}
-  // We need to search and find the actual movie page
-  try {
-    const searchUrl = `https://www.moviepilot.de/suche?q=${encodeURIComponent(tmdbMeta.title)}`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
-    
-    const response = await fetch(searchUrl, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
-    });
-    clearTimeout(timeout);
-    
-    if (response.ok) {
-      const html = await response.text();
-      // Look for movie links in search results
-      // Moviepilot movie URLs: /movies/{slug}
-      const movieLinkRegex = /href="(\/movies\/[^"]+)"/g;
-      const matches = [...html.matchAll(movieLinkRegex)];
-      
-      if (matches.length > 0) {
-        // Return first match (could be improved with better matching)
-        return `https://www.moviepilot.de${matches[0][1]}`;
-      }
-    }
-  } catch (error) {
-    // Fallback: try constructing slug from title
-  }
-  
-  // Fallback: construct slug from title
-  const slug = tmdbMeta.title.toLowerCase()
-    .replace(/[^a-z0-9\s]/g, '')
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-');
-  return `https://www.moviepilot.de/movies/${slug}`;
+  // Moviepilot: yt-dlp does NOT have a dedicated extractor
+  // DISABLED - not supported by yt-dlp
+  return null;
 }
 
 async function resolveImdbTrailerUrl(tmdbMeta, imdbId) {
-  // IMDb structure: https://www.imdb.com/title/{imdbId}/videogallery
-  // We have the IMDb ID, so we can construct the URL directly
-  // But we should verify it exists and has trailers
+  // IMDb: yt-dlp supports imdb extractor
+  // Use the title page directly - yt-dlp can extract videos from it
   if (!imdbId || !imdbId.startsWith('tt')) {
     return null;
   }
   
-  // IMDb videogallery page - yt-dlp can extract from this
-  return `https://www.imdb.com/title/${imdbId}/videogallery`;
+  // IMDb title page - yt-dlp can extract videos/trailers from this
+  return `https://www.imdb.com/title/${imdbId}`;
 }
 
 async function resolveIvaUrl(tmdbMeta, imdbId) {
@@ -3115,18 +2948,13 @@ async function resolvePreview(imdbId, type) {
   
   // These work with title/year (good fallbacks for when IMDb doesn't have trailers)
   if (tmdbMeta.title) {
-    // Apple Trailers - high quality, good for cinema releases
+    // Apple Trailers - high quality, good for cinema releases (yt-dlp supports appletrailers)
     if (type === 'movie') {
       availableSources.push('appletrailers');
     }
-    // RottenTomatoes - often embeds trailers
-    availableSources.push('rottentomatoes');
-    // Metacritic - similar to RT, embeds trailers
-    availableSources.push('metacritic');
-    // Allocine - French/international coverage, good for European films
-    availableSources.push('allocine');
-    // Moviepilot - targeted at trailers
-    availableSources.push('moviepilot');
+    // RottenTomatoes, Metacritic, Allocine, Moviepilot - DISABLED
+    // These sites don't have reliable yt-dlp extractors or embed YouTube anyway
+    // We already have YouTube extraction, so these are redundant
   }
   
   availableSources.push('archive');
@@ -3461,10 +3289,13 @@ async function resolvePreview(imdbId, type) {
             return null;
           }
         } else if (source === 'rottentomatoes') {
-          // RottenTomatoes - search and find actual movie page
+          // RottenTomatoes - DISABLED (not supported by yt-dlp)
           const rtUrl = await resolveRottenTomatoesSlug(tmdbMeta, imdbId);
-          console.log(`  [RottenTomatoes] Resolved URL: ${rtUrl}`);
-          const rtResult = await extractViaYtDlpGeneric(rtUrl, 'RottenTomatoes');
+          if (!rtUrl) {
+            console.log(`  Skipping RottenTomatoes: not supported`);
+            successTracker.recordSourceFailure('rottentomatoes');
+            return null;
+          }
           if (rtResult && rtResult.url) {
             const duration = Date.now() - startTime;
             sourceResponseTimes.recordTime('ytdlp', duration);
@@ -3496,10 +3327,13 @@ async function resolvePreview(imdbId, type) {
             return null;
           }
         } else if (source === 'metacritic') {
-          // Metacritic - search and find actual movie page
+          // Metacritic - DISABLED (not supported by yt-dlp)
           const mcUrl = await resolveMetacriticSlug(tmdbMeta, imdbId);
-          console.log(`  [Metacritic] Resolved URL: ${mcUrl}`);
-          const mcResult = await extractViaYtDlpGeneric(mcUrl, 'Metacritic');
+          if (!mcUrl) {
+            console.log(`  Skipping Metacritic: not supported`);
+            successTracker.recordSourceFailure('metacritic');
+            return null;
+          }
           if (mcResult && mcResult.url) {
             const duration = Date.now() - startTime;
             sourceResponseTimes.recordTime('ytdlp', duration);
@@ -3531,10 +3365,13 @@ async function resolvePreview(imdbId, type) {
             return null;
           }
         } else if (source === 'moviepilot') {
-          // Moviepilot - search and find actual movie page
+          // Moviepilot - DISABLED (not supported by yt-dlp)
           const mpUrl = await resolveMoviepilotUrl(tmdbMeta, imdbId);
-          console.log(`  [Moviepilot] Resolved URL: ${mpUrl}`);
-          const mpResult = await extractViaYtDlpGeneric(mpUrl, 'Moviepilot');
+          if (!mpUrl) {
+            console.log(`  Skipping Moviepilot: not supported`);
+            successTracker.recordSourceFailure('moviepilot');
+            return null;
+          }
           if (mpResult && mpResult.url) {
             const duration = Date.now() - startTime;
             sourceResponseTimes.recordTime('ytdlp', duration);
@@ -3566,10 +3403,13 @@ async function resolvePreview(imdbId, type) {
             return null;
           }
         } else if (source === 'allocine') {
-          // Allocine - search and find actual movie/trailer page
+          // Allocine - DISABLED (not reliable)
           const allocineUrl = await resolveAllocineUrl(tmdbMeta, imdbId);
-          console.log(`  [Allocine] Resolved URL: ${allocineUrl}`);
-          const allocineResult = await extractViaYtDlpGeneric(allocineUrl, 'Allocine');
+          if (!allocineUrl) {
+            console.log(`  Skipping Allocine: not supported`);
+            successTracker.recordSourceFailure('allocine');
+            return null;
+          }
           if (allocineResult && allocineResult.url) {
             const duration = Date.now() - startTime;
             sourceResponseTimes.recordTime('ytdlp', duration);
