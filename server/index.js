@@ -610,29 +610,35 @@ async function warmCache() {
     
     console.log(`[Cache Warming] Found ${popularItems.length} popular items to cache`);
     
-    // Cache items sequentially to avoid overwhelming the system
+    // Cache items in parallel batches (faster than sequential)
+    const BATCH_SIZE = 5;
     let cached = 0;
     let skipped = 0;
     
-    for (const item of popularItems) {
-      // Check if already cached
-      const existing = getCached(item.imdbId);
-      if (existing && existing.preview_url) {
-        skipped++;
-        continue;
-      }
+    for (let i = 0; i < popularItems.length; i += BATCH_SIZE) {
+      const batch = popularItems.slice(i, i + BATCH_SIZE);
       
-      try {
-        // Resolve preview (this will cache it)
-        // Convert 'series' to 'series' (already correct) or 'movie' to 'movie'
-        const resolveType = item.type === 'series' ? 'series' : 'movie';
-        await resolvePreview(item.imdbId, resolveType);
-        cached++;
+      await Promise.allSettled(batch.map(async (item) => {
+        // Check if already cached
+        const existing = getCached(item.imdbId);
+        if (existing && existing.preview_url) {
+          skipped++;
+          return;
+        }
         
-        // Small delay to avoid rate limiting
-        await new Promise(resolve => setTimeout(resolve, 500));
-      } catch (error) {
-        console.log(`[Cache Warming] Failed to cache ${item.imdbId}: ${error.message}`);
+        try {
+          // Resolve preview (this will cache it)
+          const resolveType = item.type === 'series' ? 'series' : 'movie';
+          await resolvePreview(item.imdbId, resolveType);
+          cached++;
+        } catch (error) {
+          console.log(`[Cache Warming] Failed to cache ${item.imdbId}: ${error.message}`);
+        }
+      }));
+      
+      // Small delay between batches to avoid overwhelming the system
+      if (i + BATCH_SIZE < popularItems.length) {
+        await new Promise(resolve => setTimeout(resolve, 200));
       }
     }
     
@@ -2404,7 +2410,8 @@ async function multiPassSearch(tmdbMeta) {
 }
 
 // Quick URL validation - checks if URL is still accessible
-async function validateUrl(url, timeout = 3000) {
+// Optimized for speed: shorter timeout, accepts 403 for YouTube (they block HEAD but URLs work)
+async function validateUrl(url, timeout = 2000) {
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
@@ -2419,10 +2426,14 @@ async function validateUrl(url, timeout = 3000) {
     
     clearTimeout(timeoutId);
     
-    // Accept 200 (OK) or 206 (Partial Content) as valid
-    return response.ok || response.status === 206;
+    // Accept 200 (OK), 206 (Partial Content), or 403 (YouTube often blocks HEAD but URL works)
+    // 403 is common for YouTube URLs - they block HEAD requests but streaming works fine
+    const isValid = response.ok || response.status === 206 || 
+                   (response.status === 403 && url.includes('youtube.com'));
+    
+    return isValid;
   } catch (error) {
-    // URL is not accessible
+    // URL is not accessible or timeout
     return false;
   }
 }
@@ -2441,33 +2452,70 @@ function getCached(imdbId) {
   return null;
 }
 
+// Background validation queue (non-blocking)
+const validationQueue = new Set();
+
 async function getCachedWithValidation(imdbId) {
   const cached = getCached(imdbId);
   if (!cached || !cached.preview_url) {
     return cached;
   }
   
-  // For YouTube URLs, always validate (they expire quickly)
-  // For other sources, only validate if cache is getting old
   const hoursSinceCheck = (Date.now() - cached.timestamp) / (1000 * 60 * 60);
   const sourceType = cached.source_type || 'youtube';
   const ttlHours = CACHE_TTL[sourceType] || CACHE_TTL.youtube;
-  const shouldValidate = sourceType === 'youtube' || hoursSinceCheck > (ttlHours * 0.8); // Validate if 80% through TTL
+  const agePercent = (hoursSinceCheck / ttlHours) * 100;
+  
+  // INSTANT RETURN: If cache is fresh (< 10% of TTL), return immediately without validation
+  // This makes cached results feel instant (< 1ms)
+  if (agePercent < 10) {
+    logger.cache('hit', `Instant cache hit for ${imdbId} (${sourceType}, ${hoursSinceCheck.toFixed(1)}h old, ${agePercent.toFixed(0)}% of TTL)`);
+    return cached;
+  }
+  
+  // For very fresh cache (< 30% of TTL), return immediately and validate in background
+  if (agePercent < 30) {
+    logger.cache('hit', `Fast cache hit for ${imdbId} (${sourceType}, ${hoursSinceCheck.toFixed(1)}h old) - validating in background`);
+    
+    // Validate in background (non-blocking)
+    if (!validationQueue.has(imdbId)) {
+      validationQueue.add(imdbId);
+      validateUrl(cached.preview_url, 2000).then(isValid => {
+        validationQueue.delete(imdbId);
+        if (!isValid) {
+          logger.cache('miss', `Background validation failed for ${imdbId}, invalidating cache`);
+          cache.delete(imdbId);
+          const deleteStmt = db.prepare('DELETE FROM cache WHERE imdb_id = ?');
+          deleteStmt.run(imdbId);
+        }
+      }).catch(() => {
+        validationQueue.delete(imdbId);
+      });
+    }
+    
+    return cached; // Return immediately
+  }
+  
+  // For stale cache (> 30% of TTL), validate synchronously but with shorter timeout
+  // YouTube URLs: validate if > 20% of TTL (they expire quickly)
+  // Other sources: validate if > 80% of TTL
+  const shouldValidate = sourceType === 'youtube' ? agePercent > 20 : agePercent > 80;
   
   if (shouldValidate) {
-    logger.cache('validate', `Validating cached URL for ${imdbId} (${sourceType}, ${hoursSinceCheck.toFixed(1)}h old)`);
-    const isValid = await validateUrl(cached.preview_url);
+    logger.cache('validate', `Validating cached URL for ${imdbId} (${sourceType}, ${hoursSinceCheck.toFixed(1)}h old, ${agePercent.toFixed(0)}% of TTL)`);
+    const isValid = await validateUrl(cached.preview_url, 2000); // Shorter timeout for faster response
     
     if (!isValid) {
       logger.cache('miss', `Cached URL is no longer valid, invalidating cache for ${imdbId}`);
       cache.delete(imdbId);
-      // Also delete from database
       const deleteStmt = db.prepare('DELETE FROM cache WHERE imdb_id = ?');
       deleteStmt.run(imdbId);
       return null;
     }
     
     logger.cache('hit', `Cached URL is still valid for ${imdbId}`);
+  } else {
+    logger.cache('hit', `Cache hit for ${imdbId} (${sourceType}, ${hoursSinceCheck.toFixed(1)}h old, ${agePercent.toFixed(0)}% of TTL)`);
   }
   
   return cached;
@@ -2542,13 +2590,23 @@ function setCache(imdbId, data) {
 async function resolvePreview(imdbId, type) {
   logger.section(`RESOLVING: ${imdbId} (${type})`);
   
-  // Check cache with validation
+  // Check cache with validation (optimized for instant returns)
   const cached = await getCachedWithValidation(imdbId);
   
   if (cached) {
     if (cached.preview_url) {
       const sourceType = cached.source_type || 'unknown';
-      console.log(`Cache hit: returning cached ${sourceType} preview (validated)`);
+      const hoursSinceCheck = (Date.now() - cached.timestamp) / (1000 * 60 * 60);
+      const ttlHours = CACHE_TTL[sourceType] || CACHE_TTL.youtube;
+      const agePercent = (hoursSinceCheck / ttlHours) * 100;
+      
+      // Log cache hit with age info
+      if (agePercent < 10) {
+        logger.cache('hit', `⚡ INSTANT cache hit: ${sourceType} (${hoursSinceCheck.toFixed(1)}h old)`);
+      } else {
+        logger.cache('hit', `Cache hit: ${sourceType} (${hoursSinceCheck.toFixed(1)}h old, ${agePercent.toFixed(0)}% of TTL)`);
+      }
+      
       return {
         found: true,
         source: cached.source || (sourceType === 'itunes' ? 'itunes' : sourceType === 'archive' ? 'archive' : 'youtube'),
