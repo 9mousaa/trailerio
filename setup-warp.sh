@@ -129,27 +129,44 @@ else:
     print("export PRESHARED_KEY=''")
 
 # Address can appear multiple times (IPv4 and IPv6), collect all
-# WireGuard config can have multiple Address lines, one per line
+# WireGuard config can have multiple Address lines, handle various formats
 address_lines = []
 for line in content.split('\n'):
+    original_line = line
     line = line.strip()
-    if line.startswith('Address') and '=' in line:
+    # Match Address line (case insensitive, with or without spaces around =)
+    if 'address' in line.lower() and '=' in line.lower():
         # Extract everything after = and before any comment
-        addr_part = line.split('=')[1].split('#')[0].strip()
-        if addr_part and '/' in addr_part:
-            address_lines.append(addr_part)
+        parts = line.split('=', 1)
+        if len(parts) == 2:
+            addr_part = parts[1].split('#')[0].strip()
+            # Remove any trailing commas or semicolons
+            addr_part = addr_part.rstrip(',;')
+            if addr_part and '/' in addr_part:
+                address_lines.append(addr_part)
+
+# Also try regex as fallback
+if not address_lines:
+    import re
+    address_matches = re.findall(r'Address\s*=\s*([^\s#\n\r,;]+)', content, re.IGNORECASE | re.MULTILINE)
+    for addr in address_matches:
+        addr = addr.strip().rstrip(',;')
+        if addr and '/' in addr:
+            address_lines.append(addr)
 
 # Validate each address has both IP and CIDR
 valid_addresses = []
 for addr in address_lines:
+    addr = addr.strip()
     if '/' in addr:
         parts = addr.split('/')
         if len(parts) == 2:
             ip_part, cidr_part = parts[0].strip(), parts[1].strip()
             # Both parts must be non-empty
             if ip_part and cidr_part:
-                # Basic validation: IP part should not be empty, CIDR should be numeric
-                if cidr_part.isdigit() or (':' in ip_part):  # IPv6 addresses contain :
+                # CIDR can be numeric (IPv4) or part of IPv6 notation
+                # IPv6 addresses contain colons
+                if cidr_part.isdigit() or (':' in ip_part):
                     valid_addresses.append(addr)
 
 if valid_addresses:
@@ -157,7 +174,15 @@ if valid_addresses:
     addresses = ','.join(valid_addresses)
     print(f"export ADDRESSES='{addresses}'")
 else:
-    errors.append("No valid addresses found (format: IP/CIDR)")
+    # Last resort: try to find any line with IP/CIDR pattern
+    import re
+    ip_cidr_pattern = r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d+|[0-9a-fA-F:]+/\d+)'
+    fallback_matches = re.findall(ip_cidr_pattern, content)
+    if fallback_matches:
+        addresses = ','.join(fallback_matches)
+        print(f"export ADDRESSES='{addresses}'")
+    else:
+        errors.append("No valid addresses found (format: IP/CIDR)")
 
 if endpoint_match:
     endpoint = endpoint_match.group(1).strip()
