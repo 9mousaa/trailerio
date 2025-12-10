@@ -2628,15 +2628,79 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
                   // Construct direct download URL - this serves the actual video file
                   // Format: https://archive.org/download/{identifier}/{filename}
                   // The /download/ endpoint serves files directly and supports HTTP Range requests for streaming
-                  // Note: Filename should be URL-encoded but Archive.org is lenient with encoding
+                  // CRITICAL: Archive.org requires proper URL encoding, but some special characters need special handling
                   const filename = bestFile.name;
-                  // Archive.org accepts both encoded and unencoded filenames, but encoded is safer
-                  videoUrl = `https://archive.org/download/${identifier}/${encodeURIComponent(filename).replace(/%2F/g, '/')}`;
+                  
+                  // Archive.org URL encoding rules:
+                  // - Spaces should be encoded as %20 (not +)
+                  // - Slashes in filenames should remain as / (not %2F)
+                  // - Most other special chars should be encoded
+                  // - But Archive.org is lenient, so we try both encoded and unencoded
+                  // First, try with proper encoding (spaces as %20, keep / as /)
+                  let encodedFilename = filename
+                    .replace(/\s/g, '%20')  // Spaces to %20
+                    .replace(/#/g, '%23')   // # to %23
+                    .replace(/\?/g, '%3F')   // ? to %3F
+                    .replace(/&/g, '%26')   // & to %26
+                    .replace(/=/g, '%3D')    // = to %3D
+                    .replace(/\+/g, '%2B'); // + to %2B
+                  
+                  // Keep forward slashes as-is (Archive.org uses them for subdirectories)
+                  // Don't encode other characters that might be valid in filenames
+                  
+                  videoUrl = `https://archive.org/download/${identifier}/${encodedFilename}`;
+                  
+                  // Validate URL format
+                  try {
+                    new URL(videoUrl); // Will throw if invalid
+                  } catch (urlError) {
+                    console.log(`  [Internet Archive] Invalid URL constructed, trying unencoded filename`);
+                    // Fallback: try with minimal encoding (just spaces)
+                    videoUrl = `https://archive.org/download/${identifier}/${filename.replace(/\s/g, '%20')}`;
+                  }
                 }
               } else {
                 console.log(`  [Internet Archive] No video file name found in metadata`);
                 successTracker.recordFailure('archive', strategy.id);
                 continue;
+              }
+              
+              // CRITICAL: Validate the URL is accessible before returning it
+              // Archive.org sometimes returns 401 for restricted files, so we need to check
+              try {
+                const controller = new AbortController();
+                const validationTimeout = setTimeout(() => controller.abort(), 3000); // 3s timeout for validation
+                
+                const validationResponse = await fetch(videoUrl, {
+                  method: 'HEAD',
+                  signal: controller.signal,
+                  headers: {
+                    'User-Agent': 'Mozilla/5.0 (compatible; TrailerIO/1.0)',
+                    'Range': 'bytes=0-1' // Just check first 2 bytes to validate access
+                  }
+                });
+                
+                clearTimeout(validationTimeout);
+                
+                // Check if URL is accessible (200, 206 Partial Content, or 302 redirect are OK)
+                if (validationResponse.status === 401 || validationResponse.status === 403) {
+                  console.log(`  [Internet Archive] ⚠ URL requires authentication or is restricted (${validationResponse.status}): ${videoUrl.substring(0, 80)}...`);
+                  // Try alternative: use /stream/ endpoint which might work for restricted files
+                  // But /stream/ serves HTML, not direct video, so we need to extract the actual video URL
+                  // For now, skip this file and try next match
+                  successTracker.recordFailure('archive', strategy.id);
+                  continue;
+                } else if (validationResponse.status >= 400) {
+                  console.log(`  [Internet Archive] ⚠ URL returned ${validationResponse.status}, trying next match...`);
+                  successTracker.recordFailure('archive', strategy.id);
+                  continue;
+                } else {
+                  console.log(`  [Internet Archive] ✓ URL validated (${validationResponse.status})`);
+                }
+              } catch (validationError) {
+                // If validation fails (timeout, network error), still return the URL
+                // The client can try to access it - might work even if HEAD fails
+                console.log(`  [Internet Archive] ⚠ URL validation failed (${validationError.message}), but returning URL anyway`);
               }
               
               // Estimate quality from file size and format (Archive doesn't provide explicit quality)
