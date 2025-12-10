@@ -1974,15 +1974,15 @@ async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
   // Optimized yt-dlp command (always use proxy if available to avoid blocking)
   const buildCommand = (useProxy) => {
     const proxyFlag = useProxy ? `--proxy ${gluetunProxy}` : '';
-    // Format: Get streamable URL (not download link)
-    // Use progressive formats (mp4) for direct streaming, avoid DASH/manifest formats
-    // Add referer and better user agent to avoid bot detection
+    // Format: Get single streamable URL (progressive mp4 preferred for direct streaming)
+    // Avoid DASH formats that require merging - use progressive formats when possible
+    // For --get-url, we want a single URL, so prefer formats that don't need merging
     return `yt-dlp ${proxyFlag} \
       --no-download \
       --no-warnings \
       --quiet \
       --no-playlist \
-      --format "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best" \
+      --format "best[height<=1080][ext=mp4][protocol=https]/best[height<=1080][ext=mp4]/best[height<=1080][protocol=https]/best[height<=1080]/best[ext=mp4]/best" \
       --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" \
       --referer "${videoUrl}" \
       --socket-timeout 20 \
