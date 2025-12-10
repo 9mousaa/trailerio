@@ -140,11 +140,12 @@ generate_warp_config() {
     
     # Extract values from config (more robust parsing)
     # Handle cases where there might be comments or extra whitespace
-    local private_key=$(grep "^PrivateKey" wgcf-profile.conf | head -n1 | sed 's/PrivateKey[[:space:]]*=[[:space:]]*//' | sed 's/[[:space:]]*#.*$//' | tr -d ' ')
-    local address=$(grep "^Address" wgcf-profile.conf | head -n1 | sed 's/Address[[:space:]]*=[[:space:]]*//' | sed 's/[[:space:]]*#.*$//' | tr -d ' ' | cut -d',' -f1)
-    local public_key=$(grep "^PublicKey" wgcf-profile.conf | head -n1 | sed 's/PublicKey[[:space:]]*=[[:space:]]*//' | sed 's/[[:space:]]*#.*$//' | tr -d ' ')
-    local preshared_key=$(grep "^PresharedKey" wgcf-profile.conf | head -n1 | sed 's/PresharedKey[[:space:]]*=[[:space:]]*//' | sed 's/[[:space:]]*#.*$//' | tr -d ' ' || echo "")
-    local endpoint=$(grep "^Endpoint" wgcf-profile.conf | head -n1 | sed 's/Endpoint[[:space:]]*=[[:space:]]*//' | sed 's/[[:space:]]*#.*$//' | tr -d ' ')
+    # Use awk for more reliable extraction, and remove ALL whitespace including newlines
+    local private_key=$(grep "^PrivateKey" wgcf-profile.conf | head -n1 | awk -F'=' '{print $2}' | sed 's/[[:space:]]*#.*$//' | tr -d ' \n\r\t')
+    local address=$(grep "^Address" wgcf-profile.conf | head -n1 | awk -F'=' '{print $2}' | sed 's/[[:space:]]*#.*$//' | tr -d ' \n\r\t' | cut -d',' -f1)
+    local public_key=$(grep "^PublicKey" wgcf-profile.conf | head -n1 | awk -F'=' '{print $2}' | sed 's/[[:space:]]*#.*$//' | tr -d ' \n\r\t')
+    local preshared_key=$(grep "^PresharedKey" wgcf-profile.conf | head -n1 | awk -F'=' '{print $2}' | sed 's/[[:space:]]*#.*$//' | tr -d ' \n\r\t' || echo "")
+    local endpoint=$(grep "^Endpoint" wgcf-profile.conf | head -n1 | awk -F'=' '{print $2}' | sed 's/[[:space:]]*#.*$//' | tr -d ' \n\r\t')
     local endpoint_host=$(echo "$endpoint" | cut -d':' -f1)
     local endpoint_port=$(echo "$endpoint" | cut -d':' -f2)
     
