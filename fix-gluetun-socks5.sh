@@ -23,7 +23,7 @@ echo ""
 echo "=== Checking if port 1080 is listening ==="
 docker exec gluetun netstat -tlnp 2>/dev/null | grep 1080 || \
 docker exec gluetun ss -tlnp 2>/dev/null | grep 1080 || \
-echo "Port 1080 not found - SOCKS5 server not running"
+echo "⚠ Port 1080 not visible in netstat (may be bound to Docker network only)"
 echo ""
 
 # 4. Check gluetun environment
@@ -58,7 +58,16 @@ echo ""
 
 # 8. Test SOCKS5 from backend container
 echo "=== Testing SOCKS5 from backend container ==="
-docker exec trailerio-backend-1 wget -qO- --timeout=3 --proxy=socks5://gluetun:1080 "http://httpbin.org/ip" 2>&1 | head -5 || echo "SOCKS5 test failed"
+SOCKS5_TEST=$(docker exec trailerio-backend-1 wget -qO- --timeout=3 --proxy=socks5://gluetun:1080 "http://httpbin.org/ip" 2>&1 | head -5)
+if echo "$SOCKS5_TEST" | grep -q "origin"; then
+    echo "✅ SOCKS5 is WORKING! Test returned:"
+    echo "$SOCKS5_TEST"
+    echo ""
+    echo "   If the IP is different from gluetun's IP, SOCKS5 is routing correctly!"
+else
+    echo "❌ SOCKS5 test failed:"
+    echo "$SOCKS5_TEST"
+fi
 echo ""
 
 echo "✅ Diagnosis complete!"
