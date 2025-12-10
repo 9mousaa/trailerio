@@ -1658,7 +1658,7 @@ async function extractViaYtDlp(youtubeKey) {
 }
 
 // Generic extractor that works with any URL supported by yt-dlp
-// OPTIMIZED: Try direct connection first (faster), proxy as fallback
+// ALWAYS uses Cloudflare Warp proxy first to avoid blocking (especially YouTube)
 async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
   console.log(`  [yt-dlp] Extracting streamable URL from ${siteName}: ${videoUrl}...`);
   
@@ -1666,7 +1666,25 @@ async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
   const EXTRACTION_TIMEOUT = 5000; // 5 seconds (matches source timeout)
   const gluetunProxy = 'http://gluetun:8888';
   
-  // Optimized yt-dlp command (removed unnecessary delays, simplified format)
+  // Check if gluetun proxy is available (required for avoiding blocks)
+  let proxyAvailable = false;
+  try {
+    const gluetunStatus = await fetch('http://gluetun:8000/v1/openvpn/status', {
+      signal: AbortSignal.timeout(1000), // Quick check
+      method: 'GET'
+    }).catch(() => null);
+    
+    if (gluetunStatus !== null) {
+      proxyAvailable = true;
+      console.log(`  [yt-dlp] ✓ Gluetun proxy available, using Cloudflare Warp to avoid blocking`);
+    } else {
+      console.log(`  [yt-dlp] ⚠ Gluetun not available, will try direct (may get blocked)`);
+    }
+  } catch (proxyError) {
+    console.log(`  [yt-dlp] ⚠ Gluetun check failed: ${proxyError.message}, will try direct`);
+  }
+  
+  // Optimized yt-dlp command (always use proxy if available to avoid blocking)
   const buildCommand = (useProxy) => {
     const proxyFlag = useProxy ? `--proxy ${gluetunProxy}` : '';
     // Simplified format: prefer mp4, limit to 1080p, fallback to best
@@ -1684,10 +1702,9 @@ async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
       "${videoUrl}"`.replace(/\s+/g, ' ').trim();
   };
   
-  // Try direct connection first (faster, more reliable)
   const tryExtraction = async (useProxy, attemptName) => {
     const command = buildCommand(useProxy);
-    console.log(`  [yt-dlp] Attempt ${attemptName} (proxy: ${useProxy ? 'enabled' : 'disabled'})...`);
+    console.log(`  [yt-dlp] Attempt ${attemptName} (proxy: ${useProxy ? 'Cloudflare Warp' : 'direct'})...`);
     
     try {
       const execPromise = execAsync(command, {
@@ -1735,36 +1752,20 @@ async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
     }
   };
   
-  // Strategy 1: Try direct connection first (faster, more reliable)
-  let result = await tryExtraction(false, 'direct');
-  if (result) {
-    successTracker.recordSuccess('ytdlp', 'extraction');
-    return { url: result, quality: 'best', isDash: false };
-  }
-  
-  // Strategy 2: If direct failed, try with proxy (for geo-blocked content)
-  // Check if gluetun is available first
-  let proxyAvailable = false;
-  try {
-    const gluetunStatus = await fetch('http://gluetun:8000/v1/openvpn/status', {
-      signal: AbortSignal.timeout(1000), // Quick check
-      method: 'GET'
-    }).catch(() => null);
-    
-    if (gluetunStatus !== null) {
-      proxyAvailable = true;
-      console.log(`  [yt-dlp] Trying with proxy (gluetun:8888) as fallback...`);
-    }
-  } catch (proxyError) {
-    // Proxy not available, skip
-  }
-  
+  // Strategy 1: ALWAYS try with proxy first (to avoid YouTube blocking)
   if (proxyAvailable) {
-    result = await tryExtraction(true, 'proxy');
+    let result = await tryExtraction(true, 'proxy');
     if (result) {
       successTracker.recordSuccess('ytdlp', 'extraction');
       return { url: result, quality: 'best', isDash: false };
     }
+  }
+  
+  // Strategy 2: If proxy failed or unavailable, try direct (fallback)
+  let result = await tryExtraction(false, 'direct');
+  if (result) {
+    successTracker.recordSuccess('ytdlp', 'extraction');
+    return { url: result, quality: 'best', isDash: false };
   }
   
   // Both attempts failed
@@ -2665,10 +2666,12 @@ async function resolvePreview(imdbId, type) {
   }
   
   // HIGH-VALUE DIRECT TRAILER SOURCES (work independently, don't need TMDB URLs)
-  // These use IMDb ID or title/year to find trailers directly
-  // Priority: IMDb (we have IMDb ID!) > Apple Trailers > Allocine
+  // These use IMDb ID or title/year to find trailers directly via yt-dlp
+  // Priority: IMDb (we have IMDb ID!) > Apple Trailers > IVA > RottenTomatoes > Metacritic > Allocine > Moviepilot
+  
   if (imdbId && imdbId.startsWith('tt')) {
     availableSources.push('imdb_trailer'); // IMDb trailers - we have IMDb ID! (highest priority)
+    availableSources.push('iva_trailer'); // Internet Video Archive - historically used by many apps
   }
   
   // These work with title/year (good fallbacks for when IMDb doesn't have trailers)
@@ -2677,8 +2680,14 @@ async function resolvePreview(imdbId, type) {
     if (type === 'movie') {
       availableSources.push('appletrailers');
     }
+    // RottenTomatoes - often embeds trailers
+    availableSources.push('rottentomatoes');
+    // Metacritic - similar to RT, embeds trailers
+    availableSources.push('metacritic');
     // Allocine - French/international coverage, good for European films
     availableSources.push('allocine');
+    // Moviepilot - targeted at trailers
+    availableSources.push('moviepilot');
   }
   
   availableSources.push('archive');
@@ -2930,6 +2939,147 @@ async function resolvePreview(imdbId, type) {
             const duration = Date.now() - startTime;
             sourceResponseTimes.recordTime('ytdlp', duration);
             successTracker.recordSourceFailure('appletrailers');
+            return null;
+          }
+        } else if (source === 'iva_trailer') {
+          // Internet Video Archive (IVA) - historically used by many apps for trailers
+          // yt-dlp supports: https://www.internetvideoarchive.com/
+          // Try with IMDb ID first (most reliable)
+          const ivaUrl = imdbId ? `https://www.internetvideoarchive.com/video/${imdbId}` : `https://www.internetvideoarchive.com/search?q=${encodeURIComponent(tmdbMeta.title)}`;
+          const ivaResult = await extractViaYtDlpGeneric(ivaUrl, 'InternetVideoArchive');
+          if (ivaResult && ivaResult.url) {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            
+            const quality = ivaResult.quality || 'best';
+            qualityTracker.recordQuality('iva', quality);
+            
+            setCache(imdbId, {
+              track_id: null,
+              preview_url: ivaResult.url,
+              country: 'iva',
+              youtube_key: null,
+              source: 'iva'
+            });
+            console.log(`✓ Got URL from Internet Video Archive`);
+            successTracker.recordSourceSuccess('iva');
+            return {
+              found: true,
+              source: 'iva',
+              previewUrl: ivaResult.url,
+              youtubeKey: null,
+              country: 'iva',
+              quality: quality
+            };
+          } else {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            successTracker.recordSourceFailure('iva');
+            return null;
+          }
+        } else if (source === 'rottentomatoes') {
+          // RottenTomatoes - often embeds trailers
+          // yt-dlp supports: https://www.rottentomatoes.com/m/{title}
+          const rtUrl = `https://www.rottentomatoes.com/m/${encodeURIComponent(tmdbMeta.title.toLowerCase().replace(/[^a-z0-9]/g, '_'))}`;
+          const rtResult = await extractViaYtDlpGeneric(rtUrl, 'RottenTomatoes');
+          if (rtResult && rtResult.url) {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            
+            const quality = rtResult.quality || 'best';
+            qualityTracker.recordQuality('rottentomatoes', quality);
+            
+            setCache(imdbId, {
+              track_id: null,
+              preview_url: rtResult.url,
+              country: 'rt',
+              youtube_key: null,
+              source: 'rottentomatoes'
+            });
+            console.log(`✓ Got URL from RottenTomatoes`);
+            successTracker.recordSourceSuccess('rottentomatoes');
+            return {
+              found: true,
+              source: 'rottentomatoes',
+              previewUrl: rtResult.url,
+              youtubeKey: null,
+              country: 'rt',
+              quality: quality
+            };
+          } else {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            successTracker.recordSourceFailure('rottentomatoes');
+            return null;
+          }
+        } else if (source === 'metacritic') {
+          // Metacritic - similar to RT, embeds trailers
+          // yt-dlp supports: https://www.metacritic.com/movie/{title}
+          const mcUrl = `https://www.metacritic.com/movie/${encodeURIComponent(tmdbMeta.title.toLowerCase().replace(/[^a-z0-9]/g, '-'))}`;
+          const mcResult = await extractViaYtDlpGeneric(mcUrl, 'Metacritic');
+          if (mcResult && mcResult.url) {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            
+            const quality = mcResult.quality || 'best';
+            qualityTracker.recordQuality('metacritic', quality);
+            
+            setCache(imdbId, {
+              track_id: null,
+              preview_url: mcResult.url,
+              country: 'mc',
+              youtube_key: null,
+              source: 'metacritic'
+            });
+            console.log(`✓ Got URL from Metacritic`);
+            successTracker.recordSourceSuccess('metacritic');
+            return {
+              found: true,
+              source: 'metacritic',
+              previewUrl: mcResult.url,
+              youtubeKey: null,
+              country: 'mc',
+              quality: quality
+            };
+          } else {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            successTracker.recordSourceFailure('metacritic');
+            return null;
+          }
+        } else if (source === 'moviepilot') {
+          // Moviepilot - targeted at trailers
+          // yt-dlp supports: https://www.moviepilot.de/movies/{title}
+          const mpUrl = `https://www.moviepilot.de/movies/${encodeURIComponent(tmdbMeta.title.toLowerCase().replace(/[^a-z0-9]/g, '-'))}`;
+          const mpResult = await extractViaYtDlpGeneric(mpUrl, 'Moviepilot');
+          if (mpResult && mpResult.url) {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            
+            const quality = mpResult.quality || 'best';
+            qualityTracker.recordQuality('moviepilot', quality);
+            
+            setCache(imdbId, {
+              track_id: null,
+              preview_url: mpResult.url,
+              country: 'mp',
+              youtube_key: null,
+              source: 'moviepilot'
+            });
+            console.log(`✓ Got URL from Moviepilot`);
+            successTracker.recordSourceSuccess('moviepilot');
+            return {
+              found: true,
+              source: 'moviepilot',
+              previewUrl: mpResult.url,
+              youtubeKey: null,
+              country: 'mp',
+              quality: quality
+            };
+          } else {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            successTracker.recordSourceFailure('moviepilot');
             return null;
           }
         } else if (source === 'allocine') {
