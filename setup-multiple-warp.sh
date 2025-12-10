@@ -138,12 +138,13 @@ generate_warp_config() {
         return 1
     fi
     
-    # Extract values from config
-    local private_key=$(grep "PrivateKey" wgcf-profile.conf | cut -d'=' -f2 | tr -d ' ')
-    local address=$(grep "Address" wgcf-profile.conf | cut -d'=' -f2 | tr -d ' ' | head -n1)
-    local public_key=$(grep "PublicKey" wgcf-profile.conf | cut -d'=' -f2 | tr -d ' ')
-    local preshared_key=$(grep "PresharedKey" wgcf-profile.conf | cut -d'=' -f2 | tr -d ' ')
-    local endpoint=$(grep "Endpoint" wgcf-profile.conf | cut -d'=' -f2 | tr -d ' ')
+    # Extract values from config (more robust parsing)
+    # Handle cases where there might be comments or extra whitespace
+    local private_key=$(grep "^PrivateKey" wgcf-profile.conf | head -n1 | sed 's/PrivateKey[[:space:]]*=[[:space:]]*//' | sed 's/[[:space:]]*#.*$//' | tr -d ' ')
+    local address=$(grep "^Address" wgcf-profile.conf | head -n1 | sed 's/Address[[:space:]]*=[[:space:]]*//' | sed 's/[[:space:]]*#.*$//' | tr -d ' ' | cut -d',' -f1)
+    local public_key=$(grep "^PublicKey" wgcf-profile.conf | head -n1 | sed 's/PublicKey[[:space:]]*=[[:space:]]*//' | sed 's/[[:space:]]*#.*$//' | tr -d ' ')
+    local preshared_key=$(grep "^PresharedKey" wgcf-profile.conf | head -n1 | sed 's/PresharedKey[[:space:]]*=[[:space:]]*//' | sed 's/[[:space:]]*#.*$//' | tr -d ' ' || echo "")
+    local endpoint=$(grep "^Endpoint" wgcf-profile.conf | head -n1 | sed 's/Endpoint[[:space:]]*=[[:space:]]*//' | sed 's/[[:space:]]*#.*$//' | tr -d ' ')
     local endpoint_host=$(echo "$endpoint" | cut -d':' -f1)
     local endpoint_port=$(echo "$endpoint" | cut -d':' -f2)
     
