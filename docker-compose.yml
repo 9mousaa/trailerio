@@ -49,6 +49,7 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     restart: unless-stopped
+    container_name: trailerio-backend
     environment:
       - NODE_ENV=production
       - PORT=3001
