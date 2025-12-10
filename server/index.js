@@ -3228,11 +3228,11 @@ async function resolvePreview(imdbId, type, episodeInfo = null) {
     availableSources.push('ytdlp');
   }
   
-  // iTunes episode previews - LOWER PRIORITY (only if no trailer found)
+  // iTunes episode previews - FALLBACK (only if no trailer found)
   // Skip iTunes for movies - iTunes doesn't have movie previews, only TV episode previews
-  // For first episode, skip iTunes entirely to ensure show trailer is returned
-  if (type === 'series' && !isFirstEpisode) {
-    availableSources.push('itunes'); // iTunes works for TV shows (episode previews)
+  // For series: Include iTunes as fallback (even for first episode, if YouTube trailer fails)
+  if (type === 'series') {
+    availableSources.push('itunes'); // iTunes works for TV shows (episode previews) - fallback if no trailer
   }
   
   
