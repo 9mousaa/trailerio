@@ -149,6 +149,7 @@ for line in content.split('\n'):
                         address_lines.append(addr)
 
 # Validate each address - must be a real IP address with CIDR
+# Gluetun doesn't support IPv6, so only include IPv4 addresses
 valid_addresses = []
 for addr in address_lines:
     addr = addr.strip()
@@ -158,32 +159,21 @@ for addr in address_lines:
             ip_part, cidr_part = parts[0].strip(), parts[1].strip()
             # Both parts must be non-empty
             if ip_part and cidr_part:
-                # CIDR must be a valid number (1-128 for IPv4/IPv6)
+                # CIDR must be a valid number (1-32 for IPv4, gluetun doesn't support IPv6)
                 try:
                     cidr_num = int(cidr_part)
-                    if 1 <= cidr_num <= 128:
-                        # Validate IP part
-                        # IPv4: must be 4 octets (e.g., 172.16.0.2)
-                        # IPv6: must contain colons (e.g., 2606:4700:...)
-                        # Reject invalid patterns like "5", "0.0.0.0", "::"
-                        if ':' in ip_part:
-                            # IPv6: must have multiple segments separated by colons
-                            segments = ip_part.split(':')
-                            if len(segments) >= 2 and all(len(s) <= 4 for s in segments if s):
-                                # Valid IPv6 format
-                                if ip_part != '::' and ip_part != '::/0':
-                                    valid_addresses.append(addr)
-                        elif '.' in ip_part:
-                            # IPv4: must be 4 octets, each 0-255
-                            octets = ip_part.split('.')
-                            if len(octets) == 4:
-                                try:
-                                    if all(0 <= int(o) <= 255 for o in octets):
-                                        # Reject 0.0.0.0/0 (not a valid WireGuard address)
-                                        if ip_part != '0.0.0.0':
-                                            valid_addresses.append(addr)
-                                except ValueError:
-                                    pass
+                    # Only accept IPv4 addresses (gluetun limitation)
+                    if '.' in ip_part and ':' not in ip_part:
+                        # IPv4: must be 4 octets, each 0-255
+                        octets = ip_part.split('.')
+                        if len(octets) == 4:
+                            try:
+                                if all(0 <= int(o) <= 255 for o in octets):
+                                    # Reject 0.0.0.0/0 (not a valid WireGuard address)
+                                    if ip_part != '0.0.0.0' and 1 <= cidr_num <= 32:
+                                        valid_addresses.append(addr)
+                            except ValueError:
+                                pass
                 except ValueError:
                     pass
 
