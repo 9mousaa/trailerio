@@ -1979,6 +1979,45 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
           const hasSubtitle = normTitle.includes(':');
           const titlePrefix = hasSubtitle ? normTitle.split(':')[0].trim() : normTitle;
           
+          // CRITICAL: Reject if IMDb ID exists but doesn't match (for any title length)
+          if (imdbId && docImdbId && docImdbId !== imdbId) {
+            // Different IMDb ID - definitely wrong movie
+            continue;
+          }
+          
+          // CRITICAL: For single-word titles, require the word to START the result title
+          // e.g., "Friends" should NOT match "Hart to Hart: Old Friends Never Die"
+          // e.g., "Coco" should NOT match "Coco Chanel" or "Coco Before Chanel"
+          if (isShortTitle && searchWords.length === 1) {
+            const searchWord = searchWords[0];
+            // Check if the search word appears at the START of the title
+            const titleStartsWithSearch = normTitle.startsWith(searchWord + ' ') || 
+                                         normTitle.startsWith(searchWord + ':') ||
+                                         normTitle.startsWith(searchWord + '-') ||
+                                         normTitle === searchWord;
+            
+            if (!titleStartsWithSearch) {
+              // Search word appears but not at start - likely a different movie/show
+              // Only allow if IMDb ID matches exactly
+              if (!imdbId || !docImdbId || docImdbId !== imdbId) {
+                continue; // Reject - this is a false positive
+              }
+            }
+          }
+          
+          // For short titles (1-2 words), require IMDb ID match OR very high fuzzy match
+          // Examples: "Friends", "Gladiator", "Coco" - these are too generic
+          if (isShortTitle && searchWords.length <= 2) {
+            // If we have IMDb ID, it must match (already checked above)
+            // If no IMDb ID, require very high fuzzy match (0.9+) AND exact word match
+            if (!imdbId || !docImdbId) {
+              if (bestFuzzy < 0.9 || wordMatchRatio < 1.0) {
+                // Not confident enough without IMDb ID - reject
+                continue;
+              }
+            }
+          }
+          
           // Title matching (most important) - be more strict
           if (normTitle === normSearchTitle) {
             score += 1.0; // Exact match
@@ -2005,6 +2044,12 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
               }
               
               // Short titles like "Stephen" or "Troll 2" need almost perfect word matches
+              // AND require IMDb ID match for single-word titles
+              if (searchWords.length === 1 && (!imdbId || !docImdbId || docImdbId !== imdbId)) {
+                // Single word title without IMDb ID match - too risky
+                continue;
+              }
+              
               if (wordMatchRatio >= 0.9 && searchWords.length === matchingWords.length) {
                 // All words must match for short titles
                 score += 0.7;
@@ -2127,12 +2172,23 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
         }
         
         // Use higher threshold for matches (0.75 - prioritize accuracy over coverage to avoid false positives)
-        // Require strong title matching to ensure relevance
+        // For short titles, require even higher threshold OR IMDb ID match
+        const isShortTitle = (tmdbMeta.title.split(' ').filter(w => w.length > 2).length <= 2);
+        const requiresImdbMatch = isShortTitle && imdbId;
+        const matchThreshold = requiresImdbMatch ? 0.85 : 0.75; // Higher threshold for short titles
+        
         if (bestMatch) {
-          console.log(`  [Internet Archive] Best candidate: "${bestMatch.title}" (score: ${bestScore.toFixed(2)}, threshold: 0.75)`);
+          const bestMatchImdbId = Array.isArray(bestMatch['external-identifier']) 
+            ? bestMatch['external-identifier'].find(id => id && id.startsWith('urn:imdb:'))?.replace('urn:imdb:', '')
+            : (bestMatch['external-identifier']?.startsWith('urn:imdb:') 
+                ? bestMatch['external-identifier'].replace('urn:imdb:', '') 
+                : null);
+          
+          const hasImdbMatch = imdbId && bestMatchImdbId && bestMatchImdbId === imdbId;
+          console.log(`  [Internet Archive] Best candidate: "${bestMatch.title}" (score: ${bestScore.toFixed(2)}, threshold: ${matchThreshold}, IMDb match: ${hasImdbMatch ? 'yes' : 'no'})`);
         }
         
-        if (bestMatch && bestScore >= 0.75) {
+        if (bestMatch && bestScore >= matchThreshold) {
           console.log(`  [Internet Archive] ✓ Best match: "${bestMatch.title}" (score: ${bestScore.toFixed(2)})`);
           // Get the video URL from the item metadata
           const identifier = bestMatch.identifier;
