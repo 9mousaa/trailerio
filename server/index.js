@@ -1974,17 +1974,19 @@ async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
   // Optimized yt-dlp command (always use proxy if available to avoid blocking)
   const buildCommand = (useProxy) => {
     const proxyFlag = useProxy ? `--proxy ${gluetunProxy}` : '';
-    // Simplified format: prefer mp4, limit to 1080p, fallback to best
-    // Removed sleep-interval (unnecessary delay), increased socket-timeout for reliability
+    // Format: Get streamable URL (not download link)
+    // Use progressive formats (mp4) for direct streaming, avoid DASH/manifest formats
+    // Add referer and better user agent to avoid bot detection
     return `yt-dlp ${proxyFlag} \
       --no-download \
       --no-warnings \
       --quiet \
       --no-playlist \
-      --format "best[height<=1080][ext=mp4]/best[height<=1080]/best" \
-      --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-      --socket-timeout 15 \
-      --extractor-args "youtube:player_client=android,web" \
+      --format "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best" \
+      --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" \
+      --referer "${videoUrl}" \
+      --socket-timeout 20 \
+      --extractor-args "youtube:player_client=android,web;youtube:player_skip=webpage" \
       --get-url \
       "${videoUrl}"`.replace(/\s+/g, ' ').trim();
   };
@@ -2021,8 +2023,15 @@ async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
       const duration = Date.now() - startTime;
       const errorMsg = (error.stderr || error.message || '').toString();
       
+      // Bot detection - YouTube is blocking
+      if (errorMsg.includes('Sign in to confirm') || errorMsg.includes('not a bot') || errorMsg.includes('bot')) {
+        console.log(`  [yt-dlp] ⚠ Bot detection triggered (YouTube blocking): ${videoUrl}`);
+        console.log(`  [yt-dlp] Try: Use different proxy or add cookies`);
+        return null;
+      }
+      
       // Age-restricted videos can't be extracted without cookies
-      if (errorMsg.includes('Sign in to confirm your age') || errorMsg.includes('age-restricted')) {
+      if (errorMsg.includes('age-restricted')) {
         console.log(`  [yt-dlp] ⚠ Age-restricted video (requires cookies): ${videoUrl}`);
         return null;
       }
@@ -2615,7 +2624,26 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
               });
               
               const bestFile = videoFiles[0];
-              const videoUrl = `https://archive.org/download/${identifier}/${encodeURIComponent(bestFile.name)}`;
+              // Use stream endpoint for direct streaming (not download)
+              // Format: https://archive.org/stream/{identifier}/{filename}
+              // Or use the direct video URL from metadata if available
+              let videoUrl;
+              if (bestFile.name) {
+                // Try to get direct streamable URL from Archive's CDN
+                // Archive.org serves videos via their CDN at archive.org/download, but we need streamable format
+                // The stream endpoint works better for streaming: https://archive.org/stream/{identifier}/{filename}
+                // However, for direct streaming, we can use the download URL with proper headers
+                // Better: Use the direct video URL from the file's URL field if available
+                if (bestFile.url && bestFile.url.startsWith('http')) {
+                  videoUrl = bestFile.url;
+                } else {
+                  // Fallback: Use stream endpoint for better streaming support
+                  videoUrl = `https://archive.org/stream/${identifier}/${encodeURIComponent(bestFile.name)}`;
+                }
+              } else {
+                // Last resort: download endpoint (may require Range headers for streaming)
+                videoUrl = `https://archive.org/download/${identifier}/${encodeURIComponent(bestFile.name)}`;
+              }
               
               // Estimate quality from file size and format (Archive doesn't provide explicit quality)
               let quality = 'unknown';
