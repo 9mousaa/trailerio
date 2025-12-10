@@ -713,29 +713,48 @@ async function warmCache() {
   
   try {
     // 1. Get popular movies and TV shows from TMDB (FAST - no rate limits)
+    // NOTE: Popular endpoint doesn't return external_ids, so we fetch details in parallel
     console.log('[Cache Warming] Fetching popular content from TMDB...');
     const [moviesResponse, tvResponse] = await Promise.allSettled([
       fetch(`https://api.themoviedb.org/3/movie/popular?api_key=${TMDB_API_KEY}&page=1`),
       fetch(`https://api.themoviedb.org/3/tv/popular?api_key=${TMDB_API_KEY}&page=1`)
     ]);
     
+    // Fetch IMDb IDs for popular movies (parallel)
     if (moviesResponse.status === 'fulfilled' && moviesResponse.value.ok) {
       const moviesData = await moviesResponse.value.json();
-      for (const movie of (moviesData.results || []).slice(0, 20)) {
-        if (movie.external_ids?.imdb_id) {
-          allItems.push({ imdbId: movie.external_ids.imdb_id, type: 'movie', source: 'tmdb' });
+      const movieDetails = await Promise.allSettled(
+        (moviesData.results || []).slice(0, 20).map(movie => 
+          fetch(`https://api.themoviedb.org/3/movie/${movie.id}?api_key=${TMDB_API_KEY}&append_to_response=external_ids`)
+            .then(r => r.ok ? r.json() : null)
+        )
+      );
+      
+      for (const detail of movieDetails) {
+        if (detail.status === 'fulfilled' && detail.value?.external_ids?.imdb_id) {
+          allItems.push({ imdbId: detail.value.external_ids.imdb_id, type: 'movie', source: 'tmdb' });
         }
       }
     }
     
+    // Fetch IMDb IDs for popular TV shows (parallel)
     if (tvResponse.status === 'fulfilled' && tvResponse.value.ok) {
       const tvData = await tvResponse.value.json();
-      for (const show of (tvData.results || []).slice(0, 20)) {
-        if (show.external_ids?.imdb_id) {
-          allItems.push({ imdbId: show.external_ids.imdb_id, type: 'series', source: 'tmdb' });
+      const tvDetails = await Promise.allSettled(
+        (tvData.results || []).slice(0, 20).map(show => 
+          fetch(`https://api.themoviedb.org/3/tv/${show.id}?api_key=${TMDB_API_KEY}&append_to_response=external_ids`)
+            .then(r => r.ok ? r.json() : null)
+        )
+      );
+      
+      for (const detail of tvDetails) {
+        if (detail.status === 'fulfilled' && detail.value?.external_ids?.imdb_id) {
+          allItems.push({ imdbId: detail.value.external_ids.imdb_id, type: 'series', source: 'tmdb' });
         }
       }
     }
+    
+    console.log(`[Cache Warming] Found ${allItems.length} items from TMDB with IMDb IDs`);
     
     // 2. Get items from MDBList curated lists (NON-BLOCKING - runs in background)
     // Start MDBList fetching in background, but don't wait for it
@@ -2737,6 +2756,11 @@ async function getCachedWithValidation(imdbId) {
 }
 
 function setCache(imdbId, data) {
+  if (!imdbId || !data.preview_url) {
+    console.warn(`[Cache] Skipping cache for ${imdbId}: missing imdbId or preview_url`);
+    return;
+  }
+  
   // Use try-catch with timeout protection for database writes
   // If DB is locked or slow, skip write (cache is in-memory anyway)
   // Determine source type from preview URL
@@ -2747,7 +2771,9 @@ function setCache(imdbId, data) {
     } else if (data.preview_url.includes('archive.org')) {
       sourceType = 'archive';
     } else {
-      sourceType = 'youtube'; // Piped/Invidious
+      // YouTube URLs from yt-dlp, piped, invidious - these are direct stream URLs
+      // They don't contain "youtube.com" but are still YouTube sources
+      sourceType = 'youtube';
     }
   } else if (data.source) {
     // Use source from data if available
@@ -2761,8 +2787,9 @@ function setCache(imdbId, data) {
     timestamp: timestamp
   };
   
-  // Save to in-memory cache
+  // Save to in-memory cache FIRST (instant access)
   cache.set(imdbId, cacheData);
+  logger.cache('hit', `Cached ${imdbId}: ${sourceType} (${data.source || 'unknown'} source)`);
   
   // Save to database - with error handling to prevent blocking
   try {
@@ -2792,6 +2819,8 @@ function setCache(imdbId, data) {
     const duration = Date.now() - startTime;
     if (duration > 50) {
       console.warn(`[Cache] Slow DB write: ${duration}ms for ${imdbId}`);
+    } else {
+      logger.debug(`[Cache] Saved ${imdbId} to database (${sourceType}, ${duration}ms)`);
     }
   } catch (error) {
     // Don't spam logs for database locked errors
