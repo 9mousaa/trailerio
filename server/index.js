@@ -208,6 +208,8 @@ console.log(`Loaded ${totalTrackerEntries} success tracker entries from database
 
 let activeRequests = 0;
 let totalRequests = 0;
+let cacheWriteQueue = []; // Queue for batched cache writes
+let cacheWriteTimer = null; // Timer for batched cache writes
 const requestQueue = []; // Queue for requests when at max concurrency
 
 // Periodic cache cleanup to prevent memory growth
@@ -2846,7 +2848,6 @@ function setCache(imdbId, data) {
   cache.set(imdbId, cacheData);
   
   // Queue database write (batched for CPU efficiency)
-  if (!cacheWriteQueue) cacheWriteQueue = [];
   cacheWriteQueue.push({ imdbId, cacheData, sourceType, timestamp });
   
   // Batch writes every 200ms to reduce CPU overhead
@@ -2941,10 +2942,10 @@ async function resolvePreview(imdbId, type) {
     availableSources.push('itunes'); // iTunes works for TV shows
   }
   
-  // Add video sources (YouTube and other sites via yt-dlp)
+  // Add video sources (YouTube via yt-dlp with Cloudflare Warp proxy)
   if (tmdbMeta.youtubeTrailerKey) {
-    // YouTube sources: ytdlp first (most reliable), then Piped/Invidious
-    availableSources.push('ytdlp', 'piped', 'invidious');
+    // YouTube: yt-dlp only (Piped/Invidious removed - unreliable)
+    availableSources.push('ytdlp');
   }
   
   
