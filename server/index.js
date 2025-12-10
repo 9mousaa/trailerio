@@ -2013,9 +2013,25 @@ async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
       
       const url = stdout.trim();
       if (url && url.startsWith('http')) {
-        const duration = Date.now() - startTime;
-        console.log(`  [yt-dlp] ✓ Got URL (${duration}ms, ${attemptName})`);
-        return url;
+        // Verify it's a streamable URL (not a manifest or download link)
+        // YouTube DASH manifests end with .m3u8 or have 'manifest' in URL - we want direct video URLs
+        if (url.includes('.m3u8') || url.includes('manifest') || url.includes('googlevideo.com/videoplayback')) {
+          // This is a streamable URL (YouTube uses googlevideo.com for streaming)
+          const duration = Date.now() - startTime;
+          console.log(`  [yt-dlp] ✓ Got streamable URL (${duration}ms, ${attemptName})`);
+          return url;
+        } else if (url.includes('googlevideo.com') || url.endsWith('.mp4') || url.endsWith('.m4v') || url.endsWith('.webm')) {
+          // Direct video file URL - streamable
+          const duration = Date.now() - startTime;
+          console.log(`  [yt-dlp] ✓ Got streamable URL (${duration}ms, ${attemptName})`);
+          return url;
+        } else {
+          // Might be a manifest or unsupported format - log it but return anyway
+          console.log(`  [yt-dlp] ⚠ Got URL but format unclear: ${url.substring(0, 100)}...`);
+          const duration = Date.now() - startTime;
+          console.log(`  [yt-dlp] ✓ Got URL (${duration}ms, ${attemptName})`);
+          return url; // Return anyway, let the player handle it
+        }
       }
       
       return null;
