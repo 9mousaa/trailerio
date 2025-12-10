@@ -2630,12 +2630,29 @@ function setCache(imdbId, data) {
     timestamp: timestamp
   };
   
-  // Save to in-memory cache
+  // Save to in-memory cache immediately (non-blocking, no CPU overhead)
   cache.set(imdbId, cacheData);
   
-  // Save to database - with error handling to prevent blocking
-  try {
-    const startTime = Date.now();
+  // Queue database write (batched for CPU efficiency)
+  if (!cacheWriteQueue) cacheWriteQueue = [];
+  cacheWriteQueue.push({ imdbId, cacheData, sourceType, timestamp });
+  
+  // Batch writes every 200ms to reduce CPU overhead
+  if (!cacheWriteTimer) {
+    cacheWriteTimer = setImmediate(() => {
+      _flushCacheWrites();
+      cacheWriteTimer = null;
+    });
+  }
+}
+
+function _flushCacheWrites() {
+  if (!cacheWriteQueue || cacheWriteQueue.length === 0) return;
+  
+  const writes = cacheWriteQueue.splice(0); // Clear queue
+  
+  // Batch execute all writes in a transaction (much faster, less CPU)
+  const transaction = db.transaction((writes) => {
     const stmt = db.prepare(`
       INSERT INTO cache (imdb_id, preview_url, track_id, country, youtube_key, source_type, source, timestamp)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -2648,26 +2665,28 @@ function setCache(imdbId, data) {
         source = excluded.source,
         timestamp = excluded.timestamp
     `);
-    stmt.run(
-      imdbId,
-      cacheData.preview_url || null,
-      cacheData.track_id || null,
-      cacheData.country || null,
-      cacheData.youtube_key || null,
-      sourceType,
-      cacheData.source || null,
-      timestamp
-    );
-    const duration = Date.now() - startTime;
-    if (duration > 50) {
-      console.warn(`[Cache] Slow DB write: ${duration}ms for ${imdbId}`);
+    
+    for (const { imdbId, cacheData, sourceType, timestamp } of writes) {
+      stmt.run(
+        imdbId,
+        cacheData.preview_url || null,
+        cacheData.track_id || null,
+        cacheData.country || null,
+        cacheData.youtube_key || null,
+        sourceType,
+        cacheData.source || null,
+        timestamp
+      );
     }
+  });
+  
+  try {
+    transaction(writes);
   } catch (error) {
     // Don't spam logs for database locked errors
     if (!error.message.includes('database is locked') && !error.message.includes('SQLITE_BUSY')) {
-      console.error(`[Cache] Database error for ${imdbId}: ${error.message}`);
+      console.error(`[Cache] Database write error: ${error.message}`);
     }
-    // Continue - in-memory cache still works
   }
 }
 
