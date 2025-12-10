@@ -654,34 +654,54 @@ async function fetchMDBListItems(username, listName) {
   }
   
   try {
-    // MDBList API endpoint formats (try both):
+    // MDBList API endpoint formats (try multiple):
     // Format 1: https://mdblist.com/api/user/{username}/list/{listname}
     // Format 2: https://mdblist.com/api/lists/{username}/{listname}
-    let apiUrl = `https://mdblist.com/api/user/${username}/list/${listName}`;
+    // Format 3: https://mdblist.com/api/lists/{username}/{listname}/items
+    const endpoints = [
+      `https://mdblist.com/api/user/${username}/list/${listName}`,
+      `https://mdblist.com/api/lists/${username}/${listName}`,
+      `https://mdblist.com/api/lists/${username}/${listName}/items`
+    ];
     
     console.log(`[MDBList] Fetching list: ${username}/${listName}...`);
     
-    let response = await fetch(apiUrl, {
-      headers: {
-        'Authorization': `Bearer ${MDBLIST_API_KEY}`,
-        'Accept': 'application/json',
-        'User-Agent': 'TrailerIO/1.0'
-      },
-      signal: AbortSignal.timeout(10000) // 10s timeout
-    });
+    let response = null;
+    let lastError = null;
     
-    // Try alternative endpoint format if first one fails
-    if (!response.ok && response.status === 404) {
-      apiUrl = `https://mdblist.com/api/lists/${username}/${listName}`;
-      console.log(`[MDBList] Trying alternative endpoint format...`);
-      response = await fetch(apiUrl, {
-        headers: {
-          'Authorization': `Bearer ${MDBLIST_API_KEY}`,
-          'Accept': 'application/json',
-          'User-Agent': 'TrailerIO/1.0'
-        },
-        signal: AbortSignal.timeout(10000)
-      });
+    // Try each endpoint format
+    for (const apiUrl of endpoints) {
+      try {
+        response = await fetch(apiUrl, {
+          headers: {
+            'Authorization': `Bearer ${MDBLIST_API_KEY}`,
+            'Accept': 'application/json',
+            'User-Agent': 'TrailerIO/1.0'
+          },
+          signal: AbortSignal.timeout(10000) // 10s timeout
+        });
+        
+        // If we get a successful response or a clear error (not 503), stop trying
+        if (response.ok || (response.status !== 503 && response.status !== 500)) {
+          break;
+        }
+        
+        // For 503/500, try next endpoint
+        if (response.status === 503 || response.status === 500) {
+          console.log(`[MDBList] Endpoint ${apiUrl} returned ${response.status}, trying next...`);
+          lastError = `HTTP ${response.status}`;
+          continue;
+        }
+      } catch (fetchError) {
+        lastError = fetchError.message;
+        continue;
+      }
+    }
+    
+    // If all endpoints failed, use the last response or return empty
+    if (!response) {
+      console.log(`[MDBList] All endpoint formats failed: ${lastError}`);
+      return [];
     }
     
     if (!response.ok) {
@@ -691,6 +711,10 @@ async function fetchMDBListItems(username, listName) {
         console.log(`[MDBList] List not found: ${username}/${listName}`);
       } else if (response.status === 429) {
         console.log(`[MDBList] Rate limit exceeded for ${username}/${listName}`);
+      } else if (response.status === 503 || response.status === 500) {
+        console.log(`[MDBList] Service unavailable (${response.status}) for ${username}/${listName} - API may be temporarily down`);
+        // Don't count 503/500 as a rate limit hit - it's a server issue
+        mdblistRateLimiter.dailyCount--;
       } else {
         console.log(`[MDBList] HTTP ${response.status} for ${username}/${listName}`);
       }
