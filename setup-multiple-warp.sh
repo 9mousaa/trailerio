@@ -183,18 +183,19 @@ generate_warp_config() {
     # Return to original directory (safe even if cd failed)
     cd "$original_dir" 2>/dev/null || true
     
-    # Output the values (will be captured by caller)
-    echo "PRIVATE_KEY=${private_key}"
-    echo "ADDRESS=${address}"
-    echo "PUBLIC_KEY=${public_key}"
-    echo "PRESHARED_KEY=${preshared_key}"
-    echo "ENDPOINT_IP=${endpoint_ip}"
-    echo "ENDPOINT_PORT=${endpoint_port}"
+    # Output the values to stdout (will be captured by caller)
+    # Use printf to avoid issues with special characters
+    printf "PRIVATE_KEY=%s\n" "$private_key"
+    printf "ADDRESS=%s\n" "$address"
+    printf "PUBLIC_KEY=%s\n" "$public_key"
+    printf "PRESHARED_KEY=%s\n" "$preshared_key"
+    printf "ENDPOINT_IP=%s\n" "$endpoint_ip"
+    printf "ENDPOINT_PORT=%s\n" "$endpoint_port"
     
     # Clean up
     rm -rf "$temp_dir"
     
-    log_success "Generated config for instance ${instance_num}"
+    log_success "Generated config for instance ${instance_num}" >&2
     return 0
 }
 
@@ -266,21 +267,41 @@ main() {
         
         while [ $retries -gt 0 ] && [ "$config_success" = false ]; do
             set +e  # Temporarily disable exit on error for this function call
+            # Capture stdout (variable assignments) separately from stderr (logs)
             local config_output=""
-            config_output=$(generate_warp_config $i 2>&1)
+            config_output=$(generate_warp_config $i 2>/dev/null)
             local generate_exit=$?
             set -e  # Re-enable exit on error
             
             if [ $generate_exit -eq 0 ] && [ -n "$config_output" ]; then
-                # Parse the output safely
-                set +e  # Disable exit on error for eval
-                eval "$config_output" 2>/dev/null
-                local eval_exit=$?
-                set -e
+                # Parse the output line by line to avoid eval issues
+                local parsed_private_key=""
+                local parsed_address=""
+                local parsed_public_key=""
+                local parsed_preshared_key=""
+                local parsed_endpoint_ip=""
+                local parsed_endpoint_port=""
                 
-                if [ $eval_exit -eq 0 ] && [ -n "${PRIVATE_KEY:-}" ] && [ -n "${ADDRESS:-}" ] && [ -n "${PUBLIC_KEY:-}" ] && [ -n "${ENDPOINT_IP:-}" ]; then
+                while IFS= read -r line; do
+                    if [[ "$line" =~ ^PRIVATE_KEY=(.+)$ ]]; then
+                        parsed_private_key="${BASH_REMATCH[1]}"
+                    elif [[ "$line" =~ ^ADDRESS=(.+)$ ]]; then
+                        parsed_address="${BASH_REMATCH[1]}"
+                    elif [[ "$line" =~ ^PUBLIC_KEY=(.+)$ ]]; then
+                        parsed_public_key="${BASH_REMATCH[1]}"
+                    elif [[ "$line" =~ ^PRESHARED_KEY=(.+)$ ]]; then
+                        parsed_preshared_key="${BASH_REMATCH[1]}"
+                    elif [[ "$line" =~ ^ENDPOINT_IP=(.+)$ ]]; then
+                        parsed_endpoint_ip="${BASH_REMATCH[1]}"
+                    elif [[ "$line" =~ ^ENDPOINT_PORT=(.+)$ ]]; then
+                        parsed_endpoint_port="${BASH_REMATCH[1]}"
+                    fi
+                done <<< "$config_output"
+                
+                # Validate parsed values
+                if [ -n "$parsed_private_key" ] && [ -n "$parsed_address" ] && [ -n "$parsed_public_key" ] && [ -n "$parsed_endpoint_ip" ]; then
                     # Update .env file
-                    update_env_file "$i" "$PRIVATE_KEY" "$ADDRESS" "$PUBLIC_KEY" "${PRESHARED_KEY:-}" "$ENDPOINT_IP" "${ENDPOINT_PORT:-2408}"
+                    update_env_file "$i" "$parsed_private_key" "$parsed_address" "$parsed_public_key" "${parsed_preshared_key:-}" "$parsed_endpoint_ip" "${parsed_endpoint_port:-2408}"
                     
                     log_success "Instance ${i} configured successfully"
                     success_count=$((success_count + 1))
@@ -288,6 +309,7 @@ main() {
                     break
                 else
                     log_warning "Config generated but parsing failed for instance ${i}"
+                    log_info "Debug: private_key=${parsed_private_key:0:20}..., address=${parsed_address}, public_key=${parsed_public_key:0:20}..., endpoint_ip=${parsed_endpoint_ip}"
                 fi
             fi
             
