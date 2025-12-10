@@ -1302,22 +1302,28 @@ async function extractViaYtDlp(youtubeKey) {
     // Default to gluetun:8000 if not explicitly set (gluetun is on same Docker network)
     let gluetunProxy = process.env.GLUETUN_HTTP_PROXY || 'http://gluetun:8000';
     
-    // Verify proxy is accessible by checking if gluetun container is reachable
+    // Try to verify proxy is accessible by checking gluetun's control API
+    // This is more reliable than trying to proxy a request
     let proxyAvailable = false;
     try {
-      // Try to connect to gluetun's HTTP proxy port (simple TCP check via HTTP CONNECT test)
-      const proxyTest = await fetch(`http://gluetun:8000`, {
+      // Check gluetun's control API to see if it's running and configured
+      const gluetunStatus = await fetch('http://gluetun:8000/v1/openvpn/status', {
         signal: AbortSignal.timeout(2000),
-        method: 'GET',
-        headers: { 'User-Agent': 'gluetun-health-check' }
+        method: 'GET'
       }).catch(() => null);
-      // If we get any response (even error), proxy is running
-      if (proxyTest !== null) {
+      
+      // If we get any response (even error), gluetun is running
+      // The proxy should be available if gluetun is running with HTTP_PROXY=on
+      if (gluetunStatus !== null) {
         proxyAvailable = true;
+        console.log(`  [yt-dlp] ✓ Gluetun proxy detected at ${gluetunProxy}`);
+      } else {
+        console.log(`  [yt-dlp] ⚠ Gluetun not reachable, using direct connection`);
       }
     } catch (proxyError) {
-      // Proxy not available, will use direct connection
+      // Gluetun not available or not configured, will use direct connection
       proxyAvailable = false;
+      console.log(`  [yt-dlp] ⚠ Gluetun check failed: ${proxyError.message}, using direct connection`);
     }
     
     const useProxy = proxyAvailable ? `--proxy ${gluetunProxy}` : '';
