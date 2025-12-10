@@ -53,6 +53,8 @@ services:
       - NODE_ENV=production
       - PORT=3001
       - TMDB_API_KEY=${TMDB_API_KEY:-}
+      - MDBLIST_API_KEY=${MDBLIST_API_KEY:-}
+      - MDBLIST_USERS=${MDBLIST_USERS:-snoak,garycrawfordgc}
       # Use gluetun HTTP proxy for yt-dlp (defaults to gluetun:8000 if not set)
       - GLUETUN_HTTP_PROXY=${GLUETUN_HTTP_PROXY:-http://gluetun:8000}
     env_file:
