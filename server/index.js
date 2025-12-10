@@ -1326,7 +1326,15 @@ async function extractViaYtDlp(youtubeKey) {
       console.log(`  [yt-dlp] ⚠ Gluetun check failed: ${proxyError.message}, using direct connection`);
     }
     
-    const useProxy = proxyAvailable ? `--proxy ${gluetunProxy}` : '';
+    // Try HTTP proxy first, fallback to SOCKS5 if HTTP fails
+    // Gluetun supports both HTTP (port 8000) and SOCKS5 (port 1080)
+    let useProxy = '';
+    if (proxyAvailable) {
+      // Try HTTP proxy first
+      useProxy = `--proxy ${gluetunProxy}`;
+      // Note: If HTTP proxy gives 401, we could try SOCKS5: --proxy socks5://gluetun:1080
+      // But let's try HTTP first as it's simpler
+    }
     
     // Anti-blocking strategies:
     // 1. Use proper user agent (mimic browser)
