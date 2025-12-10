@@ -2709,25 +2709,19 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
               });
               
               const bestFile = videoFiles[0];
-              // Use stream endpoint for direct streaming (not download)
-              // Format: https://archive.org/stream/{identifier}/{filename}
-              // Or use the direct video URL from metadata if available
+              // Archive.org direct video file URL for streaming
+              // Format: https://archive.org/download/{identifier}/{filename}
+              // This is a direct file URL that can be streamed in browsers/video players
+              // The /download/ endpoint serves the actual file and supports Range requests for streaming
               let videoUrl;
               if (bestFile.name) {
-                // Try to get direct streamable URL from Archive's CDN
-                // Archive.org serves videos via their CDN at archive.org/download, but we need streamable format
-                // The stream endpoint works better for streaming: https://archive.org/stream/{identifier}/{filename}
-                // However, for direct streaming, we can use the download URL with proper headers
-                // Better: Use the direct video URL from the file's URL field if available
-                if (bestFile.url && bestFile.url.startsWith('http')) {
-                  videoUrl = bestFile.url;
-                } else {
-                  // Fallback: Use stream endpoint for better streaming support
-                  videoUrl = `https://archive.org/stream/${identifier}/${encodeURIComponent(bestFile.name)}`;
-                }
-              } else {
-                // Last resort: download endpoint (may require Range headers for streaming)
+                // Use direct download URL - this is the actual video file, streamable with Range headers
+                // Archive.org's /download/ endpoint serves files directly and supports HTTP Range requests
                 videoUrl = `https://archive.org/download/${identifier}/${encodeURIComponent(bestFile.name)}`;
+              } else {
+                log_error("No video file name found in Archive metadata");
+                successTracker.recordFailure('archive', strategy.id);
+                continue;
               }
               
               // Estimate quality from file size and format (Archive doesn't provide explicit quality)
