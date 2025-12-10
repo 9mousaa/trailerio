@@ -311,6 +311,80 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Circuit breaker for instances (tracks failures and temporarily disables dead instances)
+const circuitBreakers = {
+  piped: new Map(), // instance URL -> { failures: number, lastFailure: timestamp, open: boolean }
+  invidious: new Map(), // instance URL -> { failures: number, lastFailure: timestamp, open: boolean }
+  CIRCUIT_OPEN_THRESHOLD: 5, // Open circuit after 5 consecutive failures
+  CIRCUIT_RESET_TIME: 10 * 60 * 1000, // Reset after 10 minutes
+};
+
+// Source response time tracking (for dynamic timeouts)
+const sourceResponseTimes = {
+  itunes: [],
+  piped: [],
+  invidious: [],
+  ytdlp: [],
+  archive: [],
+  MAX_SAMPLES: 50, // Keep last 50 response times per source
+  getAverageTime(source) {
+    const times = this[source] || [];
+    if (times.length === 0) return null;
+    return times.reduce((a, b) => a + b, 0) / times.length;
+  },
+  recordTime(source, duration) {
+    if (!this[source]) this[source] = [];
+    this[source].push(duration);
+    if (this[source].length > this.MAX_SAMPLES) {
+      this[source].shift(); // Remove oldest
+    }
+  },
+  getTimeout(source, defaultTimeout) {
+    const avgTime = this.getAverageTime(source);
+    if (!avgTime) return defaultTimeout;
+    // Use 3x average time, but cap at defaultTimeout and minimum 2s
+    return Math.max(2000, Math.min(defaultTimeout, avgTime * 3));
+  }
+};
+
+// Quality tracking for sources (prefer sources that return higher quality)
+const qualityTracker = {
+  sources: new Map(), // source -> { totalQuality: number, count: number, avgQuality: number }
+  QUALITY_SCORES: {
+    '2160p': 4, '4k': 4,
+    '1440p': 3.5, '2k': 3.5,
+    '1080p': 3, '1080': 3,
+    '720p': 2, '720': 2,
+    '480p': 1, '480': 1,
+    '360p': 0.5, '360': 0.5,
+    '240p': 0.25, '240': 0.25,
+    'best': 2.5, // Default "best" quality
+    'unknown': 1.5 // Unknown quality
+  },
+  getQualityScore(quality) {
+    if (!quality) return this.QUALITY_SCORES.unknown;
+    const qualityLower = quality.toLowerCase();
+    for (const [key, score] of Object.entries(this.QUALITY_SCORES)) {
+      if (qualityLower.includes(key)) return score;
+    }
+    return this.QUALITY_SCORES.unknown;
+  },
+  recordQuality(source, quality) {
+    if (!this.sources.has(source)) {
+      this.sources.set(source, { totalQuality: 0, count: 0, avgQuality: 0 });
+    }
+    const stats = this.sources.get(source);
+    const score = this.getQualityScore(quality);
+    stats.totalQuality += score;
+    stats.count++;
+    stats.avgQuality = stats.totalQuality / stats.count;
+  },
+  getAvgQuality(source) {
+    const stats = this.sources.get(source);
+    return stats ? stats.avgQuality : 1.5; // Default to unknown quality
+  }
+};
+
 // Success rate tracking for smart sorting
 const successTracker = {
   // Source-level tracking (overall success rate for each source)
@@ -356,6 +430,15 @@ const successTracker = {
     stats.total++;
     // Save to database
     this._saveToDB(type, identifier, stats.success, stats.total);
+    
+    // Reset circuit breaker on success
+    if (type === 'piped' || type === 'invidious') {
+      const breaker = circuitBreakers[type].get(identifier);
+      if (breaker) {
+        breaker.failures = 0;
+        breaker.open = false;
+      }
+    }
   },
   
   recordFailure(type, identifier) {
@@ -367,6 +450,40 @@ const successTracker = {
     stats.total++;
     // Save to database
     this._saveToDB(type, identifier, stats.success, stats.total);
+    
+    // Update circuit breaker on failure
+    if (type === 'piped' || type === 'invidious') {
+      if (!circuitBreakers[type].has(identifier)) {
+        circuitBreakers[type].set(identifier, { failures: 0, lastFailure: 0, open: false });
+      }
+      const breaker = circuitBreakers[type].get(identifier);
+      breaker.failures++;
+      breaker.lastFailure = Date.now();
+      
+      // Open circuit if threshold reached
+      if (breaker.failures >= circuitBreakers.CIRCUIT_OPEN_THRESHOLD) {
+        breaker.open = true;
+        console.log(`  [Circuit Breaker] ${type}/${identifier} opened after ${breaker.failures} failures`);
+      }
+    }
+  },
+  
+  // Check if instance is available (circuit breaker)
+  isInstanceAvailable(type, identifier) {
+    if (type !== 'piped' && type !== 'invidious') return true;
+    
+    const breaker = circuitBreakers[type].get(identifier);
+    if (!breaker) return true;
+    
+    // Check if circuit should be reset
+    if (breaker.open && Date.now() - breaker.lastFailure > circuitBreakers.CIRCUIT_RESET_TIME) {
+      breaker.open = false;
+      breaker.failures = 0;
+      console.log(`  [Circuit Breaker] ${type}/${identifier} reset after timeout`);
+      return true;
+    }
+    
+    return !breaker.open;
   },
   
   getSuccessRate(type, identifier) {
@@ -377,11 +494,13 @@ const successTracker = {
   },
   
   sortBySuccessRate(type, list) {
-    return [...list].sort((a, b) => {
-      const rateA = this.getSuccessRate(type, a);
-      const rateB = this.getSuccessRate(type, b);
-      return rateB - rateA; // Sort descending (highest success rate first)
-    });
+    return [...list]
+      .filter(item => this.isInstanceAvailable(type, item)) // Filter out circuit-broken instances
+      .sort((a, b) => {
+        const rateA = this.getSuccessRate(type, a);
+        const rateB = this.getSuccessRate(type, b);
+        return rateB - rateA; // Sort descending (highest success rate first)
+      });
   },
   
   // Source-level tracking methods
@@ -412,11 +531,33 @@ const successTracker = {
     return stats.success / stats.total;
   },
   
-  getSortedSources(availableSources) {
+  getSortedSources(availableSources, contentType = 'movie') {
     return [...availableSources].sort((a, b) => {
       const rateA = this.getSourceSuccessRate(a);
       const rateB = this.getSourceSuccessRate(b);
-      return rateB - rateA; // Sort descending (highest success rate first)
+      
+      // Content-type aware prioritization
+      let priorityA = 0, priorityB = 0;
+      if (contentType === 'series') {
+        // TV shows: iTunes is best, then YouTube sources
+        if (a === 'itunes') priorityA = 0.3;
+        if (b === 'itunes') priorityB = 0.3;
+      } else {
+        // Movies: Archive is best for older movies, YouTube sources for newer
+        if (a === 'archive') priorityA = 0.2;
+        if (b === 'archive') priorityB = 0.2;
+      }
+      
+      // Quality-based weighting (prefer sources that return higher quality)
+      const qualityA = qualityTracker.getAvgQuality(a);
+      const qualityB = qualityTracker.getAvgQuality(b);
+      const qualityWeight = 0.1; // 10% weight for quality
+      
+      // Combined score: success rate + content priority + quality
+      const scoreA = rateA + priorityA + (qualityA * qualityWeight);
+      const scoreB = rateB + priorityB + (qualityB * qualityWeight);
+      
+      return scoreB - scoreA; // Sort descending (highest score first)
     });
   }
 };
@@ -430,6 +571,85 @@ setInterval(() => {
 // Also run cleanup on startup
 cleanupCache();
 cleanupSuccessTracker();
+
+// Cache warming: Pre-cache popular content
+async function warmCache() {
+  if (!TMDB_API_KEY) {
+    console.log('[Cache Warming] TMDB_API_KEY not set, skipping cache warming');
+    return;
+  }
+  
+  console.log('[Cache Warming] Starting cache warming for popular content...');
+  
+  try {
+    // Get popular movies and TV shows from TMDB
+    const [moviesResponse, tvResponse] = await Promise.allSettled([
+      fetch(`https://api.themoviedb.org/3/movie/popular?api_key=${TMDB_API_KEY}&page=1&limit=50`),
+      fetch(`https://api.themoviedb.org/3/tv/popular?api_key=${TMDB_API_KEY}&page=1&limit=50`)
+    ]);
+    
+    const popularItems = [];
+    
+    if (moviesResponse.status === 'fulfilled' && moviesResponse.value.ok) {
+      const moviesData = await moviesResponse.value.json();
+      for (const movie of (moviesData.results || []).slice(0, 25)) {
+        if (movie.external_ids?.imdb_id) {
+          popularItems.push({ imdbId: movie.external_ids.imdb_id, type: 'movie' });
+        }
+      }
+    }
+    
+    if (tvResponse.status === 'fulfilled' && tvResponse.value.ok) {
+      const tvData = await tvResponse.value.json();
+      for (const show of (tvData.results || []).slice(0, 25)) {
+        if (show.external_ids?.imdb_id) {
+          popularItems.push({ imdbId: show.external_ids.imdb_id, type: 'series' });
+        }
+      }
+    }
+    
+    console.log(`[Cache Warming] Found ${popularItems.length} popular items to cache`);
+    
+    // Cache items sequentially to avoid overwhelming the system
+    let cached = 0;
+    let skipped = 0;
+    
+    for (const item of popularItems) {
+      // Check if already cached
+      const existing = getCached(item.imdbId);
+      if (existing && existing.preview_url) {
+        skipped++;
+        continue;
+      }
+      
+      try {
+        // Resolve preview (this will cache it)
+        // Convert 'series' to 'series' (already correct) or 'movie' to 'movie'
+        const resolveType = item.type === 'series' ? 'series' : 'movie';
+        await resolvePreview(item.imdbId, resolveType);
+        cached++;
+        
+        // Small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } catch (error) {
+        console.log(`[Cache Warming] Failed to cache ${item.imdbId}: ${error.message}`);
+      }
+    }
+    
+    console.log(`[Cache Warming] Complete: ${cached} cached, ${skipped} already cached, ${popularItems.length - cached - skipped} failed`);
+  } catch (error) {
+    console.error(`[Cache Warming] Error: ${error.message}`);
+  }
+}
+
+// Run cache warming on startup (after 30 seconds) and then every 6 hours
+setTimeout(() => {
+  warmCache();
+}, 30 * 1000); // 30 seconds after startup
+
+setInterval(() => {
+  warmCache();
+}, 6 * 60 * 60 * 1000); // Every 6 hours
 
 app.use(cors());
 app.use(express.json());
@@ -1227,7 +1447,7 @@ async function extractViaInvidious(youtubeKey) {
           const best = sorted[0];
           console.log(`  ✓ [Invidious] ${instance}: got ${best.quality || 'unknown'} from adaptiveFormats`);
           successTracker.recordSuccess('invidious', instance);
-          return best.url;
+          return { url: best.url, quality: best.quality, isDash: false };
         }
       }
       
@@ -1241,7 +1461,7 @@ async function extractViaInvidious(youtubeKey) {
           const best = sorted[0];
           console.log(`  ✓ [Invidious] ${instance}: got ${best.qualityLabel || 'unknown'} from formatStreams`);
           successTracker.recordSuccess('invidious', instance);
-          return best.url;
+          return { url: best.url, quality: best.qualityLabel || 'unknown', isDash: false };
         }
       }
       
@@ -1274,14 +1494,23 @@ async function extractViaInvidious(youtubeKey) {
   };
   
   const results = await Promise.allSettled(sortedInstances.map(tryInstance));
-  const validUrl = results
-    .filter(r => r.status === 'fulfilled' && r.value !== null)
-    .map(r => r.value)[0];
+  const successfulResults = results
+    .map((r) => r.status === 'fulfilled' && r.value ? r.value : null)
+    .filter(r => r !== null);
   
-  if (validUrl) {
-    const successCount = results.filter(r => r.status === 'fulfilled' && r.value !== null).length;
-    console.log(`  ✓ [Invidious] Got URL from Invidious (${successCount}/${sortedInstances.length} instances succeeded)`);
-    return validUrl;
+  if (successfulResults.length > 0) {
+    // Sort by quality and return best
+    const qualityPriority = ['2160p', '1440p', '1080p', '720p', '480p', '360p'];
+    const sorted = successfulResults.sort((a, b) => {
+      const rankA = qualityPriority.findIndex(p => (a.quality || '').toLowerCase().includes(p));
+      const rankB = qualityPriority.findIndex(p => (b.quality || '').toLowerCase().includes(p));
+      return (rankA === -1 ? 999 : rankA) - (rankB === -1 ? 999 : rankB);
+    });
+    
+    const best = sorted[0];
+    const successCount = successfulResults.length;
+    console.log(`  ✓ [Invidious] Got URL from Invidious (quality: ${best.quality || 'unknown'}, from ${successCount}/${sortedInstances.length} instances)`);
+    return best;
   }
   
   console.log(`  ✗ [Invidious] All ${sortedInstances.length} instances failed or timed out`);
@@ -1992,9 +2221,17 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
               const bestFile = videoFiles[0];
               const videoUrl = `https://archive.org/download/${identifier}/${encodeURIComponent(bestFile.name)}`;
               
-              console.log(`  ✓ [Internet Archive] Found: "${bestMatch.title}" (${bestFile.format || 'video'}, ${Math.round((bestFile.size || 0) / 1024 / 1024)}MB) via strategy "${strategy.description}"`);
+              // Estimate quality from file size and format (Archive doesn't provide explicit quality)
+              let quality = 'unknown';
+              const fileSizeMB = (bestFile.size || 0) / 1024 / 1024;
+              if (fileSizeMB > 100) quality = '1080p';
+              else if (fileSizeMB > 50) quality = '720p';
+              else if (fileSizeMB > 20) quality = '480p';
+              else quality = '360p';
+              
+              console.log(`  ✓ [Internet Archive] Found: "${bestMatch.title}" (${bestFile.format || 'video'}, ${Math.round(fileSizeMB)}MB, est. ${quality}) via strategy "${strategy.description}"`);
               successTracker.recordSuccess('archive', strategy.id);
-              return videoUrl;
+              return { url: videoUrl, quality: quality, isDash: false };
             } else {
               // Log first few file names for debugging
               const fileNames = files.slice(0, 5).map(f => f.name || 'unnamed').join(', ');
@@ -2296,19 +2533,29 @@ async function resolvePreview(imdbId, type) {
   }
   availableSources.push('archive');
   
-  // Sort sources by success rate (highest first)
-  const sortedSources = successTracker.getSortedSources(availableSources);
+  // Sort sources by success rate, quality, and content type (highest first)
+  const contentType = type === 'series' ? 'series' : 'movie';
+  const sortedSources = successTracker.getSortedSources(availableSources, contentType);
   const sourceRates = sortedSources.map(s => {
     const rate = successTracker.getSourceSuccessRate(s);
-    return `${s.toUpperCase()} (${(rate * 100).toFixed(0)}%)`;
+    const quality = qualityTracker.getAvgQuality(s);
+    return `${s.toUpperCase()} (${(rate * 100).toFixed(0)}%, q:${quality.toFixed(1)})`;
   }).join(', ');
-  logger.info(`Trying sources (sorted by success rate): ${sourceRates}`);
+  logger.info(`Trying sources (sorted by success rate + quality + content type): ${sourceRates}`);
   
-  // Try each source in sorted order
-  const SOURCE_TIMEOUT = 10000; // 10 seconds per source - reduced to prevent overall timeout
+  // PARALLEL SOURCE ATTEMPTS: Try top 3 sources simultaneously
+  const PARALLEL_SOURCES = 3;
+  const topSources = sortedSources.slice(0, PARALLEL_SOURCES);
+  const fallbackSources = sortedSources.slice(PARALLEL_SOURCES);
   
-  for (const source of sortedSources) {
+  // Helper function to attempt a source with timeout and response time tracking
+  const attemptSource = async (source) => {
+    const startTime = Date.now();
     logger.source(source, `Attempting extraction...`);
+    
+    // Get dynamic timeout for this source
+    const defaultTimeout = 10000; // 10 seconds default
+    const sourceTimeout = sourceResponseTimes.getTimeout(source, defaultTimeout);
     
     try {
       // Wrap each source attempt in a timeout to prevent hanging
@@ -2318,6 +2565,10 @@ async function resolvePreview(imdbId, type) {
           console.log(`iTunes search result: ${itunesResult.found ? 'FOUND' : 'NOT FOUND'}`);
           
           if (itunesResult.found) {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('itunes', duration);
+            qualityTracker.recordQuality('itunes', '480p'); // iTunes typically 480p
+            
             setCache(imdbId, {
               track_id: itunesResult.trackId,
               preview_url: itunesResult.previewUrl,
@@ -2327,8 +2578,10 @@ async function resolvePreview(imdbId, type) {
             });
             console.log(`✓ Found iTunes preview: ${itunesResult.previewUrl}`);
             successTracker.recordSourceSuccess('itunes');
-            return { ...itunesResult, source: 'itunes' };
+            return { ...itunesResult, source: 'itunes', quality: '480p' };
           } else {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('itunes', duration);
             successTracker.recordSourceFailure('itunes');
             return null;
           }
@@ -2341,7 +2594,13 @@ async function resolvePreview(imdbId, type) {
           console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
           const pipedResult = await extractViaPiped(tmdbMeta.youtubeTrailerKey);
           if (pipedResult) {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('piped', duration);
+            
             const pipedUrl = typeof pipedResult === 'string' ? pipedResult : pipedResult.url;
+            const quality = typeof pipedResult === 'object' ? (pipedResult.quality || 'unknown') : 'unknown';
+            qualityTracker.recordQuality('piped', quality);
+            
             setCache(imdbId, {
               track_id: null,
               preview_url: pipedUrl,
@@ -2356,9 +2615,12 @@ async function resolvePreview(imdbId, type) {
               source: 'youtube',
               previewUrl: pipedUrl,
               youtubeKey: tmdbMeta.youtubeTrailerKey,
-              country: 'yt'
+              country: 'yt',
+              quality: quality
             };
           } else {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('piped', duration);
             successTracker.recordSourceFailure('piped');
             return null;
           }
@@ -2371,6 +2633,12 @@ async function resolvePreview(imdbId, type) {
           console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
           const ytdlpResult = await extractViaYtDlp(tmdbMeta.youtubeTrailerKey);
           if (ytdlpResult && ytdlpResult.url) {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            
+            const quality = ytdlpResult.quality || 'best';
+            qualityTracker.recordQuality('ytdlp', quality);
+            
             setCache(imdbId, {
               track_id: null,
               preview_url: ytdlpResult.url,
@@ -2385,9 +2653,12 @@ async function resolvePreview(imdbId, type) {
               source: 'youtube',
               previewUrl: ytdlpResult.url,
               youtubeKey: tmdbMeta.youtubeTrailerKey,
-              country: 'yt'
+              country: 'yt',
+              quality: quality
             };
           } else {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
             successTracker.recordSourceFailure('ytdlp');
             return null;
           }
@@ -2398,8 +2669,15 @@ async function resolvePreview(imdbId, type) {
             return null;
           }
           console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
-          const invidiousUrl = await extractViaInvidious(tmdbMeta.youtubeTrailerKey);
-          if (invidiousUrl) {
+          const invidiousResult = await extractViaInvidious(tmdbMeta.youtubeTrailerKey);
+          if (invidiousResult) {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('invidious', duration);
+            
+            const invidiousUrl = typeof invidiousResult === 'string' ? invidiousResult : invidiousResult.url;
+            const quality = typeof invidiousResult === 'object' ? (invidiousResult.quality || 'unknown') : 'unknown';
+            qualityTracker.recordQuality('invidious', quality);
+            
             setCache(imdbId, {
               track_id: null,
               preview_url: invidiousUrl,
@@ -2414,15 +2692,25 @@ async function resolvePreview(imdbId, type) {
               source: 'youtube',
               previewUrl: invidiousUrl,
               youtubeKey: tmdbMeta.youtubeTrailerKey,
-              country: 'yt'
+              country: 'yt',
+              quality: quality
             };
           } else {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('invidious', duration);
             successTracker.recordSourceFailure('invidious');
             return null;
           }
         } else if (source === 'archive') {
-          const archiveUrl = await extractViaInternetArchive(tmdbMeta, imdbId);
-          if (archiveUrl) {
+          const archiveResult = await extractViaInternetArchive(tmdbMeta, imdbId);
+          if (archiveResult) {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('archive', duration);
+            
+            const archiveUrl = typeof archiveResult === 'string' ? archiveResult : archiveResult.url;
+            const quality = typeof archiveResult === 'object' ? (archiveResult.quality || 'unknown') : 'unknown';
+            qualityTracker.recordQuality('archive', quality);
+            
             setCache(imdbId, {
               track_id: null,
               preview_url: archiveUrl,
@@ -2436,9 +2724,12 @@ async function resolvePreview(imdbId, type) {
               found: true,
               source: 'archive',
               previewUrl: archiveUrl,
-              country: 'archive'
+              country: 'archive',
+              quality: quality
             };
           } else {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('archive', duration);
             successTracker.recordSourceFailure('archive');
             return null;
           }
@@ -2446,9 +2737,9 @@ async function resolvePreview(imdbId, type) {
         return null;
       };
       
-      // Race the source attempt against a timeout
+      // Race the source attempt against a dynamic timeout
       const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error(`Source ${source} timeout after ${SOURCE_TIMEOUT}ms`)), SOURCE_TIMEOUT)
+        setTimeout(() => reject(new Error(`Source ${source} timeout after ${sourceTimeout}ms`)), sourceTimeout)
       );
       
       const result = await Promise.race([sourceAttempt(), timeoutPromise]);
@@ -2456,15 +2747,42 @@ async function resolvePreview(imdbId, type) {
       if (result && result.found) {
         return result;
       }
+      return null;
     } catch (error) {
+      const duration = Date.now() - startTime;
+      sourceResponseTimes.recordTime(source, duration);
+      
       if (error.message && error.message.includes('timeout')) {
-        console.log(`  ⚠️ ${source.toUpperCase()} timed out after ${SOURCE_TIMEOUT}ms`);
+        console.log(`  ⚠️ ${source.toUpperCase()} timed out after ${sourceTimeout}ms`);
       } else {
         console.log(`  ✗ Error in ${source.toUpperCase()}: ${error.message || 'unknown error'}`);
       }
       successTracker.recordSourceFailure(source);
-      // Continue to next source instead of crashing
-      continue;
+      return null;
+    }
+  };
+  
+  // Try top sources in parallel
+  if (topSources.length > 0) {
+    logger.info(`Trying ${topSources.length} sources in parallel: ${topSources.join(', ')}`);
+    const parallelResults = await Promise.allSettled(topSources.map(attemptSource));
+    
+    // Find first successful result
+    for (const result of parallelResults) {
+      if (result.status === 'fulfilled' && result.value && result.value.found) {
+        logger.success(`Found via parallel attempt: ${result.value.source}`);
+        return result.value;
+      }
+    }
+    
+    logger.info(`Parallel attempts failed, trying ${fallbackSources.length} fallback sources sequentially`);
+  }
+  
+  // Fallback: Try remaining sources sequentially
+  for (const source of fallbackSources) {
+    const result = await attemptSource(source);
+    if (result && result.found) {
+      return result;
     }
   }
   
