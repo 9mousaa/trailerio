@@ -2869,6 +2869,176 @@ async function resolvePreview(imdbId, type) {
             successTracker.recordSourceFailure('invidious');
             return null;
           }
+        } else if (source === 'imdb_trailer') {
+          // IMDb trailers - use IMDb ID directly
+          const imdbUrl = `https://www.imdb.com/title/${imdbId}/videogallery`;
+          const imdbResult = await extractViaYtDlpGeneric(imdbUrl, 'IMDb');
+          if (imdbResult && imdbResult.url) {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            
+            const quality = imdbResult.quality || 'best';
+            qualityTracker.recordQuality('imdb', quality);
+            
+            setCache(imdbId, {
+              track_id: null,
+              preview_url: imdbResult.url,
+              country: 'imdb',
+              youtube_key: null,
+              source: 'imdb'
+            });
+            console.log(`✓ Got URL from IMDb trailers`);
+            successTracker.recordSourceSuccess('imdb');
+            return {
+              found: true,
+              source: 'imdb',
+              previewUrl: imdbResult.url,
+              youtubeKey: null,
+              country: 'imdb',
+              quality: quality
+            };
+          } else {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            successTracker.recordSourceFailure('imdb');
+            return null;
+          }
+        } else if (source === 'iva') {
+          // InternetVideoArchive - try to find trailer by title/year
+          const ivaUrl = `https://www.internetvideoarchive.com/video/${encodeURIComponent(tmdbMeta.title)}/${tmdbMeta.year || ''}`;
+          const ivaResult = await extractViaYtDlpGeneric(ivaUrl, 'InternetVideoArchive');
+          if (ivaResult && ivaResult.url) {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            
+            const quality = ivaResult.quality || 'best';
+            qualityTracker.recordQuality('iva', quality);
+            
+            setCache(imdbId, {
+              track_id: null,
+              preview_url: ivaResult.url,
+              country: 'iva',
+              youtube_key: null,
+              source: 'iva'
+            });
+            console.log(`✓ Got URL from InternetVideoArchive`);
+            successTracker.recordSourceSuccess('iva');
+            return {
+              found: true,
+              source: 'iva',
+              previewUrl: ivaResult.url,
+              youtubeKey: null,
+              country: 'iva',
+              quality: quality
+            };
+          } else {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            successTracker.recordSourceFailure('iva');
+            return null;
+          }
+        } else if (source === 'appletrailers') {
+          // Apple Trailers - try to find by title
+          const appleUrl = `https://trailers.apple.com/trailers/search/?q=${encodeURIComponent(tmdbMeta.title)}`;
+          const appleResult = await extractViaYtDlpGeneric(appleUrl, 'AppleTrailers');
+          if (appleResult && appleResult.url) {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            
+            const quality = appleResult.quality || 'best';
+            qualityTracker.recordQuality('appletrailers', quality);
+            
+            setCache(imdbId, {
+              track_id: null,
+              preview_url: appleResult.url,
+              country: 'apple',
+              youtube_key: null,
+              source: 'apple'
+            });
+            console.log(`✓ Got URL from Apple Trailers`);
+            successTracker.recordSourceSuccess('appletrailers');
+            return {
+              found: true,
+              source: 'apple',
+              previewUrl: appleResult.url,
+              youtubeKey: null,
+              country: 'apple',
+              quality: quality
+            };
+          } else {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            successTracker.recordSourceFailure('appletrailers');
+            return null;
+          }
+        } else if (source === 'rottentomatoes') {
+          // RottenTomatoes - try to find by title/year
+          const rtUrl = `https://www.rottentomatoes.com/m/${encodeURIComponent(tmdbMeta.title.toLowerCase().replace(/\s+/g, '_'))}_${tmdbMeta.year || ''}`;
+          const rtResult = await extractViaYtDlpGeneric(rtUrl, 'RottenTomatoes');
+          if (rtResult && rtResult.url) {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            
+            const quality = rtResult.quality || 'best';
+            qualityTracker.recordQuality('rottentomatoes', quality);
+            
+            setCache(imdbId, {
+              track_id: null,
+              preview_url: rtResult.url,
+              country: 'rt',
+              youtube_key: null,
+              source: 'rt'
+            });
+            console.log(`✓ Got URL from RottenTomatoes`);
+            successTracker.recordSourceSuccess('rottentomatoes');
+            return {
+              found: true,
+              source: 'rt',
+              previewUrl: rtResult.url,
+              youtubeKey: null,
+              country: 'rt',
+              quality: quality
+            };
+          } else {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            successTracker.recordSourceFailure('rottentomatoes');
+            return null;
+          }
+        } else if (source === 'metacritic') {
+          // Metacritic - try to find by title/year
+          const mcUrl = `https://www.metacritic.com/movie/${encodeURIComponent(tmdbMeta.title.toLowerCase().replace(/\s+/g, '-'))}`;
+          const mcResult = await extractViaYtDlpGeneric(mcUrl, 'Metacritic');
+          if (mcResult && mcResult.url) {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            
+            const quality = mcResult.quality || 'best';
+            qualityTracker.recordQuality('metacritic', quality);
+            
+            setCache(imdbId, {
+              track_id: null,
+              preview_url: mcResult.url,
+              country: 'mc',
+              youtube_key: null,
+              source: 'mc'
+            });
+            console.log(`✓ Got URL from Metacritic`);
+            successTracker.recordSourceSuccess('metacritic');
+            return {
+              found: true,
+              source: 'mc',
+              previewUrl: mcResult.url,
+              youtubeKey: null,
+              country: 'mc',
+              quality: quality
+            };
+          } else {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            successTracker.recordSourceFailure('metacritic');
+            return null;
+          }
         } else if (source === 'archive') {
           const archiveResult = await extractViaInternetArchive(tmdbMeta, imdbId);
           if (archiveResult) {
