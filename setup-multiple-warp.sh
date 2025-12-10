@@ -232,6 +232,20 @@ generate_warp_config() {
     server_public_key=$(echo -n "$server_public_key" | tr -d '\n\r\t ')
     preshared_key=$(echo -n "$preshared_key" | tr -d '\n\r\t ')
     
+    # CRITICAL: Ensure private key is exactly 44 characters (base64 padding)
+    # WireGuard keys are 32 bytes = 44 base64 chars (with = padding)
+    # If key is 43 chars, it's missing the = padding
+    if [ ${#private_key} -eq 43 ]; then
+        private_key="${private_key}="
+        log_info "Added = padding to private key for instance ${instance_num}"
+    fi
+    
+    # Validate final key length
+    if [ ${#private_key} -ne 44 ]; then
+        log_error "Private key for instance ${instance_num} is ${#private_key} chars (expected 44)"
+        return 1
+    fi
+    
     printf "PRIVATE_KEY=%s\n" "$private_key"
     printf "ADDRESS=%s\n" "$address"
     printf "PUBLIC_KEY=%s\n" "$server_public_key"
@@ -287,6 +301,20 @@ update_env_file() {
     address=$(echo -n "$address" | tr -d '\n\r\t ')
     endpoint_ip=$(echo -n "$endpoint_ip" | tr -d '\n\r\t ')
     endpoint_port=$(echo -n "$endpoint_port" | tr -d '\n\r\t ')
+    
+    # CRITICAL: Ensure private key is exactly 44 characters (base64 padding)
+    # WireGuard keys are 32 bytes = 44 base64 chars (with = padding)
+    # If key is 43 chars, it's missing the = padding
+    if [ ${#private_key} -eq 43 ]; then
+        private_key="${private_key}="
+        log_info "Added = padding to private key for instance ${instance_num}"
+    fi
+    
+    # Validate final key length
+    if [ ${#private_key} -ne 44 ]; then
+        log_error "Private key for instance ${instance_num} is ${#private_key} chars (expected 44) - SKIPPING"
+        return 1
+    fi
     
     echo "" >> "$ENV_FILE"
     echo "# Cloudflare Warp Instance ${instance_num}" >> "$ENV_FILE"
