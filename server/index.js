@@ -2819,9 +2819,9 @@ function setCache(imdbId, data) {
     const duration = Date.now() - startTime;
     if (duration > 50) {
       console.warn(`[Cache] Slow DB write: ${duration}ms for ${imdbId}`);
-    } else {
-      logger.debug(`[Cache] Saved ${imdbId} to database (${sourceType}, ${duration}ms)`);
     }
+    // Always log successful cache saves (not just debug)
+    logger.cache('hit', `Saved to DB: ${imdbId} (${sourceType}, ${duration}ms)`);
   } catch (error) {
     // Don't spam logs for database locked errors
     if (!error.message.includes('database is locked') && !error.message.includes('SQLITE_BUSY')) {
@@ -2844,11 +2844,12 @@ async function resolvePreview(imdbId, type) {
       const ttlHours = CACHE_TTL[sourceType] || CACHE_TTL.youtube;
       const agePercent = (hoursSinceCheck / ttlHours) * 100;
       
-      // Log cache hit with age info
+      // Log cache hit with age info and URL preview
+      const urlPreview = cached.preview_url.substring(0, 60) + (cached.preview_url.length > 60 ? '...' : '');
       if (agePercent < 10) {
-        logger.cache('hit', `⚡ INSTANT cache hit: ${sourceType} (${hoursSinceCheck.toFixed(1)}h old)`);
+        logger.cache('hit', `⚡ INSTANT cache hit: ${sourceType} (${hoursSinceCheck.toFixed(1)}h old) - ${urlPreview}`);
       } else {
-        logger.cache('hit', `Cache hit: ${sourceType} (${hoursSinceCheck.toFixed(1)}h old, ${agePercent.toFixed(0)}% of TTL)`);
+        logger.cache('hit', `Cache hit: ${sourceType} (${hoursSinceCheck.toFixed(1)}h old, ${agePercent.toFixed(0)}% of TTL) - ${urlPreview}`);
       }
       
       return {
