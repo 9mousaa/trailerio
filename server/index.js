@@ -575,17 +575,17 @@ const successTracker = {
       // Source priority (higher = better):
       // - ytdlp: 0.5 (highest - official YouTube trailers from TMDB)
       // - appletrailers: 0.3 (high quality, official)
-      // - itunes: 0.3 (for TV shows)
+      // - itunes: 0.2 (for TV shows - episode previews, lower than trailers)
       // - archive: 0.1 (fallback for older/obscure content)
       
       if (a === 'ytdlp') priorityA = 0.5;
       else if (a === 'appletrailers') priorityA = 0.3;
-      else if (a === 'itunes') priorityA = 0.3;
+      else if (a === 'itunes') priorityA = 0.2; // Lower priority than trailers
       else if (a === 'archive') priorityA = 0.1;
       
       if (b === 'ytdlp') priorityB = 0.5;
       else if (b === 'appletrailers') priorityB = 0.3;
-      else if (b === 'itunes') priorityB = 0.3;
+      else if (b === 'itunes') priorityB = 0.2; // Lower priority than trailers
       else if (b === 'archive') priorityB = 0.1;
       
       // Quality-based weighting (prefer sources that return higher quality)
