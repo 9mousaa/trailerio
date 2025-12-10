@@ -129,32 +129,23 @@ else:
     print("export PRESHARED_KEY=''")
 
 # Address can appear multiple times (IPv4 and IPv6), collect all
-# WireGuard config can have multiple Address lines, handle various formats
+# Only extract from lines that start with "Address" (WireGuard config format)
 address_lines = []
 for line in content.split('\n'):
-    original_line = line
-    line = line.strip()
-    # Match Address line (case insensitive, with or without spaces around =)
-    if 'address' in line.lower() and '=' in line.lower():
+    line_stripped = line.strip()
+    # Only match lines that start with "Address" (case insensitive)
+    if line_stripped.lower().startswith('address'):
         # Extract everything after = and before any comment
-        parts = line.split('=', 1)
-        if len(parts) == 2:
-            addr_part = parts[1].split('#')[0].strip()
-            # Remove any trailing commas or semicolons
-            addr_part = addr_part.rstrip(',;')
-            if addr_part and '/' in addr_part:
-                address_lines.append(addr_part)
+        if '=' in line_stripped:
+            parts = line_stripped.split('=', 1)
+            if len(parts) == 2:
+                addr_part = parts[1].split('#')[0].strip()
+                # Remove any trailing commas or semicolons
+                addr_part = addr_part.rstrip(',;')
+                if addr_part and '/' in addr_part:
+                    address_lines.append(addr_part)
 
-# Also try regex as fallback
-if not address_lines:
-    import re
-    address_matches = re.findall(r'Address\s*=\s*([^\s#\n\r,;]+)', content, re.IGNORECASE | re.MULTILINE)
-    for addr in address_matches:
-        addr = addr.strip().rstrip(',;')
-        if addr and '/' in addr:
-            address_lines.append(addr)
-
-# Validate each address has both IP and CIDR
+# Validate each address - must be a real IP address with CIDR
 valid_addresses = []
 for addr in address_lines:
     addr = addr.strip()
@@ -164,25 +155,41 @@ for addr in address_lines:
             ip_part, cidr_part = parts[0].strip(), parts[1].strip()
             # Both parts must be non-empty
             if ip_part and cidr_part:
-                # CIDR can be numeric (IPv4) or part of IPv6 notation
-                # IPv6 addresses contain colons
-                if cidr_part.isdigit() or (':' in ip_part):
-                    valid_addresses.append(addr)
+                # CIDR must be a valid number (1-128 for IPv4/IPv6)
+                try:
+                    cidr_num = int(cidr_part)
+                    if 1 <= cidr_num <= 128:
+                        # Validate IP part
+                        # IPv4: must be 4 octets (e.g., 172.16.0.2)
+                        # IPv6: must contain colons (e.g., 2606:4700:...)
+                        # Reject invalid patterns like "5", "0.0.0.0", "::"
+                        if ':' in ip_part:
+                            # IPv6: must have multiple segments separated by colons
+                            segments = ip_part.split(':')
+                            if len(segments) >= 2 and all(len(s) <= 4 for s in segments if s):
+                                # Valid IPv6 format
+                                if ip_part != '::' and ip_part != '::/0':
+                                    valid_addresses.append(addr)
+                        elif '.' in ip_part:
+                            # IPv4: must be 4 octets, each 0-255
+                            octets = ip_part.split('.')
+                            if len(octets) == 4:
+                                try:
+                                    if all(0 <= int(o) <= 255 for o in octets):
+                                        # Reject 0.0.0.0/0 (not a valid WireGuard address)
+                                        if ip_part != '0.0.0.0':
+                                            valid_addresses.append(addr)
+                                except ValueError:
+                                    pass
+                except ValueError:
+                    pass
 
 if valid_addresses:
     # Join with comma, no trailing comma
     addresses = ','.join(valid_addresses)
     print(f"export ADDRESSES='{addresses}'")
 else:
-    # Last resort: try to find any line with IP/CIDR pattern
-    import re
-    ip_cidr_pattern = r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d+|[0-9a-fA-F:]+/\d+)'
-    fallback_matches = re.findall(ip_cidr_pattern, content)
-    if fallback_matches:
-        addresses = ','.join(fallback_matches)
-        print(f"export ADDRESSES='{addresses}'")
-    else:
-        errors.append("No valid addresses found (format: IP/CIDR)")
+    errors.append("No valid addresses found in WireGuard profile")
 
 if endpoint_match:
     endpoint = endpoint_match.group(1).strip()
