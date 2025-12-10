@@ -2710,16 +2710,24 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
               
               const bestFile = videoFiles[0];
               // Archive.org direct video file URL for streaming
-              // Format: https://archive.org/download/{identifier}/{filename}
-              // This is a direct file URL that can be streamed in browsers/video players
-              // The /download/ endpoint serves the actual file and supports Range requests for streaming
+              // The metadata API may provide a direct URL, or we construct it
               let videoUrl;
               if (bestFile.name) {
-                // Use direct download URL - this is the actual video file, streamable with Range headers
-                // Archive.org's /download/ endpoint serves files directly and supports HTTP Range requests
-                videoUrl = `https://archive.org/download/${identifier}/${encodeURIComponent(bestFile.name)}`;
+                // Check if metadata provides a direct URL (some files have this)
+                if (bestFile.url && bestFile.url.startsWith('http') && bestFile.url.includes(identifier)) {
+                  // Use the URL from metadata if available
+                  videoUrl = bestFile.url;
+                } else {
+                  // Construct direct download URL - this serves the actual video file
+                  // Format: https://archive.org/download/{identifier}/{filename}
+                  // The /download/ endpoint serves files directly and supports HTTP Range requests for streaming
+                  // Note: Filename should be URL-encoded but Archive.org is lenient with encoding
+                  const filename = bestFile.name;
+                  // Archive.org accepts both encoded and unencoded filenames, but encoded is safer
+                  videoUrl = `https://archive.org/download/${identifier}/${encodeURIComponent(filename).replace(/%2F/g, '/')}`;
+                }
               } else {
-                log_error("No video file name found in Archive metadata");
+                console.log(`  [Internet Archive] No video file name found in metadata`);
                 successTracker.recordFailure('archive', strategy.id);
                 continue;
               }
