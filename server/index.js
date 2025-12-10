@@ -152,8 +152,19 @@ db.exec(`
     PRIMARY KEY (type, identifier)
   );
   
+  CREATE TABLE IF NOT EXISTS archive_cookies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cookies TEXT NOT NULL,
+    email TEXT,
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    last_used INTEGER DEFAULT (strftime('%s', 'now')),
+    is_valid INTEGER DEFAULT 1,
+    use_count INTEGER DEFAULT 0
+  );
+  
   CREATE INDEX IF NOT EXISTS idx_cache_timestamp ON cache(timestamp);
   CREATE INDEX IF NOT EXISTS idx_success_tracker_type ON success_tracker(type);
+  CREATE INDEX IF NOT EXISTS idx_archive_cookies_valid ON archive_cookies(is_valid, last_used);
 `);
 
 // Load cache from database (limit to most recent entries to prevent memory issues)
@@ -2076,6 +2087,16 @@ async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
 async function extractViaInternetArchive(tmdbMeta, imdbId) {
   console.log(`  [Internet Archive] Searching for "${tmdbMeta.title}" (${tmdbMeta.year || ''})...`);
   
+  // Get Archive.org cookie for authenticated requests (to avoid 401 errors)
+  const archiveCookie = archiveCookieManager.getCookie();
+  const cookieHeader = archiveCookie ? { 'Cookie': archiveCookie } : {};
+  
+  if (archiveCookie) {
+    console.log(`  [Internet Archive] Using authenticated session (cookie available)`);
+  } else {
+    console.log(`  [Internet Archive] ⚠ No authenticated session - some files may return 401. Add cookies via POST /admin/archive-cookie`);
+  }
+  
   try {
     // Build search queries - use better Internet Archive query syntax
     const titleQuery = tmdbMeta.title.replace(/[^\w\s]/g, ' ').trim().replace(/\s+/g, ' ');
@@ -2195,7 +2216,8 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
               signal: retryController.signal,
               headers: {
                 'User-Agent': 'Mozilla/5.0 (compatible; TrailerIO/1.0)',
-                'Accept': 'application/json'
+                'Accept': 'application/json',
+                ...cookieHeader
               }
             });
             clearTimeout(retryTimeout);
@@ -2577,7 +2599,11 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
           try {
             const metaResponse = await fetch(metadataUrl, { 
               signal: metaController.signal,
-              headers: { 'Accept': 'application/json' }
+              headers: { 
+                'Accept': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (compatible; TrailerIO/1.0)',
+                ...cookieHeader
+              }
             });
             clearTimeout(metaTimeout);
             if (!metaResponse.ok) {
@@ -2748,7 +2774,8 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
                   signal: controller.signal,
                   headers: {
                     'User-Agent': 'Mozilla/5.0 (compatible; TrailerIO/1.0)',
-                    'Range': 'bytes=0-1' // Just check first 2 bytes to validate access
+                    'Range': 'bytes=0-1', // Just check first 2 bytes to validate access
+                    ...cookieHeader
                   }
                 });
                 
