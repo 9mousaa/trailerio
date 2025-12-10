@@ -61,15 +61,96 @@ if [ ! -f "${PROFILE_FILE}" ] || [ ! -s "${PROFILE_FILE}" ]; then
     exit 1
 fi
 
-# Parse WireGuard config
+# Parse WireGuard config using Python for reliability
 echo "📋 Parsing WireGuard configuration..."
 
-# Extract keys and values, removing all whitespace (spaces, tabs, newlines)
-PRIVATE_KEY=$(grep "PrivateKey" "${PROFILE_FILE}" | cut -d'=' -f2 | tr -d '[:space:]')
-PUBLIC_KEY=$(grep "PublicKey" "${PROFILE_FILE}" | cut -d'=' -f2 | tr -d '[:space:]')
-PRESHARED_KEY=$(grep "PresharedKey" "${PROFILE_FILE}" | cut -d'=' -f2 | tr -d '[:space:]' || echo "")
-ADDRESSES=$(grep "Address" "${PROFILE_FILE}" | cut -d'=' -f2 | tr -d '[:space:]')
-ENDPOINT=$(grep "Endpoint" "${PROFILE_FILE}" | cut -d'=' -f2 | tr -d '[:space:]')
+# Extract keys using Python (most reliable method)
+eval $(python3 << 'PYEOF'
+import re
+import base64
+import sys
+
+try:
+    with open('${PROFILE_FILE}', 'r') as f:
+        content = f.read()
+except Exception as e:
+    print(f"Error reading profile: {e}", file=sys.stderr)
+    sys.exit(1)
+
+# Extract keys using regex (strict base64 pattern)
+private_match = re.search(r'^PrivateKey\s*=\s*([A-Za-z0-9+/=]{43,44})', content, re.MULTILINE)
+public_match = re.search(r'^PublicKey\s*=\s*([A-Za-z0-9+/=]{43,44})', content, re.MULTILINE)
+preshared_match = re.search(r'^PresharedKey\s*=\s*([A-Za-z0-9+/=]*)', content, re.MULTILINE)
+address_match = re.search(r'^Address\s*=\s*([^\s]+)', content, re.MULTILINE)
+endpoint_match = re.search(r'^Endpoint\s*=\s*([^\s]+)', content, re.MULTILINE)
+
+errors = []
+
+if private_match:
+    private_key = private_match.group(1).strip()
+    try:
+        decoded = base64.b64decode(private_key, validate=True)
+        if len(decoded) == 32:
+            print(f"export PRIVATE_KEY='{private_key}'")
+        else:
+            errors.append(f"PrivateKey wrong length")
+    except Exception as e:
+        errors.append(f"PrivateKey invalid")
+else:
+    errors.append("PrivateKey not found")
+
+if public_match:
+    public_key = public_match.group(1).strip()
+    try:
+        decoded = base64.b64decode(public_key, validate=True)
+        if len(decoded) == 32:
+            print(f"export PUBLIC_KEY='{public_key}'")
+        else:
+            errors.append(f"PublicKey wrong length")
+    except Exception as e:
+        errors.append(f"PublicKey invalid")
+else:
+    errors.append("PublicKey not found")
+
+if preshared_match:
+    preshared_key = preshared_match.group(1).strip()
+    if preshared_key:
+        try:
+            decoded = base64.b64decode(preshared_key, validate=True)
+            if len(decoded) == 32:
+                print(f"export PRESHARED_KEY='{preshared_key}'")
+            else:
+                print("export PRESHARED_KEY=''")
+        except:
+            print("export PRESHARED_KEY=''")
+    else:
+        print("export PRESHARED_KEY=''")
+else:
+    print("export PRESHARED_KEY=''")
+
+if address_match:
+    address = address_match.group(1).strip()
+    print(f"export ADDRESSES='{address}'")
+else:
+    errors.append("Address not found")
+
+if endpoint_match:
+    endpoint = endpoint_match.group(1).strip()
+    print(f"export ENDPOINT='{endpoint}'")
+else:
+    errors.append("Endpoint not found")
+
+if errors:
+    for error in errors:
+        print(f"ERROR: {error}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+)
+
+if [ $? -ne 0 ]; then
+    echo "❌ Failed to extract keys from WireGuard profile"
+    exit 1
+fi
 
 if [ -z "${ENDPOINT}" ]; then
     echo "❌ Failed to parse endpoint from profile"
