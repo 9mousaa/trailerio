@@ -128,9 +128,12 @@ if preshared_match:
 else:
     print("export PRESHARED_KEY=''")
 
-if address_match:
-    address = address_match.group(1).strip()
-    print(f"export ADDRESSES='{address}'")
+# Address can appear multiple times (IPv4 and IPv6), collect all
+address_matches = re.findall(r'^Address\s*=\s*([^\s]+)', content, re.MULTILINE)
+if address_matches:
+    # Join all addresses with comma (WireGuard format)
+    addresses = ','.join([addr.strip() for addr in address_matches])
+    print(f"export ADDRESSES='{addresses}'")
 else:
     errors.append("Address not found")
 
