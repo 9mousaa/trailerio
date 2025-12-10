@@ -22,6 +22,8 @@ services:
       - WIREGUARD_ENDPOINT_PORT=${WIREGUARD_ENDPOINT_PORT:-}
       # Enable HTTP proxy for yt-dlp
       - HTTP_CONTROL_SERVER_LOG=on
+      - HTTP_PROXY=on
+      - HTTP_PROXY_PORT=8000
     restart: unless-stopped  # Restart if it crashes (but backend works without it)
     networks:
       - trailerio-internal
