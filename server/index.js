@@ -117,11 +117,9 @@ const logger = {
     }
   },
   
-  // Section separator
+  // Section separator (simplified)
   section: (title) => {
-    console.log(`\n${colors.bright}${colors.cyan}═══════════════════════════════════════════════════════════${colors.reset}`);
-    console.log(`${colors.bright}${colors.cyan}  ${title}${colors.reset}`);
-    console.log(`${colors.bright}${colors.cyan}═══════════════════════════════════════════════════════════${colors.reset}\n`);
+    // Removed verbose separators - too much noise
   }
 };
 
@@ -774,7 +772,6 @@ async function getTMDBMetadata(imdbId, type) {
   if (trailer) {
     youtubeTrailerKey = trailer.key;
     youtubeTrailerTitle = trailer.name || null;
-    console.log(`Found official trailer: ${youtubeTrailerTitle || 'Trailer'}`);
   } else {
     // Priority 2: Official Teaser
     trailer = filteredVideos.find(v => 
@@ -784,14 +781,12 @@ async function getTMDBMetadata(imdbId, type) {
     if (trailer) {
       youtubeTrailerKey = trailer.key;
       youtubeTrailerTitle = trailer.name || null;
-      console.log(`Found official teaser: ${youtubeTrailerTitle || 'Teaser'}`);
     } else {
       // Priority 3: Any Trailer (not official)
       trailer = filteredVideos.find(v => v.type === 'Trailer');
       if (trailer) {
         youtubeTrailerKey = trailer.key;
         youtubeTrailerTitle = trailer.name || null;
-        console.log(`Found trailer: ${youtubeTrailerTitle || 'Trailer'}`);
       } else {
         // Priority 4: Official Clip
         trailer = filteredVideos.find(v => 
@@ -801,14 +796,12 @@ async function getTMDBMetadata(imdbId, type) {
         if (trailer) {
           youtubeTrailerKey = trailer.key;
           youtubeTrailerTitle = trailer.name || null;
-          console.log(`Found official clip: ${youtubeTrailerTitle || 'Clip'}`);
         } else {
           // Last resort: Any YouTube video (but prefer official)
           trailer = filteredVideos.find(v => v.official === true) || filteredVideos[0];
           if (trailer) {
             youtubeTrailerKey = trailer.key;
             youtubeTrailerTitle = trailer.name || null;
-            console.log(`Found YouTube video: ${youtubeTrailerTitle || 'Video'} (${trailer.type})`);
           }
         }
       }
@@ -829,7 +822,6 @@ async function getTMDBMetadata(imdbId, type) {
     }
   }
   
-  console.log(`TMDB: "${mainTitle}" (${year}), YouTube: ${youtubeTrailerKey || 'none'}, altTitles: ${altTitlesArray.length}`);
   
   return {
     tmdbId,
@@ -889,13 +881,11 @@ async function searchITunes(params) {
       const data = await response.json();
       let results = data.results || [];
       
-      console.log(`  [iTunes] Raw API returned ${results.length} results for "${term}" in ${country}`);
       
       // Filter by kind if specified
       if (filterKind) {
         const beforeFilter = results.length;
         results = results.filter(r => r.kind === filterKind);
-        console.log(`  [iTunes] After kind filter (${filterKind}): ${results.length} results (was ${beforeFilter})`);
       }
       
       // CRITICAL: Only return results with previewUrl (trailers/previews)
@@ -923,34 +913,26 @@ async function searchITunes(params) {
   
   if (type === 'movie') {
     // Strategy 1: Search all movie media types (no entity filter) - this gets everything
-    console.log(`  [iTunes] Strategy 1: Searching with media=movie (no entity filter)`);
     let results = await trySearch({ media: 'movie' }, null);
     if (results.length > 0) {
-      console.log(`  [iTunes] Found ${results.length} movie results with previews (no entity filter)`);
       return results;
     }
     
     // Strategy 2: Regular movie search with movieTerm attribute
-    console.log(`  [iTunes] Strategy 2: Searching with media=movie, entity=movie, attribute=movieTerm`);
     results = await trySearch({ media: 'movie', entity: 'movie', attribute: 'movieTerm' }, null);
     if (results.length > 0) {
-      console.log(`  [iTunes] Found ${results.length} movie results with previews`);
       return results;
     }
     
     // Strategy 3: Movie search without attribute
-    console.log(`  [iTunes] Strategy 3: Searching with media=movie, entity=movie (no attribute)`);
     results = await trySearch({ media: 'movie', entity: 'movie' }, null);
     if (results.length > 0) {
-      console.log(`  [iTunes] Found ${results.length} movie results (no attribute)`);
       return results;
     }
     
     // Strategy 4: Search all movies, filter by kind
-    console.log(`  [iTunes] Strategy 4: Searching with media=movie, filtering by kind=feature-movie`);
     results = await trySearch({ media: 'movie' }, 'feature-movie');
     if (results.length > 0) {
-      console.log(`  [iTunes] Found ${results.length} feature-movie results with previews`);
       return results;
     }
   } else {
@@ -958,21 +940,18 @@ async function searchITunes(params) {
     // Strategy 1: tvEpisode with showTerm attribute
     let results = await trySearch({ media: 'tvShow', entity: 'tvEpisode', attribute: 'showTerm' }, null);
     if (results.length > 0) {
-      console.log(`  [iTunes] Found ${results.length} tvEpisode results`);
       return results;
     }
     
     // Strategy 2: tvEpisode without attribute
     results = await trySearch({ media: 'tvShow', entity: 'tvEpisode' }, null);
     if (results.length > 0) {
-      console.log(`  [iTunes] Found ${results.length} tvEpisode results (no attribute)`);
       return results;
     }
     
     // Strategy 3: Search all TV, filter by kind
     results = await trySearch({ media: 'tvShow' }, 'tv-episode');
     if (results.length > 0) {
-      console.log(`  [iTunes] Found ${results.length} tv-episode results with previews`);
       return results;
     }
   }
@@ -1072,7 +1051,6 @@ function findBestMatch(results, tmdbMeta) {
     const trackName = item.trackName || item.collectionName || 'Unknown';
     const itunesYear = item.releaseDate ? item.releaseDate.substring(0, 4) : 'N/A';
     
-    console.log(`  Score ${score.toFixed(2)}: "${trackName}" (${itunesYear})`);
     
     if (score > bestScore) {
       bestScore = score;
@@ -1081,7 +1059,6 @@ function findBestMatch(results, tmdbMeta) {
   }
   
   if (bestScore >= MIN_SCORE_THRESHOLD && bestItem) {
-    console.log(`✓ Best match score: ${bestScore.toFixed(2)}`);
     return { score: bestScore, item: bestItem };
   }
   
@@ -1137,7 +1114,6 @@ async function extractViaPiped(youtubeKey) {
       
       if (!response.ok) {
         const statusText = response.statusText || 'Unknown';
-        console.log(`  [Piped] ✗ ${instance}: HTTP ${response.status} ${statusText} (${duration}ms)`);
         successTracker.recordFailure('piped', instance);
         return null;
       }
@@ -1147,7 +1123,6 @@ async function extractViaPiped(youtubeKey) {
       if (!contentType.includes('application/json')) {
         const text = await response.text();
         const preview = text.substring(0, 150).replace(/\n/g, ' ');
-        console.log(`  [Piped] ✗ ${instance}: non-JSON response (${contentType || 'no content-type'}): ${preview}`);
         successTracker.recordFailure('piped', instance);
         return null;
       }
@@ -2530,25 +2505,13 @@ function setCache(imdbId, data) {
 }
 
 async function resolvePreview(imdbId, type) {
-  logger.section(`RESOLVING: ${imdbId} (${type})`);
-  
   // Check cache with validation (optimized for instant returns)
   const cached = await getCachedWithValidation(imdbId);
   
   if (cached) {
     if (cached.preview_url) {
       const sourceType = cached.source_type || 'unknown';
-      const hoursSinceCheck = (Date.now() - cached.timestamp) / (1000 * 60 * 60);
-      const ttlHours = CACHE_TTL[sourceType] || CACHE_TTL.youtube;
-      const agePercent = (hoursSinceCheck / ttlHours) * 100;
-      
-      // Log cache hit with age info and URL preview
-      const urlPreview = cached.preview_url.substring(0, 60) + (cached.preview_url.length > 60 ? '...' : '');
-      if (agePercent < 10) {
-        logger.cache('hit', `⚡ INSTANT cache hit: ${sourceType} (${hoursSinceCheck.toFixed(1)}h old) - ${urlPreview}`);
-      } else {
-        logger.cache('hit', `Cache hit: ${sourceType} (${hoursSinceCheck.toFixed(1)}h old, ${agePercent.toFixed(0)}% of TTL) - ${urlPreview}`);
-      }
+      logger.cache('hit', `${imdbId} → ${sourceType.toUpperCase()} (cached)`);
       
       return {
         found: true,
@@ -2559,11 +2522,6 @@ async function resolvePreview(imdbId, type) {
       };
     }
     // If cache exists but has no preview_url, don't use negative cache - always search again
-    if (!cached.preview_url) {
-      console.log('Cache hit: no preview_url found previously, but searching again anyway...');
-    } else {
-      console.log('Cache expired, refreshing...');
-    }
   }
   
   const tmdbMeta = await getTMDBMetadata(imdbId, type);
@@ -2587,12 +2545,6 @@ async function resolvePreview(imdbId, type) {
   // Sort sources by success rate, quality, and content type (highest first)
   const contentType = type === 'series' ? 'series' : 'movie';
   const sortedSources = successTracker.getSortedSources(availableSources, contentType);
-  const sourceRates = sortedSources.map(s => {
-    const rate = successTracker.getSourceSuccessRate(s);
-    const quality = qualityTracker.getAvgQuality(s);
-    return `${s.toUpperCase()} (${(rate * 100).toFixed(0)}%, q:${quality.toFixed(1)})`;
-  }).join(', ');
-  logger.info(`Trying sources (sorted by success rate + quality + content type): ${sourceRates}`);
   
   // PARALLEL SOURCE ATTEMPTS: Try top 3 sources simultaneously
   const PARALLEL_SOURCES = 3;
@@ -2602,7 +2554,6 @@ async function resolvePreview(imdbId, type) {
   // Helper function to attempt a source with timeout and response time tracking
   const attemptSource = async (source) => {
     const startTime = Date.now();
-    logger.source(source, `Attempting extraction...`);
     
     // Get dynamic timeout for this source
     // yt-dlp needs longer timeout (20s) due to proxy, others can be faster
@@ -2614,7 +2565,6 @@ async function resolvePreview(imdbId, type) {
       const sourceAttempt = async () => {
         if (source === 'itunes') {
           const itunesResult = await multiPassSearch(tmdbMeta);
-          console.log(`iTunes search result: ${itunesResult.found ? 'FOUND' : 'NOT FOUND'}`);
           
           if (itunesResult.found) {
             const duration = Date.now() - startTime;
@@ -2628,7 +2578,7 @@ async function resolvePreview(imdbId, type) {
               youtube_key: tmdbMeta.youtubeTrailerKey || null,
               source: 'itunes'
             });
-            console.log(`✓ Found iTunes preview: ${itunesResult.previewUrl}`);
+            logger.source('itunes', `Found (${duration}ms)`, true);
             successTracker.recordSourceSuccess('itunes');
             return { ...itunesResult, source: 'itunes', quality: '480p' };
           } else {
@@ -2639,11 +2589,9 @@ async function resolvePreview(imdbId, type) {
           }
         } else if (source === 'piped') {
           if (!tmdbMeta.youtubeTrailerKey) {
-            console.log(`  Skipping Piped: no YouTube key available`);
             successTracker.recordSourceFailure('piped');
             return null;
           }
-          console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
           const pipedResult = await extractViaPiped(tmdbMeta.youtubeTrailerKey);
           if (pipedResult) {
             const duration = Date.now() - startTime;
@@ -2660,7 +2608,7 @@ async function resolvePreview(imdbId, type) {
               youtube_key: tmdbMeta.youtubeTrailerKey,
               source: 'youtube'
             });
-            console.log(`✓ Got URL from Piped`);
+            logger.source('piped', `Found (${duration}ms)`, true);
             successTracker.recordSourceSuccess('piped');
             return {
               found: true,
@@ -2678,11 +2626,9 @@ async function resolvePreview(imdbId, type) {
           }
         } else if (source === 'ytdlp') {
           if (!tmdbMeta.youtubeTrailerKey) {
-            console.log(`  Skipping yt-dlp: no YouTube key available`);
             successTracker.recordSourceFailure('ytdlp');
             return null;
           }
-          console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
           const ytdlpResult = await extractViaYtDlp(tmdbMeta.youtubeTrailerKey);
           if (ytdlpResult && ytdlpResult.url) {
             const duration = Date.now() - startTime;
@@ -2698,7 +2644,7 @@ async function resolvePreview(imdbId, type) {
               youtube_key: tmdbMeta.youtubeTrailerKey,
               source: 'youtube'
             });
-            console.log(`✓ Got URL from yt-dlp`);
+            logger.source('ytdlp', `Found (${duration}ms)`, true);
             successTracker.recordSourceSuccess('ytdlp');
             return {
               found: true,
@@ -2716,11 +2662,9 @@ async function resolvePreview(imdbId, type) {
           }
         } else if (source === 'invidious') {
           if (!tmdbMeta.youtubeTrailerKey) {
-            console.log(`  Skipping Invidious: no YouTube key available`);
             successTracker.recordSourceFailure('invidious');
             return null;
           }
-          console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
           const invidiousResult = await extractViaInvidious(tmdbMeta.youtubeTrailerKey);
           if (invidiousResult) {
             const duration = Date.now() - startTime;
@@ -2737,7 +2681,7 @@ async function resolvePreview(imdbId, type) {
               youtube_key: tmdbMeta.youtubeTrailerKey,
               source: 'youtube'
             });
-            console.log(`✓ Got URL from Invidious`);
+            logger.source('invidious', `Found (${duration}ms)`, true);
             successTracker.recordSourceSuccess('invidious');
             return {
               found: true,
@@ -2770,7 +2714,7 @@ async function resolvePreview(imdbId, type) {
               youtube_key: tmdbMeta.youtubeTrailerKey || null,
               source: 'archive'
             });
-            console.log(`✓ Got URL from Internet Archive`);
+            logger.source('archive', `Found (${duration}ms)`, true);
             successTracker.recordSourceSuccess('archive');
             return {
               found: true,
@@ -2868,8 +2812,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   const { type, id } = req.params;
   const requestStart = Date.now();
   
-  logger.section(`REQUEST: ${type.toUpperCase()} ${id}`);
-  logger.info(`Active requests: ${activeRequests}`);
+  logger.info(`${type.toUpperCase()} ${id} (active: ${activeRequests})`);
   
   if (!id.startsWith('tt')) {
     logger.warn(`Skipping non-IMDB ID: ${id}`);
@@ -2879,7 +2822,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   let timeoutFired = false;
   const timeout = setTimeout(() => {
     timeoutFired = true;
-    console.log(`  ⚠️ Request timeout for ${id} after ${STREAM_TIMEOUT / 1000}s`);
+    logger.warn(`Request timeout: ${id}`);
     if (!res.headersSent) {
       try {
         res.json({ streams: [] });
@@ -2921,7 +2864,6 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     
     if (!result) {
       // This shouldn't happen, but handle it just in case
-      console.log(`  ⚠️ No result returned for ${id}`);
       clearTimeout(timeout);
       if (!res.headersSent) {
         res.json({ streams: [] });
