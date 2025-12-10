@@ -1943,9 +1943,9 @@ async function extractViaYtDlp(youtubeKey) {
       --no-playlist \
       --dump-json \
       --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-      --sleep-interval 2 \
-      --socket-timeout 10 \
-      --extractor-args "youtube:player_client=android,web" \
+      --sleep-interval 1 \
+      --socket-timeout 8 \
+      --extractor-args "youtube:player_client=android" \
       "https://www.youtube.com/watch?v=${youtubeKey}"`;
     
     // Simplified format selection for faster extraction
