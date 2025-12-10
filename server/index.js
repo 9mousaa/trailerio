@@ -1303,7 +1303,7 @@ async function extractViaYtDlp(youtubeKey) {
     // HTTP proxy is on port 8888, SOCKS5 on port 1080
     // Try HTTP proxy first (more reliable), fallback to SOCKS5, then direct
     let proxyAvailable = false;
-    let gluetunProxy = 'http://gluetun:8888'; // Use HTTP proxy (port 8888, not 8000)
+    let gluetunProxy = 'http://gluetun:8888'; // Use HTTP proxy on port 8888
     
     try {
       // Check gluetun's control API to see if it's running and configured
@@ -1313,10 +1313,10 @@ async function extractViaYtDlp(youtubeKey) {
       }).catch(() => null);
       
       // If we get any response (even error), gluetun is running
-      // SOCKS5 proxy should be available if gluetun is running with SOCKS5_SERVER=on
+      // HTTP proxy should be available if gluetun is running with HTTPPROXY=on
       if (gluetunStatus !== null) {
         proxyAvailable = true;
-        console.log(`  [yt-dlp] ✓ Gluetun detected, using SOCKS5 proxy at ${gluetunProxy}`);
+        console.log(`  [yt-dlp] ✓ Gluetun detected, using HTTP proxy at ${gluetunProxy}`);
       } else {
         console.log(`  [yt-dlp] ⚠ Gluetun not reachable, using direct connection`);
       }
@@ -1326,7 +1326,7 @@ async function extractViaYtDlp(youtubeKey) {
       console.log(`  [yt-dlp] ⚠ Gluetun check failed: ${proxyError.message}, using direct connection`);
     }
     
-    // Use SOCKS5 proxy (more reliable than HTTP proxy, no auth issues)
+    // Use HTTP proxy (port 8888, configured via Cloudflare Warp)
     let useProxy = '';
     if (proxyAvailable) {
       useProxy = `--proxy ${gluetunProxy}`;
@@ -1379,7 +1379,7 @@ async function extractViaYtDlp(youtubeKey) {
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
       
-      // If SOCKS5 proxy failed, try direct connection as fallback
+      // If HTTP proxy failed, try direct connection as fallback
       const errorMsg = (raceError.stderr || raceError.message || '').toString();
       if (proxyAvailable && (errorMsg.includes('401') || errorMsg.includes('Unauthorized') || errorMsg.includes('Tunnel connection failed') || errorMsg.includes('Connection refused'))) {
         console.log(`  [yt-dlp] ⚠ SOCKS5 proxy failed, trying direct connection (no proxy)...`);
