@@ -2770,13 +2770,19 @@ function setCache(imdbId, data) {
       sourceType = 'itunes';
     } else if (data.preview_url.includes('archive.org')) {
       sourceType = 'archive';
+    } else if (data.preview_url.includes('googlevideo.com') || 
+               data.preview_url.includes('youtube.com') || 
+               data.preview_url.includes('youtu.be') ||
+               data.preview_url.includes('youtube-nocookie.com')) {
+      // YouTube URLs from yt-dlp (googlevideo.com), piped, invidious
+      // These are direct stream URLs but still YouTube sources
+      sourceType = 'youtube';
     } else {
-      // YouTube URLs from yt-dlp, piped, invidious - these are direct stream URLs
-      // They don't contain "youtube.com" but are still YouTube sources
+      // Default to youtube for any other URL (likely YouTube stream URLs)
       sourceType = 'youtube';
     }
   } else if (data.source) {
-    // Use source from data if available
+    // Use source from data if available (explicit source takes precedence)
     sourceType = data.source === 'youtube' ? 'youtube' : data.source;
   }
   
