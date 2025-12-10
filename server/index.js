@@ -15,6 +15,7 @@ let embeddingsEnabled = true; // Can be disabled if model fails to load
 const app = express();
 const PORT = process.env.PORT || 3001;
 const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
+const MDBLIST_API_KEY = process.env.MDBLIST_API_KEY || '';
 const CACHE_DAYS = 30;
 const MIN_SCORE_THRESHOLD = 0.6;
 const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
@@ -572,51 +573,212 @@ setInterval(() => {
 cleanupCache();
 cleanupSuccessTracker();
 
-// Cache warming: Pre-cache popular content
+// MDBList integration for cache warming
+// Rate limiting: Free tier = 1000 requests/day = ~41/hour = ~1 request every 90 seconds
+const mdblistRateLimiter = {
+  lastRequest: 0,
+  minInterval: 90 * 1000, // 90 seconds between requests (conservative)
+  dailyLimit: 1000,
+  dailyCount: 0,
+  lastReset: Date.now(),
+  
+  async waitIfNeeded() {
+    const now = Date.now();
+    
+    // Reset daily counter if it's been 24 hours
+    if (now - this.lastReset > 24 * 60 * 60 * 1000) {
+      this.dailyCount = 0;
+      this.lastReset = now;
+    }
+    
+    // Check daily limit
+    if (this.dailyCount >= this.dailyLimit) {
+      const hoursUntilReset = 24 - ((now - this.lastReset) / (60 * 60 * 1000));
+      console.log(`[MDBList] Daily limit reached (${this.dailyCount}/${this.dailyLimit}). Resets in ${hoursUntilReset.toFixed(1)} hours`);
+      return false; // Can't make more requests today
+    }
+    
+    // Rate limit: wait if needed
+    const timeSinceLastRequest = now - this.lastRequest;
+    if (timeSinceLastRequest < this.minInterval) {
+      const waitTime = this.minInterval - timeSinceLastRequest;
+      console.log(`[MDBList] Rate limiting: waiting ${Math.round(waitTime / 1000)}s before next request`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+    
+    this.lastRequest = Date.now();
+    this.dailyCount++;
+    return true;
+  }
+};
+
+// Fetch list items from MDBList API
+async function fetchMDBListItems(username, listName) {
+  if (!MDBLIST_API_KEY) {
+    console.log(`[MDBList] API key not set, skipping list fetch for ${username}/${listName}`);
+    return [];
+  }
+  
+  // Check rate limit
+  const canProceed = await mdblistRateLimiter.waitIfNeeded();
+  if (!canProceed) {
+    return [];
+  }
+  
+  try {
+    // MDBList API endpoint format
+    const apiUrl = `https://mdblist.com/api/lists/${username}/${listName}`;
+    
+    console.log(`[MDBList] Fetching list: ${username}/${listName}...`);
+    
+    const response = await fetch(apiUrl, {
+      headers: {
+        'Authorization': `Bearer ${MDBLIST_API_KEY}`,
+        'Accept': 'application/json',
+        'User-Agent': 'TrailerIO/1.0'
+      },
+      signal: AbortSignal.timeout(10000) // 10s timeout
+    });
+    
+    if (!response.ok) {
+      if (response.status === 401) {
+        console.log(`[MDBList] Authentication failed - check API key`);
+      } else if (response.status === 404) {
+        console.log(`[MDBList] List not found: ${username}/${listName}`);
+      } else if (response.status === 429) {
+        console.log(`[MDBList] Rate limit exceeded for ${username}/${listName}`);
+      } else {
+        console.log(`[MDBList] HTTP ${response.status} for ${username}/${listName}`);
+      }
+      return [];
+    }
+    
+    const data = await response.json();
+    
+    // Extract items from response (structure may vary)
+    let items = [];
+    if (Array.isArray(data)) {
+      items = data;
+    } else if (data.items && Array.isArray(data.items)) {
+      items = data.items;
+    } else if (data.results && Array.isArray(data.results)) {
+      items = data.results;
+    } else if (data.list && Array.isArray(data.list)) {
+      items = data.list;
+    }
+    
+    // Extract IMDb IDs and types
+    const imdbItems = [];
+    for (const item of items) {
+      const imdbId = item.imdb_id || item.imdbId || item.imdb || null;
+      if (imdbId && imdbId.startsWith('tt')) {
+        // Determine type from item
+        const type = item.type === 'tv' || item.type === 'show' || item.type === 'series' 
+          ? 'series' 
+          : 'movie';
+        imdbItems.push({ imdbId, type });
+      }
+    }
+    
+    console.log(`[MDBList] Extracted ${imdbItems.length} IMDb IDs from ${username}/${listName} (${items.length} total items)`);
+    return imdbItems;
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      console.log(`[MDBList] Timeout fetching ${username}/${listName}`);
+    } else {
+      console.log(`[MDBList] Error fetching ${username}/${listName}: ${error.message}`);
+    }
+    return [];
+  }
+}
+
+// Cache warming: Pre-cache popular content from TMDB and MDBList
 async function warmCache() {
   if (!TMDB_API_KEY) {
     console.log('[Cache Warming] TMDB_API_KEY not set, skipping cache warming');
     return;
   }
   
-  console.log('[Cache Warming] Starting cache warming for popular content...');
+  console.log('[Cache Warming] Starting cache warming...');
+  
+  const allItems = [];
   
   try {
-    // Get popular movies and TV shows from TMDB
+    // 1. Get popular movies and TV shows from TMDB
+    console.log('[Cache Warming] Fetching popular content from TMDB...');
     const [moviesResponse, tvResponse] = await Promise.allSettled([
-      fetch(`https://api.themoviedb.org/3/movie/popular?api_key=${TMDB_API_KEY}&page=1&limit=50`),
-      fetch(`https://api.themoviedb.org/3/tv/popular?api_key=${TMDB_API_KEY}&page=1&limit=50`)
+      fetch(`https://api.themoviedb.org/3/movie/popular?api_key=${TMDB_API_KEY}&page=1`),
+      fetch(`https://api.themoviedb.org/3/tv/popular?api_key=${TMDB_API_KEY}&page=1`)
     ]);
-    
-    const popularItems = [];
     
     if (moviesResponse.status === 'fulfilled' && moviesResponse.value.ok) {
       const moviesData = await moviesResponse.value.json();
-      for (const movie of (moviesData.results || []).slice(0, 25)) {
+      for (const movie of (moviesData.results || []).slice(0, 20)) {
         if (movie.external_ids?.imdb_id) {
-          popularItems.push({ imdbId: movie.external_ids.imdb_id, type: 'movie' });
+          allItems.push({ imdbId: movie.external_ids.imdb_id, type: 'movie', source: 'tmdb' });
         }
       }
     }
     
     if (tvResponse.status === 'fulfilled' && tvResponse.value.ok) {
       const tvData = await tvResponse.value.json();
-      for (const show of (tvData.results || []).slice(0, 25)) {
+      for (const show of (tvData.results || []).slice(0, 20)) {
         if (show.external_ids?.imdb_id) {
-          popularItems.push({ imdbId: show.external_ids.imdb_id, type: 'series' });
+          allItems.push({ imdbId: show.external_ids.imdb_id, type: 'series', source: 'tmdb' });
         }
       }
     }
     
-    console.log(`[Cache Warming] Found ${popularItems.length} popular items to cache`);
+    // 2. Get items from MDBList curated lists
+    if (MDBLIST_API_KEY) {
+      console.log('[Cache Warming] Fetching curated lists from MDBList...');
+      
+      // Priority lists to warm (most popular/trending)
+      const priorityLists = [
+        { username: 'snoak', listName: 'trending-movies' },
+        { username: 'snoak', listName: 'trending-shows' },
+        { username: 'snoak', listName: 'imdb-top-250-movies' },
+        { username: 'snoak', listName: 'imdb-top-250-shows' },
+        { username: 'snoak', listName: 'latest-movies-digital-release' },
+        { username: 'snoak', listName: 'latest-tv-shows' },
+        { username: 'garycrawfordgc', listName: 'trending-movies' },
+        { username: 'garycrawfordgc', listName: 'trending-shows' }
+      ];
+      
+      for (const { username, listName } of priorityLists) {
+        try {
+          const items = await fetchMDBListItems(username, listName);
+          for (const item of items.slice(0, 50)) { // Limit to 50 items per list
+            allItems.push({ ...item, source: 'mdblist' });
+          }
+        } catch (error) {
+          console.log(`[Cache Warming] Error fetching MDBList for ${username}/${listName}: ${error.message}`);
+        }
+      }
+    } else {
+      console.log('[Cache Warming] MDBLIST_API_KEY not set, skipping MDBList integration');
+    }
+    
+    // Remove duplicates (same IMDb ID)
+    const uniqueItems = [];
+    const seenIds = new Set();
+    for (const item of allItems) {
+      if (!seenIds.has(item.imdbId)) {
+        seenIds.add(item.imdbId);
+        uniqueItems.push(item);
+      }
+    }
+    
+    console.log(`[Cache Warming] Found ${uniqueItems.length} unique items to cache (${allItems.length - uniqueItems.length} duplicates removed, ${uniqueItems.filter(i => i.source === 'tmdb').length} from TMDB, ${uniqueItems.filter(i => i.source === 'mdblist').length} from MDBList)`);
     
     // Cache items in parallel batches (faster than sequential)
     const BATCH_SIZE = 5;
     let cached = 0;
     let skipped = 0;
+    let failed = 0;
     
-    for (let i = 0; i < popularItems.length; i += BATCH_SIZE) {
-      const batch = popularItems.slice(i, i + BATCH_SIZE);
+    for (let i = 0; i < uniqueItems.length; i += BATCH_SIZE) {
+      const batch = uniqueItems.slice(i, i + BATCH_SIZE);
       
       await Promise.allSettled(batch.map(async (item) => {
         // Check if already cached
@@ -631,18 +793,27 @@ async function warmCache() {
           const resolveType = item.type === 'series' ? 'series' : 'movie';
           await resolvePreview(item.imdbId, resolveType);
           cached++;
+          
+          // Delay to avoid overwhelming the system and rate limits
+          // Longer delay for MDBList items (already rate-limited by API)
+          const delay = item.source === 'mdblist' ? 1000 : 500;
+          await new Promise(resolve => setTimeout(resolve, delay));
         } catch (error) {
+          failed++;
           console.log(`[Cache Warming] Failed to cache ${item.imdbId}: ${error.message}`);
         }
       }));
       
       // Small delay between batches to avoid overwhelming the system
-      if (i + BATCH_SIZE < popularItems.length) {
+      if (i + BATCH_SIZE < uniqueItems.length) {
         await new Promise(resolve => setTimeout(resolve, 200));
       }
     }
     
-    console.log(`[Cache Warming] Complete: ${cached} cached, ${skipped} already cached, ${popularItems.length - cached - skipped} failed`);
+    console.log(`[Cache Warming] Complete: ${cached} cached, ${skipped} already cached, ${failed} failed`);
+    if (MDBLIST_API_KEY) {
+      console.log(`[MDBList] API usage: ${mdblistRateLimiter.dailyCount}/${mdblistRateLimiter.dailyLimit} requests today`);
+    }
   } catch (error) {
     console.error(`[Cache Warming] Error: ${error.message}`);
   }
