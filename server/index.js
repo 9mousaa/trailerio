@@ -2589,7 +2589,17 @@ async function resolvePreview(imdbId, type) {
   if (cached) {
     if (cached.preview_url) {
       const sourceType = cached.source_type || 'unknown';
-      console.log(`Cache hit: returning cached ${sourceType} preview (validated)`);
+      const hoursSinceCheck = (Date.now() - cached.timestamp) / (1000 * 60 * 60);
+      const ttlHours = CACHE_TTL[sourceType] || CACHE_TTL.youtube;
+      const agePercent = (hoursSinceCheck / ttlHours) * 100;
+      
+      // Log cache hit with age info
+      if (agePercent < 10) {
+        logger.cache('hit', `${imdbId} → ${sourceType.toUpperCase()} (instant, ${hoursSinceCheck.toFixed(1)}h old)`);
+      } else {
+        logger.cache('hit', `${imdbId} → ${sourceType.toUpperCase()} (${hoursSinceCheck.toFixed(1)}h old)`);
+      }
+      
       return {
         found: true,
         source: cached.source || (sourceType === 'itunes' ? 'itunes' : sourceType === 'archive' ? 'archive' : 'youtube'),
