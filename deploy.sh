@@ -70,10 +70,15 @@ DOCKER_BUILDKIT=1 docker compose up -d || { echo "❌ Failed to start containers
 echo "⏳ Waiting for services to be healthy..."
 sleep 5
 
-# Check health
+# Check health (from inside container or via exposed port)
 echo "🏥 Checking service health..."
 for i in {1..30}; do
-  if curl -f -s http://localhost:3001/health > /dev/null 2>&1; then
+  # Try checking from inside container first (more reliable)
+  if docker exec trailerio-backend-1 curl -f -s http://localhost:3001/health > /dev/null 2>&1; then
+    echo "✅ Backend is healthy!"
+    break
+  # Fallback: try from host if port is exposed
+  elif curl -f -s http://localhost:3001/health > /dev/null 2>&1; then
     echo "✅ Backend is healthy!"
     break
   fi
@@ -88,7 +93,9 @@ done
 
 # Check manifest endpoint
 echo "📋 Checking manifest endpoint..."
-if curl -f -s http://localhost:3001/manifest.json > /dev/null 2>&1; then
+if docker exec trailerio-backend-1 curl -f -s http://localhost:3001/manifest.json > /dev/null 2>&1; then
+  echo "✅ Manifest endpoint is working!"
+elif curl -f -s http://localhost:3001/manifest.json > /dev/null 2>&1; then
   echo "✅ Manifest endpoint is working!"
 else
   echo "⚠️  Warning: Manifest endpoint check failed"
