@@ -2363,7 +2363,6 @@ async function getCachedWithValidation(imdbId) {
   
   // For very fresh cache (< 30% of TTL), return immediately and validate in background
   if (agePercent < 30) {
-    logger.cache('hit', `Fast cache hit for ${imdbId} (${sourceType}, ${hoursSinceCheck.toFixed(1)}h old) - validating in background`);
     
     // Validate in background (non-blocking)
     if (!validationQueue.has(imdbId)) {
@@ -2371,7 +2370,6 @@ async function getCachedWithValidation(imdbId) {
       validateUrl(cached.preview_url, 2000).then(isValid => {
         validationQueue.delete(imdbId);
         if (!isValid) {
-          logger.cache('miss', `Background validation failed for ${imdbId}, invalidating cache`);
           cache.delete(imdbId);
           const deleteStmt = db.prepare('DELETE FROM cache WHERE imdb_id = ?');
           deleteStmt.run(imdbId);
@@ -2390,20 +2388,17 @@ async function getCachedWithValidation(imdbId) {
   const shouldValidate = sourceType === 'youtube' ? agePercent > 20 : agePercent > 80;
   
   if (shouldValidate) {
-    logger.cache('validate', `Validating cached URL for ${imdbId} (${sourceType}, ${hoursSinceCheck.toFixed(1)}h old, ${agePercent.toFixed(0)}% of TTL)`);
     const isValid = await validateUrl(cached.preview_url, 2000); // Shorter timeout for faster response
     
     if (!isValid) {
-      logger.cache('miss', `Cached URL is no longer valid, invalidating cache for ${imdbId}`);
+      logger.cache('miss', `${imdbId}: URL invalid`);
       cache.delete(imdbId);
       const deleteStmt = db.prepare('DELETE FROM cache WHERE imdb_id = ?');
       deleteStmt.run(imdbId);
       return null;
     }
     
-    logger.cache('hit', `Cached URL is still valid for ${imdbId}`);
   } else {
-    logger.cache('hit', `Cache hit for ${imdbId} (${sourceType}, ${hoursSinceCheck.toFixed(1)}h old, ${agePercent.toFixed(0)}% of TTL)`);
   }
   
   return cached;
@@ -2449,7 +2444,7 @@ function setCache(imdbId, data) {
   
   // Save to in-memory cache FIRST (instant access)
   cache.set(imdbId, cacheData);
-  logger.cache('hit', `Cached ${imdbId}: ${sourceType} (${data.source || 'unknown'} source)`);
+  // Cache saved (no log - too verbose)
   
   // Save to database - with error handling to prevent blocking
   try {
@@ -2481,7 +2476,7 @@ function setCache(imdbId, data) {
       console.warn(`[Cache] Slow DB write: ${duration}ms for ${imdbId}`);
     }
     // Always log successful cache saves (not just debug)
-    logger.cache('hit', `Saved to DB: ${imdbId} (${sourceType}, ${duration}ms)`);
+    // DB save complete (no log - too verbose)
   } catch (error) {
     // Don't spam logs for database locked errors
     if (!error.message.includes('database is locked') && !error.message.includes('SQLITE_BUSY')) {
