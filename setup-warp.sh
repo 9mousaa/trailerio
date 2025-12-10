@@ -75,8 +75,29 @@ if [ -z "${ENDPOINT}" ]; then
     exit 1
 fi
 
-ENDPOINT_IP=$(echo "${ENDPOINT}" | cut -d':' -f1)
+ENDPOINT_HOST=$(echo "${ENDPOINT}" | cut -d':' -f1)
 ENDPOINT_PORT=$(echo "${ENDPOINT}" | cut -d':' -f2)
+
+# Resolve hostname to IP address (gluetun requires IP, not hostname)
+echo "🔍 Resolving ${ENDPOINT_HOST} to IP address..."
+ENDPOINT_IP=$(getent hosts "${ENDPOINT_HOST}" | awk '{print $1}' | head -1)
+
+if [ -z "${ENDPOINT_IP}" ]; then
+    # Fallback: try using dig or nslookup
+    if command -v dig &> /dev/null; then
+        ENDPOINT_IP=$(dig +short "${ENDPOINT_HOST}" | head -1)
+    elif command -v nslookup &> /dev/null; then
+        ENDPOINT_IP=$(nslookup "${ENDPOINT_HOST}" | grep -A1 "Name:" | tail -1 | awk '{print $2}')
+    fi
+fi
+
+if [ -z "${ENDPOINT_IP}" ]; then
+    echo "❌ Failed to resolve ${ENDPOINT_HOST} to IP address"
+    echo "   Please manually set WIREGUARD_ENDPOINT_IP in .env"
+    exit 1
+fi
+
+echo "   ✓ Resolved to: ${ENDPOINT_IP}"
 
 # Backup existing .env
 if [ -f "${ENV_FILE}" ]; then
