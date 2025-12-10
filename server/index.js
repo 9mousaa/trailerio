@@ -1332,8 +1332,6 @@ async function extractViaYtDlp(youtubeKey) {
     if (proxyAvailable) {
       // Try HTTP proxy first
       useProxy = `--proxy ${gluetunProxy}`;
-      // Note: If HTTP proxy gives 401, we could try SOCKS5: --proxy socks5://gluetun:1080
-      // But let's try HTTP first as it's simpler
     }
     
     // Anti-blocking strategies:
