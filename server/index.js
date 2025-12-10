@@ -2047,10 +2047,18 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
         }
         
         // Find best match using fuzzy matching (like iTunes)
+        // Filter out YouTube shorts, clips, and non-trailer content
         let bestMatch = null;
         let bestScore = 0;
         
         for (const doc of docs) {
+          // Skip YouTube shorts, clips, and non-trailer content
+          const title = (doc.title || '').toLowerCase();
+          if (title.includes('#shorts') || title.includes('shorts') || 
+              (title.includes('clip') && !title.includes('trailer')) ||
+              title.includes('behind the scenes') || title.includes('featurette')) {
+            continue; // Skip shorts and non-trailer content
+          }
           const title = doc.title || '';
           const docYear = doc.year || null;
           
@@ -3145,26 +3153,41 @@ async function resolvePreview(imdbId, type) {
     }
   };
   
-  // Try top sources in parallel with EARLY RETURN (return immediately when one succeeds)
+  // Try top sources in parallel with TRUE EARLY RETURN (return immediately when first succeeds)
   if (topSources.length > 0) {
     logger.info(`Trying ${topSources.length} sources in parallel: ${topSources.join(', ')}`);
     
-    // Create promises that resolve with success status
+    // Create promises that resolve with success status (or null on failure)
     const sourcePromises = topSources.map(async (source) => {
       try {
         const result = await attemptSource(source);
-        return { source, result, success: result && result.found };
+        // Return result if found, null otherwise
+        return result && result.found ? { source, result } : null;
       } catch (error) {
-        return { source, result: null, success: false };
+        return null;
       }
     });
     
-    // Race all sources - check results as they complete
-    const results = await Promise.allSettled(sourcePromises);
+    // Use Promise.race to return immediately when first source succeeds
+    // This is much faster than Promise.allSettled which waits for all
+    const raceResult = await Promise.race([
+      // Race all source promises
+      ...sourcePromises.map(p => p.then(result => ({ type: 'success', result }))),
+      // Also race a timeout that resolves after all sources would have timed out
+      new Promise(resolve => setTimeout(() => resolve({ type: 'timeout' }), 6000))
+    ]);
     
-    // Check for successful results (in order of priority)
-    for (const settled of results) {
-      if (settled.status === 'fulfilled' && settled.value.success && settled.value.result) {
+    // If we got a successful result, return it immediately
+    if (raceResult.type === 'success' && raceResult.result) {
+      logger.success(`Found via parallel attempt: ${raceResult.result.source}`);
+      return raceResult.result.result;
+    }
+    
+    // If timeout, wait for remaining sources to complete (but don't wait too long)
+    logger.info(`First source didn't succeed, checking remaining sources...`);
+    const allResults = await Promise.allSettled(sourcePromises);
+    for (const settled of allResults) {
+      if (settled.status === 'fulfilled' && settled.value && settled.value.result) {
         logger.success(`Found via parallel attempt: ${settled.value.source}`);
         return settled.value.result;
       }
