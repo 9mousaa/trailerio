@@ -2084,6 +2084,71 @@ async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
 
 // ============ INTERNET ARCHIVE EXTRACTOR ============
 
+// Archive.org cookie management
+const archiveCookieManager = {
+  // Get a valid cookie string for Archive.org requests
+  getCookie() {
+    const stmt = db.prepare(`
+      SELECT cookies FROM archive_cookies 
+      WHERE is_valid = 1 
+      ORDER BY last_used ASC, use_count ASC 
+      LIMIT 1
+    `);
+    const row = stmt.get();
+    if (row) {
+      // Update last_used and increment use_count
+      db.prepare(`
+        UPDATE archive_cookies 
+        SET last_used = strftime('%s', 'now'), use_count = use_count + 1 
+        WHERE cookies = ?
+      `).run(row.cookies);
+      return row.cookies;
+    }
+    return null;
+  },
+  
+  // Add a new cookie (from manually logged-in session)
+  addCookie(cookies, email = null) {
+    try {
+      db.prepare(`
+        INSERT INTO archive_cookies (cookies, email, created_at, last_used, is_valid, use_count)
+        VALUES (?, ?, strftime('%s', 'now'), strftime('%s', 'now'), 1, 0)
+      `).run(cookies, email);
+      console.log(`[Archive.org] Added new cookie${email ? ` for ${email}` : ''}`);
+      return true;
+    } catch (error) {
+      console.error(`[Archive.org] Failed to add cookie: ${error.message}`);
+      return false;
+    }
+  },
+  
+  // Mark cookie as invalid (if it stops working)
+  invalidateCookie(cookies) {
+    db.prepare(`UPDATE archive_cookies SET is_valid = 0 WHERE cookies = ?`).run(cookies);
+    console.log(`[Archive.org] Marked cookie as invalid`);
+  },
+  
+  // Validate cookie by making a test request
+  async validateCookie(cookies) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const response = await fetch('https://archive.org/account/index.php', {
+        method: 'HEAD',
+        headers: {
+          'Cookie': cookies,
+          'User-Agent': 'Mozilla/5.0 (compatible; TrailerIO/1.0)'
+        },
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+      return response.ok || response.status === 200;
+    } catch (error) {
+      return false;
+    }
+  }
+};
+
 async function extractViaInternetArchive(tmdbMeta, imdbId) {
   console.log(`  [Internet Archive] Searching for "${tmdbMeta.title}" (${tmdbMeta.year || ''})...`);
   
