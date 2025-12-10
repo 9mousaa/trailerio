@@ -19,7 +19,7 @@ const MDBLIST_API_KEY = process.env.MDBLIST_API_KEY || '';
 const CACHE_DAYS = 30;
 const MIN_SCORE_THRESHOLD = 0.6;
 const COUNTRY_VARIANTS = ['us', 'gb', 'ca', 'au'];
-const STREAM_TIMEOUT = 15000; // 15 seconds - ensure Traefik doesn't timeout first (Traefik default is usually 60s, but safer to be shorter)
+const STREAM_TIMEOUT = 30000; // 30 seconds - increased to allow yt-dlp and other sources more time
 const MAX_CONCURRENT_REQUESTS = 5; // Limit concurrent requests to prevent overwhelming system
 
 // Cache TTLs by source type (in hours)
@@ -1869,7 +1869,7 @@ async function extractViaYtDlp(youtubeKey) {
   
   const startTime = Date.now();
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000); // 12s timeout
+  const timeout = setTimeout(() => controller.abort(), 20000); // 20s timeout - increased for better success
   
   try {
     // Check if gluetun is available
@@ -1948,16 +1948,16 @@ async function extractViaYtDlp(youtubeKey) {
     
     console.log(`  [yt-dlp] Running extraction (proxy: ${proxyAvailable ? 'enabled' : 'disabled'})...`);
     
-    // First get video metadata (duration, etc.)
+    // First get video metadata (duration, etc.) - with shorter timeout to not block URL extraction
     let videoDuration = null;
     let videoDurationSeconds = null;
     try {
       const infoExecPromise = execAsync(ytDlpInfoCommand, {
-        timeout: 8000,
+        timeout: 5000, // Shorter timeout for metadata (non-critical)
         maxBuffer: 10 * 1024 * 1024
       });
       const infoTimeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('yt-dlp info timeout')), 8000)
+        setTimeout(() => reject(new Error('yt-dlp info timeout')), 5000)
       );
       
       try {
@@ -1979,15 +1979,15 @@ async function extractViaYtDlp(youtubeKey) {
       // Ignore info extraction errors, continue with URL extraction
     }
     
-    // Execute yt-dlp with timeout to get URL
+    // Execute yt-dlp with timeout to get URL - increased timeout for better success rate
     const execPromise = execAsync(ytDlpCommand, {
-      timeout: 12000,
+      timeout: 20000, // Increased to 20 seconds for better success rate
       maxBuffer: 10 * 1024 * 1024 // 10MB buffer
     });
     
     // Race against timeout
     const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('yt-dlp timeout')), 12000)
+      setTimeout(() => reject(new Error('yt-dlp timeout')), 20000)
     );
     
     let stdout, stderr;
@@ -2012,11 +2012,11 @@ async function extractViaYtDlp(youtubeKey) {
         const noProxyCommand = ytDlpCommand.replace(`--proxy ${gluetunProxy}`, '');
         try {
           const noProxyExecPromise = execAsync(noProxyCommand, {
-            timeout: 12000,
+            timeout: 20000, // Increased to match main timeout
             maxBuffer: 10 * 1024 * 1024
           });
           const noProxyTimeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('yt-dlp timeout')), 12000)
+            setTimeout(() => reject(new Error('yt-dlp timeout')), 20000)
           );
           ({ stdout, stderr } = await Promise.race([noProxyExecPromise, noProxyTimeoutPromise]));
           console.log(`  [yt-dlp] ✓ Direct connection worked!`);
@@ -3026,8 +3026,13 @@ async function resolvePreview(imdbId, type) {
     const startTime = Date.now();
     logger.source(source, `Attempting extraction...`);
     
-    // Get dynamic timeout for this source
-    const defaultTimeout = 10000; // 10 seconds default
+    // Get dynamic timeout for this source - increased defaults for better success rate
+    let defaultTimeout = 15000; // 15 seconds default (increased from 10s)
+    if (source === 'ytdlp') {
+      defaultTimeout = 25000; // 25 seconds for yt-dlp (needs more time)
+    } else if (source === 'archive') {
+      defaultTimeout = 20000; // 20 seconds for Internet Archive (multiple API calls)
+    }
     const sourceTimeout = sourceResponseTimes.getTimeout(source, defaultTimeout);
     
     try {
