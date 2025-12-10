@@ -45,7 +45,7 @@ if (!fs.existsSync(dbDir)) {
 
 const db = new Database(dbPath);
 
-// ============ LOGGING UTILITY ============
+// ============ DASHBOARD LOGGER ============
 const colors = {
   reset: '\x1b[0m',
   bright: '\x1b[1m',
@@ -57,69 +57,121 @@ const colors = {
   magenta: '\x1b[35m',
   cyan: '\x1b[36m',
   white: '\x1b[37m',
+  bgGreen: '\x1b[42m',
+  bgRed: '\x1b[41m',
+  bgYellow: '\x1b[43m',
+  bgBlue: '\x1b[44m',
+};
+
+const box = {
+  tl: '┌', tr: '┐', bl: '└', br: '┘',
+  h: '─', v: '│', 
+  t: '┬', b: '┴', l: '├', r: '┤', c: '┼'
 };
 
 const logger = {
-  // Format timestamp
   timestamp: () => {
     const now = new Date();
-    return now.toISOString().replace('T', ' ').substring(0, 19);
+    return now.toISOString().replace('T', ' ').substring(11, 19);
   },
   
-  // Request logs
+  // Dashboard-style request log
   request: (method, path, status, duration) => {
     const statusColor = status >= 200 && status < 300 ? colors.green : 
                        status >= 400 && status < 500 ? colors.yellow : colors.red;
-    console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${colors.cyan}${method}${colors.reset} ${path} ${statusColor}${status}${colors.reset} ${colors.dim}(${duration}ms)${colors.reset}`);
+    const statusIcon = status >= 200 && status < 300 ? '✓' : status >= 400 && status < 500 ? '⚠' : '✗';
+    const time = duration < 1000 ? `${duration}ms` : `${(duration/1000).toFixed(1)}s`;
+    console.log(`${colors.dim}${box.v}${colors.reset} ${colors.cyan}${method.padEnd(4)}${colors.reset} ${path.padEnd(30)} ${statusColor}${statusIcon} ${status}${colors.reset} ${colors.dim}${time}${colors.reset}`);
   },
   
-  // Source extraction logs
+  // Beautiful source status card
   source: (source, message, success = null) => {
-    const icon = success === true ? '✓' : success === false ? '✗' : '→';
-    const color = success === true ? colors.green : success === false ? colors.red : colors.blue;
-    const sourceName = source.toUpperCase().padEnd(10);
-    console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${color}${icon}${colors.reset} ${colors.bright}[${sourceName}]${colors.reset} ${message}`);
-  },
-  
-  // Cache logs
-  cache: (action, message) => {
-    const icon = action === 'hit' ? '💾' : action === 'miss' ? '🔍' : '🗑️';
-    console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${icon} ${colors.magenta}[CACHE]${colors.reset} ${message}`);
-  },
-  
-  // Info logs
-  info: (message) => {
-    console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${colors.blue}ℹ${colors.reset} ${message}`);
-  },
-  
-  // Success logs
-  success: (message) => {
-    console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${colors.green}✓${colors.reset} ${message}`);
-  },
-  
-  // Warning logs
-  warn: (message) => {
-    console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${colors.yellow}⚠${colors.reset} ${message}`);
-  },
-  
-  // Error logs
-  error: (message, error = null) => {
-    console.error(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${colors.red}✗${colors.reset} ${colors.red}[ERROR]${colors.reset} ${message}`);
-    if (error) {
-      console.error(`${colors.dim}  Stack:${colors.reset} ${error.stack || error.message}`);
+    const sourceMap = {
+      'ytdlp': { icon: '🎬', name: 'YT-DLP', color: colors.cyan },
+      'piped': { icon: '🔷', name: 'PIPED', color: colors.blue },
+      'invidious': { icon: '🔶', name: 'INVIDIOUS', color: colors.yellow },
+      'itunes': { icon: '🍎', name: 'ITUNES', color: colors.magenta },
+      'archive': { icon: '📚', name: 'ARCHIVE', color: colors.green }
+    };
+    
+    const config = sourceMap[source.toLowerCase()] || { icon: '⚙️', name: source.toUpperCase(), color: colors.white };
+    
+    if (success === true) {
+      console.log(`${colors.dim}${box.v}${colors.reset} ${config.icon} ${config.color}${config.name}${colors.reset} ${colors.green}${message}${colors.reset}`);
+    } else if (success === false) {
+      console.log(`${colors.dim}${box.v}${colors.reset} ${config.icon} ${config.color}${config.name}${colors.reset} ${colors.red}${message}${colors.reset}`);
+    } else {
+      console.log(`${colors.dim}${box.v}${colors.reset} ${config.icon} ${config.color}${config.name}${colors.reset} ${colors.dim}${message}${colors.reset}`);
     }
   },
   
-  // Debug logs (only in development)
+  // Cache hit/miss with visual indicator
+  cache: (action, message) => {
+    if (action === 'hit') {
+      console.log(`${colors.dim}${box.v}${colors.reset} ${colors.green}⚡ CACHE${colors.reset} ${colors.bright}${message}${colors.reset}`);
+    } else if (action === 'miss') {
+      console.log(`${colors.dim}${box.v}${colors.reset} ${colors.yellow}🔍 MISS${colors.reset} ${message}`);
+    } else {
+      console.log(`${colors.dim}${box.v}${colors.reset} ${colors.magenta}🗑️  ${action.toUpperCase()}${colors.reset} ${message}`);
+    }
+  },
+  
+  // Info with clean formatting
+  info: (message) => {
+    console.log(`${colors.dim}${box.v}${colors.reset} ${colors.blue}ℹ${colors.reset} ${message}`);
+  },
+  
+  // Success with celebration
+  success: (message) => {
+    console.log(`${colors.dim}${box.v}${colors.reset} ${colors.green}✓ SUCCESS${colors.reset} ${colors.bright}${message}${colors.reset}`);
+  },
+  
+  // Warning with attention
+  warn: (message) => {
+    console.log(`${colors.dim}${box.v}${colors.reset} ${colors.yellow}⚠ WARN${colors.reset} ${message}`);
+  },
+  
+  // Error with emphasis
+  error: (message, error = null) => {
+    console.log(`${colors.dim}${box.v}${colors.reset} ${colors.red}${colors.bright}✗ ERROR${colors.reset} ${colors.red}${message}${colors.reset}`);
+    if (error) {
+      console.log(`${colors.dim}${box.v}${colors.reset} ${colors.dim}  ${error.message || error}${colors.reset}`);
+    }
+  },
+  
+  // Request card - beautiful boxed request
+  requestCard: (type, id, active) => {
+    const typeColor = type === 'MOVIE' ? colors.cyan : colors.magenta;
+    const typeIcon = type === 'MOVIE' ? '🎬' : '📺';
+    console.log(`\n${colors.dim}${box.tl}${box.h.repeat(68)}${box.tr}${colors.reset}`);
+    console.log(`${colors.dim}${box.v}${colors.reset} ${typeIcon} ${typeColor}${type}${colors.reset} ${colors.bright}${id}${colors.reset} ${colors.dim}${' '.repeat(40 - id.length)}active: ${active}${colors.reset} ${colors.dim}${box.v}${colors.reset}`);
+    console.log(`${colors.dim}${box.l}${box.h.repeat(68)}${box.r}${colors.reset}`);
+  },
+  
+  // Source attempt with progress
+  sourceAttempt: (source, duration) => {
+    const sourceMap = {
+      'ytdlp': { icon: '🎬', name: 'YT-DLP', color: colors.cyan },
+      'piped': { icon: '🔷', name: 'PIPED', color: colors.blue },
+      'invidious': { icon: '🔶', name: 'INVIDIOUS', color: colors.yellow },
+      'itunes': { icon: '🍎', name: 'ITUNES', color: colors.magenta },
+      'archive': { icon: '📚', name: 'ARCHIVE', color: colors.green }
+    };
+    const config = sourceMap[source.toLowerCase()] || { icon: '⚙️', name: source.toUpperCase(), color: colors.white };
+    const time = duration < 1000 ? `${duration}ms` : `${(duration/1000).toFixed(1)}s`;
+    console.log(`${colors.dim}${box.v}${colors.reset}   ${config.icon} ${config.color}${config.name}${colors.reset} ${colors.dim}(${time})${colors.reset}`);
+  },
+  
+  // Section separator (beautiful)
+  section: (title) => {
+    // Removed - using requestCard instead
+  },
+  
+  // Debug (only in development)
   debug: (message) => {
     if (process.env.NODE_ENV !== 'production') {
-      console.log(`${colors.dim}[${logger.timestamp()}]${colors.reset} ${colors.dim}[DEBUG]${colors.reset} ${message}`);
+      console.log(`${colors.dim}${box.v}${colors.reset} ${colors.dim}[DEBUG]${colors.reset} ${message}`);
     }
-  },
-  
-  // Section separator (simplified)
-  section: (title) => {
-    // Removed verbose separators - too much noise
   }
 };
 
@@ -2560,7 +2612,8 @@ async function resolvePreview(imdbId, type) {
               youtube_key: tmdbMeta.youtubeTrailerKey || null,
               source: 'itunes'
             });
-            logger.source('itunes', `Found (${duration}ms)`, true);
+            logger.sourceAttempt('itunes', duration);
+            logger.source('itunes', `Found`, true);
             successTracker.recordSourceSuccess('itunes');
             return { ...itunesResult, source: 'itunes', quality: '480p' };
           } else {
@@ -2590,7 +2643,8 @@ async function resolvePreview(imdbId, type) {
               youtube_key: tmdbMeta.youtubeTrailerKey,
               source: 'youtube'
             });
-            logger.source('piped', `Found (${duration}ms)`, true);
+            logger.sourceAttempt('piped', duration);
+            logger.source('piped', `Found`, true);
             successTracker.recordSourceSuccess('piped');
             return {
               found: true,
@@ -2626,7 +2680,8 @@ async function resolvePreview(imdbId, type) {
               youtube_key: tmdbMeta.youtubeTrailerKey,
               source: 'youtube'
             });
-            logger.source('ytdlp', `Found (${duration}ms)`, true);
+            logger.sourceAttempt('ytdlp', duration);
+            logger.source('ytdlp', `Found`, true);
             successTracker.recordSourceSuccess('ytdlp');
             return {
               found: true,
@@ -2663,7 +2718,8 @@ async function resolvePreview(imdbId, type) {
               youtube_key: tmdbMeta.youtubeTrailerKey,
               source: 'youtube'
             });
-            logger.source('invidious', `Found (${duration}ms)`, true);
+            logger.sourceAttempt('invidious', duration);
+            logger.source('invidious', `Found`, true);
             successTracker.recordSourceSuccess('invidious');
             return {
               found: true,
@@ -2696,7 +2752,8 @@ async function resolvePreview(imdbId, type) {
               youtube_key: tmdbMeta.youtubeTrailerKey || null,
               source: 'archive'
             });
-            logger.source('archive', `Found (${duration}ms)`, true);
+            logger.sourceAttempt('archive', duration);
+            logger.source('archive', `Found`, true);
             successTracker.recordSourceSuccess('archive');
             return {
               found: true,
@@ -2747,7 +2804,8 @@ async function resolvePreview(imdbId, type) {
     // Find first successful result
     for (const result of parallelResults) {
       if (result.status === 'fulfilled' && result.value && result.value.found) {
-        logger.success(`Found: ${result.value.source}`);
+        logger.success(`Found via ${result.value.source.toUpperCase()}`);
+        console.log(`${colors.dim}${box.bl}${box.h.repeat(68)}${box.br}${colors.reset}\n`);
         return result.value;
       }
     }
@@ -2763,7 +2821,8 @@ async function resolvePreview(imdbId, type) {
   }
   
   // Don't cache negative results - always search again on next request
-  console.log('No preview found from iTunes, YouTube, or Internet Archive');
+  logger.warn('No preview found from any source');
+  console.log(`${colors.dim}${box.bl}${box.h.repeat(68)}${box.br}${colors.reset}\n`);
   return { found: false };
 }
 
@@ -2792,17 +2851,19 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   const { type, id } = req.params;
   const requestStart = Date.now();
   
-  logger.info(`${type.toUpperCase()} ${id} (active: ${activeRequests})`);
+  logger.requestCard(type.toUpperCase(), id, activeRequests);
   
   if (!id.startsWith('tt')) {
     logger.warn(`Skipping non-IMDB ID: ${id}`);
+    console.log(`${colors.dim}${box.bl}${box.h.repeat(68)}${box.br}${colors.reset}\n`);
     return res.json({ streams: [] });
   }
   
   let timeoutFired = false;
   const timeout = setTimeout(() => {
     timeoutFired = true;
-    logger.warn(`Request timeout: ${id}`);
+    logger.warn(`Request timeout after ${STREAM_TIMEOUT / 1000}s`);
+    console.log(`${colors.dim}${box.bl}${box.h.repeat(68)}${box.br}${colors.reset}\n`);
     if (!res.headersSent) {
       try {
         res.json({ streams: [] });
@@ -2880,7 +2941,8 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         console.log(`Using Piped/Invidious URL directly (already proxied, AVPlayer compatible): ${finalUrl.substring(0, 80)}...`);
       }
       
-      logger.success(`Found trailer for ${id}: ${finalUrl.substring(0, 80)}...`);
+      logger.success(`Trailer found: ${finalUrl.substring(0, 60)}...`);
+      console.log(`${colors.dim}${box.bl}${box.h.repeat(68)}${box.br}${colors.reset}\n`);
       console.log(`  [DEBUG] Before res.json() - headersSent: ${res.headersSent}, finished: ${res.finished}`);
       
       if (!res.headersSent) {
@@ -2928,7 +2990,8 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       }
     }
     
-    logger.warn(`No preview found for ${id}`);
+      logger.warn(`No preview found`);
+      console.log(`${colors.dim}${box.bl}${box.h.repeat(68)}${box.br}${colors.reset}\n`);
     console.log(`  [DEBUG] Before sending empty response - headersSent: ${res.headersSent}`);
     if (!res.headersSent) {
       try {
@@ -3052,16 +3115,18 @@ process.on('unhandledRejection', (reason, promise) => {
 
 // Start server with error handling
 try {
-  console.log('Starting server...');
-  console.log(`Port: ${PORT}`);
-  console.log(`TMDB_API_KEY: ${TMDB_API_KEY ? 'Set' : 'NOT SET'}`);
-  console.log(`Database path: ${dbPath}`);
-  
   app.listen(PORT, '0.0.0.0', () => {
-    logger.section('SERVER STARTED');
-    logger.success(`Server running on port ${PORT}`);
-    logger.info(`Listening on 0.0.0.0:${PORT}`);
-    logger.info(`Database: ${dbPath}`);
+    // Beautiful startup dashboard
+    console.log(`\n${colors.bright}${colors.cyan}${box.tl}${box.h.repeat(70)}${box.tr}${colors.reset}`);
+    console.log(`${colors.bright}${colors.cyan}${box.v}${colors.reset} ${colors.bright}${colors.white}🚀 TRAILERIO BACKEND${colors.reset} ${' '.repeat(48)} ${colors.bright}${colors.cyan}${box.v}${colors.reset}`);
+    console.log(`${colors.bright}${colors.cyan}${box.l}${box.h.repeat(70)}${box.r}${colors.reset}`);
+    console.log(`${colors.bright}${colors.cyan}${box.v}${colors.reset} ${colors.green}✓${colors.reset} Server running on ${colors.bright}port ${PORT}${colors.reset} ${' '.repeat(40)} ${colors.bright}${colors.cyan}${box.v}${colors.reset}`);
+    console.log(`${colors.bright}${colors.cyan}${box.v}${colors.reset} ${colors.blue}ℹ${colors.reset} Listening on ${colors.dim}0.0.0.0:${PORT}${colors.reset} ${' '.repeat(38)} ${colors.bright}${colors.cyan}${box.v}${colors.reset}`);
+    console.log(`${colors.bright}${colors.cyan}${box.v}${colors.reset} ${colors.magenta}💾${colors.reset} Database: ${colors.dim}${dbPath}${colors.reset} ${' '.repeat(30)} ${colors.bright}${colors.cyan}${box.v}${colors.reset}`);
+    console.log(`${colors.bright}${colors.cyan}${box.v}${colors.reset} ${TMDB_API_KEY ? `${colors.green}✓` : `${colors.red}✗`}${colors.reset} TMDB API Key ${TMDB_API_KEY ? colors.green + 'Set' : colors.red + 'NOT SET'}${colors.reset} ${' '.repeat(42)} ${colors.bright}${colors.cyan}${box.v}${colors.reset}`);
+    console.log(`${colors.bright}${colors.cyan}${box.v}${colors.reset} ${colors.yellow}📊${colors.reset} Cache: ${colors.bright}${cache.size}${colors.reset} items loaded ${' '.repeat(40)} ${colors.bright}${colors.cyan}${box.v}${colors.reset}`);
+    console.log(`${colors.bright}${colors.cyan}${box.bl}${box.h.repeat(70)}${box.br}${colors.reset}\n`);
+    
     if (!TMDB_API_KEY) {
       logger.warn('TMDB_API_KEY not set. Please set it as an environment variable.');
     }
