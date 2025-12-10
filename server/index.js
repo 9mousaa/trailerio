@@ -2135,7 +2135,7 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
           }
           
           // Trailer keyword bonus
-          const lowerTitle = title.toLowerCase();
+          const lowerTitle = docTitle.toLowerCase();
           if (lowerTitle.includes('trailer')) {
             score += 0.2;
           } else if (lowerTitle.includes('preview') || lowerTitle.includes('teaser')) {
