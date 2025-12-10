@@ -1950,7 +1950,7 @@ async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
   console.log(`  [yt-dlp] Extracting streamable URL from ${siteName}: ${videoUrl}...`);
   
   const startTime = Date.now();
-  const EXTRACTION_TIMEOUT = 5000; // 5 seconds (matches source timeout)
+  const EXTRACTION_TIMEOUT = 15000; // 15 seconds - proxy can be slow, yt-dlp needs time
   const gluetunProxy = 'http://gluetun:8888';
   
   // Check if gluetun proxy is available (required for avoiding blocks)
@@ -1996,16 +1996,11 @@ async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
     console.log(`  [yt-dlp] Attempt ${attemptName} (proxy: ${useProxy ? 'Cloudflare Warp' : 'direct'})...`);
     
     try {
-      const execPromise = execAsync(command, {
+      // execAsync already has timeout built-in, no need for Promise.race
+      const { stdout, stderr } = await execAsync(command, {
         timeout: EXTRACTION_TIMEOUT,
         maxBuffer: 10 * 1024 * 1024
       });
-      
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('yt-dlp timeout')), EXTRACTION_TIMEOUT)
-      );
-      
-      const { stdout, stderr } = await Promise.race([execPromise, timeoutPromise]);
       
       if (stderr && !stderr.includes('WARNING') && stderr.trim().length > 0) {
         console.log(`  [yt-dlp] Warning: ${stderr.substring(0, 200)}`);
@@ -3042,11 +3037,13 @@ async function resolvePreview(imdbId, type) {
     
     // Get dynamic timeout for this source (optimized for speed)
     // Faster sources get shorter timeouts, slower sources get longer but capped
-    let defaultTimeout = 6000; // 6 seconds default (reduced from 10s for faster response)
-    if (source === 'archive') defaultTimeout = 5000; // Archive: cap at 5s (tries top 3 strategies only)
-    if (source === 'ytdlp') defaultTimeout = 5000; // yt-dlp: cap at 5s (proxy can be slow)
-    if (source === 'itunes') defaultTimeout = 4000; // iTunes: usually fast, 4s max
-    if (source === 'imdb_trailer' || source === 'appletrailers' || source === 'allocine' || source === 'vimeo' || source === 'dailymotion') defaultTimeout = 4000; // Direct sources: 4s max
+    let defaultTimeout = 6000; // 6 seconds default
+    if (source === 'archive') defaultTimeout = 8000; // Archive: 8s (needs time for metadata fetch)
+    if (source === 'ytdlp') defaultTimeout = 18000; // yt-dlp: 18s (proxy adds latency, extraction takes 10-15s)
+    if (source === 'itunes') defaultTimeout = 5000; // iTunes: usually fast, 5s max
+    if (source === 'imdb_trailer' || source === 'iva_trailer') defaultTimeout = 12000; // IMDb/IVA: 12s (yt-dlp extraction via proxy)
+    if (source === 'appletrailers' || source === 'allocine' || source === 'vimeo' || source === 'dailymotion') defaultTimeout = 10000; // Other yt-dlp sources: 10s
+    if (source === 'rottentomatoes' || source === 'metacritic' || source === 'moviepilot') defaultTimeout = 10000; // Review sites: 10s (yt-dlp extraction)
     
     const sourceTimeout = sourceResponseTimes.getTimeout(source, defaultTimeout);
     
