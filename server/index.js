@@ -1944,36 +1944,95 @@ async function extractViaYtDlp(youtubeKey) {
   return await extractViaYtDlpGeneric(youtubeUrl, 'YouTube');
 }
 
+// Proxy rotation for multiple Cloudflare Warp instances
+const proxyInstances = [
+  { name: 'gluetun-1', proxy: 'http://gluetun-1:8888', status: 'http://gluetun-1:8000/v1/openvpn/status' },
+  { name: 'gluetun-2', proxy: 'http://gluetun-2:8888', status: 'http://gluetun-2:8000/v1/openvpn/status' },
+  { name: 'gluetun-3', proxy: 'http://gluetun-3:8888', status: 'http://gluetun-3:8000/v1/openvpn/status' }
+];
+
+// Track proxy success rates for smart selection
+const proxyTracker = {
+  proxies: new Map(), // proxy name -> { success: number, total: number, lastUsed: timestamp }
+  
+  recordSuccess(proxyName) {
+    if (!this.proxies.has(proxyName)) {
+      this.proxies.set(proxyName, { success: 0, total: 0, lastUsed: 0 });
+    }
+    const stats = this.proxies.get(proxyName);
+    stats.success++;
+    stats.total++;
+    stats.lastUsed = Date.now();
+  },
+  
+  recordFailure(proxyName) {
+    if (!this.proxies.has(proxyName)) {
+      this.proxies.set(proxyName, { success: 0, total: 0, lastUsed: 0 });
+    }
+    const stats = this.proxies.get(proxyName);
+    stats.total++;
+    stats.lastUsed = Date.now();
+  },
+  
+  getSuccessRate(proxyName) {
+    const stats = this.proxies.get(proxyName);
+    if (!stats || stats.total === 0) return 0.5; // Default 50% for untested
+    return stats.success / stats.total;
+  },
+  
+  // Get available proxies sorted by success rate (best first)
+  getAvailableProxies() {
+    return proxyInstances.filter(instance => {
+      // Check if proxy is available (we'll check health in real-time)
+      return true; // Assume available, check health when using
+    }).sort((a, b) => {
+      const rateA = this.getSuccessRate(a.name);
+      const rateB = this.getSuccessRate(b.name);
+      return rateB - rateA; // Sort descending (best first)
+    });
+  }
+};
+
 // Generic extractor that works with any URL supported by yt-dlp
-// ALWAYS uses Cloudflare Warp proxy first to avoid blocking (especially YouTube)
+// Uses multiple Cloudflare Warp proxies with IP rotation to avoid bot detection
 async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
   console.log(`  [yt-dlp] Extracting streamable URL from ${siteName}: ${videoUrl}...`);
   
   const startTime = Date.now();
   const EXTRACTION_TIMEOUT = 15000; // 15 seconds - proxy can be slow, yt-dlp needs time
-  const gluetunProxy = 'http://gluetun:8888';
   
-  // Check if gluetun proxy is available (required for avoiding blocks)
-  let proxyAvailable = false;
-  try {
-    const gluetunStatus = await fetch('http://gluetun:8000/v1/openvpn/status', {
-      signal: AbortSignal.timeout(1000), // Quick check
-      method: 'GET'
-    }).catch(() => null);
-    
-    if (gluetunStatus !== null) {
-      proxyAvailable = true;
-      console.log(`  [yt-dlp] ✓ Gluetun proxy available, using Cloudflare Warp to avoid blocking`);
-    } else {
-      console.log(`  [yt-dlp] ⚠ Gluetun not available, will try direct (may get blocked)`);
-    }
-  } catch (proxyError) {
-    console.log(`  [yt-dlp] ⚠ Gluetun check failed: ${proxyError.message}, will try direct`);
+  // Get available proxies sorted by success rate
+  const availableProxies = proxyTracker.getAvailableProxies();
+  
+  // Check which proxies are actually available (health check)
+  const proxyChecks = await Promise.allSettled(
+    availableProxies.map(async (instance) => {
+      try {
+        const status = await fetch(instance.status, {
+          signal: AbortSignal.timeout(1000),
+          method: 'GET'
+        }).catch(() => null);
+        return status !== null ? instance : null;
+      } catch {
+        return null;
+      }
+    })
+  );
+  
+  const workingProxies = proxyChecks
+    .map((result, index) => result.status === 'fulfilled' && result.value ? result.value : null)
+    .filter(p => p !== null);
+  
+  // Fallback to direct if no proxies available
+  if (workingProxies.length === 0) {
+    console.log(`  [yt-dlp] ⚠ No Cloudflare Warp proxies available, will try direct (may get blocked)`);
+  } else {
+    console.log(`  [yt-dlp] ✓ Found ${workingProxies.length} Cloudflare Warp proxy(ies) available`);
   }
   
-  // Optimized yt-dlp command (always use proxy if available to avoid blocking)
-  const buildCommand = (useProxy) => {
-    const proxyFlag = useProxy ? `--proxy ${gluetunProxy}` : '';
+  // Optimized yt-dlp command (use proxy if available)
+  const buildCommand = (proxyUrl) => {
+    const proxyFlag = proxyUrl ? `--proxy ${proxyUrl}` : '';
     // Format: Get single streamable URL (progressive mp4 preferred for direct streaming)
     // Avoid DASH formats that require merging - use progressive formats when possible
     // For --get-url, we want a single URL, so prefer formats that don't need merging
@@ -1991,9 +2050,11 @@ async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
       "${videoUrl}"`.replace(/\s+/g, ' ').trim();
   };
   
-  const tryExtraction = async (useProxy, attemptName) => {
-    const command = buildCommand(useProxy);
-    console.log(`  [yt-dlp] Attempt ${attemptName} (proxy: ${useProxy ? 'Cloudflare Warp' : 'direct'})...`);
+  const tryExtraction = async (proxyInstance, attemptName) => {
+    const proxyUrl = proxyInstance ? proxyInstance.proxy : null;
+    const command = buildCommand(proxyUrl);
+    const proxyName = proxyInstance ? proxyInstance.name : 'direct';
+    console.log(`  [yt-dlp] Attempt ${attemptName} (proxy: ${proxyName})...`);
     
     try {
       // execAsync already has timeout built-in, no need for Promise.race
@@ -2008,6 +2069,11 @@ async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
       
       const url = stdout.trim();
       if (url && url.startsWith('http')) {
+        // Record success for this proxy
+        if (proxyInstance) {
+          proxyTracker.recordSuccess(proxyInstance.name);
+        }
+        
         // Verify it's a streamable URL (not a manifest or download link)
         // YouTube DASH manifests end with .m3u8 or have 'manifest' in URL - we want direct video URLs
         if (url.includes('.m3u8') || url.includes('manifest') || url.includes('googlevideo.com/videoplayback')) {

@@ -1,43 +1,103 @@
 
 services:
-  # Gluetun service for Cloudflare Warp (optional - set WireGuard keys in .env to enable)
-  # If keys are not set, gluetun will fail to start but backend will work without it
-  gluetun:
+  # Multiple Gluetun services for Cloudflare Warp IP rotation
+  # Each instance uses different WireGuard keys (different Cloudflare Warp accounts)
+  # This provides different IPs per request to avoid bot detection
+  # Set WIREGUARD_*_1, WIREGUARD_*_2, etc. in .env for each instance
+  
+  gluetun-1:
     image: qmcgaw/gluetun:latest
-    container_name: gluetun
+    container_name: gluetun-1
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
     devices:
       - /dev/net/tun:/dev/net/tun
     environment:
-      # Cloudflare Warp configuration (set these in .env file - see CLOUDFLARE_WARP_SETUP.md)
       - VPN_SERVICE_PROVIDER=custom
       - VPN_TYPE=wireguard
-      - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY:-}
-      - WIREGUARD_ADDRESSES=${WIREGUARD_ADDRESSES:-}
-      - WIREGUARD_PUBLIC_KEY=${WIREGUARD_PUBLIC_KEY:-}
-      - WIREGUARD_PRESHARED_KEY=${WIREGUARD_PRESHARED_KEY:-}
-      - WIREGUARD_ENDPOINT_IP=${WIREGUARD_ENDPOINT_IP:-}
-      - WIREGUARD_ENDPOINT_PORT=${WIREGUARD_ENDPOINT_PORT:-}
-      # Enable HTTP proxy for yt-dlp
-      # Based on gluetun source code, variable is HTTPPROXY (no underscore)
+      - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY_1:-${WIREGUARD_PRIVATE_KEY:-}}
+      - WIREGUARD_ADDRESSES=${WIREGUARD_ADDRESSES_1:-${WIREGUARD_ADDRESSES:-}}
+      - WIREGUARD_PUBLIC_KEY=${WIREGUARD_PUBLIC_KEY_1:-${WIREGUARD_PUBLIC_KEY:-}}
+      - WIREGUARD_PRESHARED_KEY=${WIREGUARD_PRESHARED_KEY_1:-${WIREGUARD_PRESHARED_KEY:-}}
+      - WIREGUARD_ENDPOINT_IP=${WIREGUARD_ENDPOINT_IP_1:-${WIREGUARD_ENDPOINT_IP:-}}
+      - WIREGUARD_ENDPOINT_PORT=${WIREGUARD_ENDPOINT_PORT_1:-${WIREGUARD_ENDPOINT_PORT:-}}
       - HTTP_CONTROL_SERVER_LOG=on
       - HTTPPROXY=on
       - HTTPPROXY_PORT=8888
       - HTTPPROXY_LOG=on
-      # Enable SOCKS5 proxy (for yt-dlp)
       - SOCKS5=on
       - SOCKS5_LISTENING_ADDRESS=0.0.0.0
       - SOCKS5_PORT=1080
-    restart: unless-stopped  # Restart if it crashes (but backend works without it)
-    # Expose proxy ports (containers on same network can access without exposing, but it helps)
-    ports:
-      - "8888:8888/tcp"  # HTTP proxy
-      - "1080:1080/tcp"  # SOCKS5 proxy
+    restart: unless-stopped
     networks:
       - trailerio-internal
-    # Health check
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/v1/openvpn/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  gluetun-2:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun-2
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - VPN_SERVICE_PROVIDER=custom
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY_2:-}
+      - WIREGUARD_ADDRESSES=${WIREGUARD_ADDRESSES_2:-}
+      - WIREGUARD_PUBLIC_KEY=${WIREGUARD_PUBLIC_KEY_2:-}
+      - WIREGUARD_PRESHARED_KEY=${WIREGUARD_PRESHARED_KEY_2:-}
+      - WIREGUARD_ENDPOINT_IP=${WIREGUARD_ENDPOINT_IP_2:-}
+      - WIREGUARD_ENDPOINT_PORT=${WIREGUARD_ENDPOINT_PORT_2:-}
+      - HTTP_CONTROL_SERVER_LOG=on
+      - HTTPPROXY=on
+      - HTTPPROXY_PORT=8888
+      - HTTPPROXY_LOG=on
+      - SOCKS5=on
+      - SOCKS5_LISTENING_ADDRESS=0.0.0.0
+      - SOCKS5_PORT=1080
+    restart: unless-stopped
+    networks:
+      - trailerio-internal
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/v1/openvpn/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  gluetun-3:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun-3
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - VPN_SERVICE_PROVIDER=custom
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY_3:-}
+      - WIREGUARD_ADDRESSES=${WIREGUARD_ADDRESSES_3:-}
+      - WIREGUARD_PUBLIC_KEY=${WIREGUARD_PUBLIC_KEY_3:-}
+      - WIREGUARD_PRESHARED_KEY=${WIREGUARD_PRESHARED_KEY_3:-}
+      - WIREGUARD_ENDPOINT_IP=${WIREGUARD_ENDPOINT_IP_3:-}
+      - WIREGUARD_ENDPOINT_PORT=${WIREGUARD_ENDPOINT_PORT_3:-}
+      - HTTP_CONTROL_SERVER_LOG=on
+      - HTTPPROXY=on
+      - HTTPPROXY_PORT=8888
+      - HTTPPROXY_LOG=on
+      - SOCKS5=on
+      - SOCKS5_LISTENING_ADDRESS=0.0.0.0
+      - SOCKS5_PORT=1080
+    restart: unless-stopped
+    networks:
+      - trailerio-internal
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/v1/openvpn/status"]
       interval: 30s
