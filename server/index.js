@@ -827,7 +827,8 @@ async function getTMDBMetadata(imdbId, type) {
   const runtime = detail.runtime || null;
   
   // Supported video sites (yt-dlp can extract from these)
-  const SUPPORTED_SITES = ['YouTube', 'Vimeo', 'Dailymotion', 'Apple', 'Facebook'];
+  // TMDB can return trailers from: YouTube, Vimeo, Dailymotion, Apple, Facebook, Twitter, Instagram
+  const SUPPORTED_SITES = ['YouTube', 'Vimeo', 'Dailymotion', 'Apple', 'Facebook', 'Twitter', 'Instagram'];
   
   let youtubeTrailerKey = null;
   let trailerUrl = null; // For non-YouTube sites
@@ -863,6 +864,10 @@ async function getTMDBMetadata(imdbId, type) {
       return { url: key.startsWith('http') ? key : `https://trailers.apple.com/${key}`, site: 'Apple' };
     } else if (site === 'Facebook') {
       return { url: `https://www.facebook.com/watch/?v=${key}`, site: 'Facebook' };
+    } else if (site === 'Twitter') {
+      return { url: `https://twitter.com/i/videos/${key}`, site: 'Twitter' };
+    } else if (site === 'Instagram') {
+      return { url: `https://www.instagram.com/p/${key}`, site: 'Instagram' };
     }
     return null;
   };
@@ -1586,6 +1591,12 @@ async function extractViaInvidious(youtubeKey) {
 }
 
 // ============ YT-DLP EXTRACTOR (Generic - supports multiple sites) ============
+
+// YouTube-specific extractor (wrapper around generic)
+async function extractViaYtDlp(youtubeKey) {
+  const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeKey}`;
+  return await extractViaYtDlpGeneric(youtubeUrl, 'YouTube');
+}
 
 // Generic extractor that works with any URL supported by yt-dlp
 async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
