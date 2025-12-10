@@ -3857,6 +3857,35 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'trailerio-backend', version: '2.0.0' });
 });
 
+// Archive.org cookie management endpoint
+// Usage: POST /admin/archive-cookie with body: { "cookies": "your-cookie-string", "email": "optional@email.com" }
+// To get cookies: 1. Log into archive.org in browser, 2. Open DevTools > Application > Cookies, 3. Copy all cookies as "name=value; name2=value2" format
+app.post('/admin/archive-cookie', express.json(), (req, res) => {
+  const { cookies, email } = req.body;
+  
+  if (!cookies || typeof cookies !== 'string') {
+    return res.status(400).json({ error: 'cookies field is required (string)' });
+  }
+  
+  const success = archiveCookieManager.addCookie(cookies, email || null);
+  if (success) {
+    res.json({ success: true, message: 'Cookie added successfully' });
+  } else {
+    res.status(500).json({ error: 'Failed to add cookie' });
+  }
+});
+
+// List Archive.org cookies (for debugging)
+app.get('/admin/archive-cookies', (req, res) => {
+  const stmt = db.prepare(`
+    SELECT id, email, created_at, last_used, is_valid, use_count 
+    FROM archive_cookies 
+    ORDER BY last_used DESC
+  `);
+  const cookies = stmt.all();
+  res.json({ cookies });
+});
+
 app.get('/manifest.json', (req, res) => {
   res.json({
     id: "com.trailer.preview",
