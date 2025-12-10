@@ -574,10 +574,11 @@ cleanupCache();
 cleanupSuccessTracker();
 
 // MDBList integration for cache warming
-// Rate limiting: Free tier = 1000 requests/day = ~41/hour = ~1 request every 90 seconds
+// Rate limiting: Free tier = 1000 requests/day = ~41/hour = ~1 request every 88 seconds
+// Reduced to 60s to be faster but still respectful (well under 1000/day limit)
 const mdblistRateLimiter = {
   lastRequest: 0,
-  minInterval: 90 * 1000, // 90 seconds between requests (conservative)
+  minInterval: 60 * 1000, // 60 seconds between requests (faster, still safe)
   dailyLimit: 1000,
   dailyCount: 0,
   lastReset: Date.now(),
@@ -598,11 +599,14 @@ const mdblistRateLimiter = {
       return false; // Can't make more requests today
     }
     
-    // Rate limit: wait if needed
+    // Rate limit: wait if needed (but don't block if it's been a while)
     const timeSinceLastRequest = now - this.lastRequest;
     if (timeSinceLastRequest < this.minInterval) {
       const waitTime = this.minInterval - timeSinceLastRequest;
-      console.log(`[MDBList] Rate limiting: waiting ${Math.round(waitTime / 1000)}s before next request`);
+      // Only log if wait is significant (> 5s)
+      if (waitTime > 5000) {
+        console.log(`[MDBList] Rate limiting: waiting ${Math.round(waitTime / 1000)}s before next request`);
+      }
       await new Promise(resolve => setTimeout(resolve, waitTime));
     }
     
@@ -647,6 +651,10 @@ async function fetchMDBListItems(username, listName) {
         console.log(`[MDBList] List not found: ${username}/${listName}`);
       } else if (response.status === 429) {
         console.log(`[MDBList] Rate limit exceeded for ${username}/${listName}`);
+      } else if (response.status === 503 || response.status === 500) {
+        console.log(`[MDBList] Service unavailable (${response.status}) for ${username}/${listName} - skipping`);
+        // Don't count 503/500 as a rate limit hit - it's a server issue
+        mdblistRateLimiter.dailyCount--;
       } else {
         console.log(`[MDBList] HTTP ${response.status} for ${username}/${listName}`);
       }
@@ -704,7 +712,7 @@ async function warmCache() {
   const allItems = [];
   
   try {
-    // 1. Get popular movies and TV shows from TMDB
+    // 1. Get popular movies and TV shows from TMDB (FAST - no rate limits)
     console.log('[Cache Warming] Fetching popular content from TMDB...');
     const [moviesResponse, tvResponse] = await Promise.allSettled([
       fetch(`https://api.themoviedb.org/3/movie/popular?api_key=${TMDB_API_KEY}&page=1`),
@@ -729,56 +737,49 @@ async function warmCache() {
       }
     }
     
-    // 2. Get items from MDBList curated lists
+    // 2. Get items from MDBList curated lists (NON-BLOCKING - runs in background)
+    // Start MDBList fetching in background, but don't wait for it
+    let mdblistPromise = Promise.resolve([]);
     if (MDBLIST_API_KEY) {
-      console.log('[Cache Warming] Fetching curated lists from MDBList...');
+      console.log('[Cache Warming] Starting MDBList fetch in background (non-blocking)...');
       
-      // Priority lists to warm (most popular/trending)
+      // Reduced to top 3 most important lists to be faster and less aggressive
       const priorityLists = [
         { username: 'snoak', listName: 'trending-movies' },
         { username: 'snoak', listName: 'trending-shows' },
-        { username: 'snoak', listName: 'imdb-top-250-movies' },
-        { username: 'snoak', listName: 'imdb-top-250-shows' },
-        { username: 'snoak', listName: 'latest-movies-digital-release' },
-        { username: 'snoak', listName: 'latest-tv-shows' },
-        { username: 'garycrawfordgc', listName: 'trending-movies' },
-        { username: 'garycrawfordgc', listName: 'trending-shows' }
+        { username: 'snoak', listName: 'imdb-top-250-movies' }
       ];
       
-      for (const { username, listName } of priorityLists) {
-        try {
-          const items = await fetchMDBListItems(username, listName);
-          for (const item of items.slice(0, 50)) { // Limit to 50 items per list
-            allItems.push({ ...item, source: 'mdblist' });
+      mdblistPromise = (async () => {
+        const mdblistItems = [];
+        for (const { username, listName } of priorityLists) {
+          try {
+            const items = await fetchMDBListItems(username, listName);
+            for (const item of items.slice(0, 30)) { // Reduced to 30 items per list
+              mdblistItems.push({ ...item, source: 'mdblist' });
+            }
+          } catch (error) {
+            console.log(`[Cache Warming] Error fetching MDBList for ${username}/${listName}: ${error.message}`);
           }
-        } catch (error) {
-          console.log(`[Cache Warming] Error fetching MDBList for ${username}/${listName}: ${error.message}`);
         }
-      }
+        return mdblistItems;
+      })();
     } else {
       console.log('[Cache Warming] MDBLIST_API_KEY not set, skipping MDBList integration');
     }
     
-    // Remove duplicates (same IMDb ID)
-    const uniqueItems = [];
-    const seenIds = new Set();
-    for (const item of allItems) {
-      if (!seenIds.has(item.imdbId)) {
-        seenIds.add(item.imdbId);
-        uniqueItems.push(item);
-      }
-    }
+    // Start caching TMDB items immediately (don't wait for MDBList)
+    console.log(`[Cache Warming] Starting to cache ${allItems.length} TMDB items immediately...`);
     
-    console.log(`[Cache Warming] Found ${uniqueItems.length} unique items to cache (${allItems.length - uniqueItems.length} duplicates removed, ${uniqueItems.filter(i => i.source === 'tmdb').length} from TMDB, ${uniqueItems.filter(i => i.source === 'mdblist').length} from MDBList)`);
-    
-    // Cache items in parallel batches (faster than sequential)
+    // Cache TMDB items in parallel batches (FAST - no rate limits)
     const BATCH_SIZE = 5;
     let cached = 0;
     let skipped = 0;
     let failed = 0;
     
-    for (let i = 0; i < uniqueItems.length; i += BATCH_SIZE) {
-      const batch = uniqueItems.slice(i, i + BATCH_SIZE);
+    // Process TMDB items first (fast, no rate limits)
+    for (let i = 0; i < allItems.length; i += BATCH_SIZE) {
+      const batch = allItems.slice(i, i + BATCH_SIZE);
       
       await Promise.allSettled(batch.map(async (item) => {
         // Check if already cached
@@ -794,20 +795,63 @@ async function warmCache() {
           await resolvePreview(item.imdbId, resolveType);
           cached++;
           
-          // Delay to avoid overwhelming the system and rate limits
-          // Longer delay for MDBList items (already rate-limited by API)
-          const delay = item.source === 'mdblist' ? 1000 : 500;
-          await new Promise(resolve => setTimeout(resolve, delay));
+          // Small delay for TMDB (no rate limits, but be respectful)
+          await new Promise(resolve => setTimeout(resolve, 300));
         } catch (error) {
           failed++;
           console.log(`[Cache Warming] Failed to cache ${item.imdbId}: ${error.message}`);
         }
       }));
       
-      // Small delay between batches to avoid overwhelming the system
-      if (i + BATCH_SIZE < uniqueItems.length) {
-        await new Promise(resolve => setTimeout(resolve, 200));
+      // Small delay between batches
+      if (i + BATCH_SIZE < allItems.length) {
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
+    }
+    
+    console.log(`[Cache Warming] TMDB items complete: ${cached} cached, ${skipped} already cached, ${failed} failed`);
+    
+    // Now wait for MDBList items (if available) and cache them
+    try {
+      const mdblistItems = await mdblistPromise;
+      if (mdblistItems.length > 0) {
+        // Remove duplicates with TMDB items
+        const seenIds = new Set(allItems.map(i => i.imdbId));
+        const newMdblistItems = mdblistItems.filter(item => !seenIds.has(item.imdbId));
+        
+        if (newMdblistItems.length > 0) {
+          console.log(`[Cache Warming] Caching ${newMdblistItems.length} additional MDBList items...`);
+          
+          for (let i = 0; i < newMdblistItems.length; i += BATCH_SIZE) {
+            const batch = newMdblistItems.slice(i, i + BATCH_SIZE);
+            
+            await Promise.allSettled(batch.map(async (item) => {
+              const existing = getCached(item.imdbId);
+              if (existing && existing.preview_url) {
+                skipped++;
+                return;
+              }
+              
+              try {
+                const resolveType = item.type === 'series' ? 'series' : 'movie';
+                await resolvePreview(item.imdbId, resolveType);
+                cached++;
+                // Longer delay for MDBList items (be extra respectful)
+                await new Promise(resolve => setTimeout(resolve, 800));
+              } catch (error) {
+                failed++;
+                console.log(`[Cache Warming] Failed to cache ${item.imdbId}: ${error.message}`);
+              }
+            }));
+            
+            if (i + BATCH_SIZE < newMdblistItems.length) {
+              await new Promise(resolve => setTimeout(resolve, 200));
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.log(`[Cache Warming] MDBList fetch failed or incomplete: ${error.message}`);
     }
     
     console.log(`[Cache Warming] Complete: ${cached} cached, ${skipped} already cached, ${failed} failed`);
