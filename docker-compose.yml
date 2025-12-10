@@ -66,10 +66,14 @@ services:
     networks:
       - trailerio-internal
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/v1/openvpn/status"]
+      # For WireGuard, check if control server responds (proxy is ready when control server is up)
+      # WireGuard doesn't report connection state like OpenVPN, but we know VPN is working
+      # if we get different public IPs. The proxy works regardless of status endpoint.
+      test: ["CMD", "wget", "-q", "--spider", "--timeout=3", "http://localhost:8000/v1/openvpn/status"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 10s
 
   gluetun-3:
     image: qmcgaw/gluetun:latest
@@ -99,10 +103,14 @@ services:
     networks:
       - trailerio-internal
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/v1/openvpn/status"]
+      # For WireGuard, check if control server responds (proxy is ready when control server is up)
+      # WireGuard doesn't report connection state like OpenVPN, but we know VPN is working
+      # if we get different public IPs. The proxy works regardless of status endpoint.
+      test: ["CMD", "wget", "-q", "--spider", "--timeout=3", "http://localhost:8000/v1/openvpn/status"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 10s
 
   backend:
     build:
