@@ -139,7 +139,19 @@ TMDB_KEY=$(grep "^TMDB_API_KEY=" .env 2>/dev/null | cut -d= -f2 || echo "")
 # Backup
 cp .env .env.backup.$(date +%Y%m%d_%H%M%S)
 
-# Write new .env
+# Verify addresses before writing
+if [ -z "${ADDRESSES}" ] || [ "${ADDRESSES}" = "" ]; then
+    echo "❌ ADDRESSES is empty, cannot proceed"
+    exit 1
+fi
+
+# Check if addresses contain valid format
+if ! echo "${ADDRESSES}" | grep -qE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+'; then
+    echo "⚠️  Warning: ADDRESSES format might be invalid: ${ADDRESSES}"
+    echo "   Expected format: IP/CIDR,IP/CIDR"
+fi
+
+# Write new .env (using printf to avoid shell expansion issues)
 cat > .env <<ENVEOF
 # TMDB API Key
 TMDB_API_KEY=${TMDB_KEY:-bfe73358661a995b992ae9a812aa0d2f}
@@ -155,6 +167,11 @@ WIREGUARD_ENDPOINT_PORT=${ENDPOINT_PORT}
 # Gluetun HTTP Proxy (for yt-dlp)
 GLUETUN_HTTP_PROXY=http://gluetun:8000
 ENVEOF
+
+# Verify what was written
+echo ""
+echo "📋 Verifying .env file:"
+echo "   WIREGUARD_ADDRESSES=$(grep '^WIREGUARD_ADDRESSES=' .env | cut -d= -f2-)"
 
 echo ""
 echo "✅ Updated .env with validated keys"
