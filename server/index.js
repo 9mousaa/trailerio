@@ -2545,7 +2545,8 @@ async function resolvePreview(imdbId, type) {
   if (cached) {
     if (cached.preview_url) {
       const sourceType = cached.source_type || 'unknown';
-      logger.cache('hit', `${imdbId} → ${sourceType.toUpperCase()} (cached)`);
+      logger.cache('hit', `${imdbId} → ${sourceType.toUpperCase()}`);
+      console.log(`${colors.dim}${box.bl}${box.h.repeat(68)}${box.br}${colors.reset}\n`);
       
       return {
         found: true,
