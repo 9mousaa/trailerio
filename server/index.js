@@ -1381,6 +1381,13 @@ async function extractViaYtDlp(youtubeKey) {
       
       // If HTTP proxy failed, try direct connection as fallback
       const errorMsg = (raceError.stderr || raceError.message || '').toString();
+      
+      // Age-restricted videos can't be extracted without cookies - skip proxy retry for these
+      if (errorMsg.includes('Sign in to confirm your age') || errorMsg.includes('age-restricted')) {
+        logger.warn('yt-dlp', `Age-restricted video (requires cookies): ${youtubeKey}`);
+        return null; // Can't extract age-restricted videos without cookies
+      }
+      
       if (proxyAvailable && (errorMsg.includes('401') || errorMsg.includes('Unauthorized') || errorMsg.includes('Tunnel connection failed') || errorMsg.includes('Connection refused'))) {
         console.log(`  [yt-dlp] ⚠ SOCKS5 proxy failed, trying direct connection (no proxy)...`);
         // Retry without proxy
