@@ -129,9 +129,13 @@ if [ -z "${WIREGUARD_ENDPOINT_IP}" ] || [ -z "${WIREGUARD_PRIVATE_KEY}" ]; then
 
     # Update .env
     cd "${PROJECT_DIR}"
-    TMDB_KEY=$(grep "^TMDB_API_KEY=" "${ENV_FILE}" | cut -d= -f2- || echo "bfe73358661a995b992ae9a812aa0d2f")
+    TMDB_KEY=$(grep "^TMDB_API_KEY=" "${ENV_FILE}" 2>/dev/null | cut -d= -f2- || echo "bfe73358661a995b992ae9a812aa0d2f")
+    if [ -z "${TMDB_KEY}" ] || [ "${TMDB_KEY}" = "" ]; then
+        TMDB_KEY="bfe73358661a995b992ae9a812aa0d2f"
+    fi
     
     grep -v "^WIREGUARD_" "${ENV_FILE}" > "${ENV_FILE}.tmp" 2>/dev/null || true
+    grep -v "^TMDB_API_KEY=" "${ENV_FILE}.tmp" > "${ENV_FILE}.tmp2" 2>/dev/null || cat "${ENV_FILE}.tmp" > "${ENV_FILE}.tmp2"
     {
         echo "TMDB_API_KEY=${TMDB_KEY}"
         echo ""
@@ -142,8 +146,9 @@ if [ -z "${WIREGUARD_ENDPOINT_IP}" ] || [ -z "${WIREGUARD_PRIVATE_KEY}" ]; then
         echo "WIREGUARD_PRESHARED_KEY=${PRESHARED_KEY}"
         echo "WIREGUARD_ENDPOINT_IP=${ENDPOINT_IP}"
         echo "WIREGUARD_ENDPOINT_PORT=${ENDPOINT_PORT}"
-    } > "${ENV_FILE}.tmp"
-    mv "${ENV_FILE}.tmp" "${ENV_FILE}"
+    } > "${ENV_FILE}"
+    cat "${ENV_FILE}.tmp2" >> "${ENV_FILE}" 2>/dev/null || true
+    rm -f "${ENV_FILE}.tmp" "${ENV_FILE}.tmp2"
     
     log "✅ WireGuard keys generated and saved"
 fi

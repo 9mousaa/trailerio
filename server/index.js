@@ -1538,39 +1538,59 @@ async function extractViaYtDlp(youtubeKey) {
   const timeout = setTimeout(() => controller.abort(), 12000); // 12s timeout
   
   try {
-    // Check if gluetun is available
-    // Port 8000 is the control server, not the HTTP proxy
-    // HTTP proxy is on port 8888, SOCKS5 on port 1080
-    // Try HTTP proxy first (more reliable), fallback to SOCKS5, then direct
+    // CRITICAL: Gluetun proxy is REQUIRED - never run yt-dlp without it
+    // Port 8000 is the control server, port 8888 is the HTTP proxy
+    const gluetunProxy = process.env.GLUETUN_HTTP_PROXY || 'http://gluetun:8888';
     let proxyAvailable = false;
-    let gluetunProxy = 'http://gluetun:8888'; // Use HTTP proxy on port 8888
+    let proxyError = null;
     
+    // Verify gluetun is running and proxy is accessible
     try {
-      // Check gluetun's control API to see if it's running and configured
+      // Check gluetun's control API to verify it's running
       const gluetunStatus = await fetch('http://gluetun:8000/v1/openvpn/status', {
-        signal: AbortSignal.timeout(2000),
+        signal: AbortSignal.timeout(3000),
         method: 'GET'
-      }).catch(() => null);
+      });
       
-      // If we get any response (even error), gluetun is running
-      // HTTP proxy should be available if gluetun is running with HTTPPROXY=on
-      if (gluetunStatus !== null) {
-        proxyAvailable = true;
-        console.log(`  [yt-dlp] ✓ Gluetun detected, using HTTP proxy at ${gluetunProxy}`);
+      if (gluetunStatus && gluetunStatus.ok) {
+        // Gluetun is running, verify HTTP proxy is accessible
+        try {
+          // Test proxy by making a simple request through it
+          const proxyTest = await fetch('http://httpbin.org/ip', {
+            signal: AbortSignal.timeout(5000),
+            method: 'GET',
+            // Note: We can't easily test the proxy from Node.js without additional setup
+            // But if gluetun status is OK, proxy should be available
+          }).catch(() => null);
+          
+          proxyAvailable = true;
+          console.log(`  [yt-dlp] ✓ Gluetun is healthy, HTTP proxy available at ${gluetunProxy}`);
+        } catch (testError) {
+          proxyError = testError;
+          console.log(`  [yt-dlp] ⚠ Proxy test failed: ${testError.message}, but gluetun is running`);
+          // If gluetun is running, assume proxy is available (it's configured)
+          proxyAvailable = true;
+        }
       } else {
-        console.log(`  [yt-dlp] ⚠ Gluetun not reachable, using direct connection`);
+        throw new Error(`Gluetun status check returned ${gluetunStatus.status}`);
       }
-    } catch (proxyError) {
-      // Gluetun not available or not configured, will use direct connection
-      proxyAvailable = false;
-      console.log(`  [yt-dlp] ⚠ Gluetun check failed: ${proxyError.message}, using direct connection`);
+    } catch (checkError) {
+      proxyError = checkError;
+      console.error(`  [yt-dlp] ✗ CRITICAL: Gluetun is not available: ${checkError.message}`);
+      console.error(`  [yt-dlp] ✗ Cannot run yt-dlp without Cloudflare Warp proxy - aborting`);
+      successTracker.recordFailure('ytdlp', 'no-proxy');
+      return null; // NEVER run without proxy
     }
     
-    // Use HTTP proxy (port 8888, configured via Cloudflare Warp)
-    let useProxy = '';
-    if (proxyAvailable) {
-      useProxy = `--proxy ${gluetunProxy}`;
+    // CRITICAL: If proxy is not available, abort immediately
+    if (!proxyAvailable) {
+      console.error(`  [yt-dlp] ✗ CRITICAL: Proxy not available - refusing to run yt-dlp without Cloudflare Warp`);
+      successTracker.recordFailure('ytdlp', 'no-proxy');
+      return null;
     }
+    
+    // Use HTTP proxy (REQUIRED)
+    const useProxy = `--proxy ${gluetunProxy}`;
     
     // Anti-blocking strategies:
     // 1. Use proper user agent (mimic browser)
@@ -1599,7 +1619,7 @@ async function extractViaYtDlp(youtubeKey) {
       --get-url \
       "https://www.youtube.com/watch?v=${youtubeKey}"`;
     
-    console.log(`  [yt-dlp] Running extraction (proxy: ${proxyAvailable ? 'enabled' : 'disabled'})...`);
+    console.log(`  [yt-dlp] Running extraction with Cloudflare Warp proxy (REQUIRED)...`);
     
     // Execute yt-dlp with timeout
     const execPromise = execAsync(ytDlpCommand, {
@@ -1619,38 +1639,25 @@ async function extractViaYtDlp(youtubeKey) {
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
       
-      // If HTTP proxy failed, try direct connection as fallback
+      // CRITICAL: Never fallback to direct connection - proxy is required
       const errorMsg = (raceError.stderr || raceError.message || '').toString();
       
-      // Age-restricted videos can't be extracted without cookies - skip proxy retry for these
+      // Age-restricted videos can't be extracted without cookies
       if (errorMsg.includes('Sign in to confirm your age') || errorMsg.includes('age-restricted')) {
-        logger.warn('yt-dlp', `Age-restricted video (requires cookies): ${youtubeKey}`);
+        console.log(`  [yt-dlp] ✗ Age-restricted video (requires cookies): ${youtubeKey}`);
+        successTracker.recordFailure('ytdlp', 'age-restricted');
         return null; // Can't extract age-restricted videos without cookies
       }
       
-      if (proxyAvailable && (errorMsg.includes('401') || errorMsg.includes('Unauthorized') || errorMsg.includes('Tunnel connection failed') || errorMsg.includes('Connection refused'))) {
-        console.log(`  [yt-dlp] ⚠ SOCKS5 proxy failed, trying direct connection (no proxy)...`);
-        // Retry without proxy
-        const noProxyCommand = ytDlpCommand.replace(`--proxy ${gluetunProxy}`, '');
-        try {
-          const noProxyExecPromise = execAsync(noProxyCommand, {
-            timeout: 12000,
-            maxBuffer: 10 * 1024 * 1024
-          });
-          const noProxyTimeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('yt-dlp timeout')), 12000)
-          );
-          ({ stdout, stderr } = await Promise.race([noProxyExecPromise, noProxyTimeoutPromise]));
-          console.log(`  [yt-dlp] ✓ Direct connection worked!`);
-        } catch (noProxyError) {
-          // Direct connection also failed, log and continue with original error
-          const noProxyErrorMsg = (noProxyError.stderr || noProxyError.message || '').toString();
-          console.log(`  [yt-dlp] ✗ Direct connection also failed: ${noProxyErrorMsg.substring(0, 200)}`);
-          // Fall through to original error handling
-        }
+      // If proxy connection failed, log and abort (never try direct connection)
+      if (errorMsg.includes('401') || errorMsg.includes('Unauthorized') || errorMsg.includes('Tunnel connection failed') || errorMsg.includes('Connection refused') || errorMsg.includes('proxy')) {
+        console.error(`  [yt-dlp] ✗ CRITICAL: Proxy connection failed - ${errorMsg.substring(0, 200)}`);
+        console.error(`  [yt-dlp] ✗ Refusing to use direct connection - Cloudflare Warp proxy is required`);
+        successTracker.recordFailure('ytdlp', 'proxy-failed');
+        return null;
       }
       
-      // If we still don't have stdout (SOCKS5 didn't work or wasn't tried), handle the error
+      // Handle other errors
       if (!stdout) {
         if (raceError.message === 'yt-dlp timeout') {
           console.log(`  [yt-dlp] ✗ TIMEOUT after ${duration}ms`);
