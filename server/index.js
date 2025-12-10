@@ -2681,8 +2681,13 @@ function getCached(imdbId) {
     const ttlHours = CACHE_TTL[sourceType] || CACHE_TTL.youtube;
     
     if (hoursSinceCheck < ttlHours) {
+      logger.debug(`[Cache] Found in memory: ${imdbId} (${sourceType}, ${hoursSinceCheck.toFixed(1)}h old)`);
       return cached;
+    } else {
+      logger.debug(`[Cache] Expired: ${imdbId} (${sourceType}, ${hoursSinceCheck.toFixed(1)}h old, TTL: ${ttlHours}h)`);
     }
+  } else {
+    logger.debug(`[Cache] Not in memory: ${imdbId}`);
   }
   return null;
 }
