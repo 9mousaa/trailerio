@@ -1446,6 +1446,8 @@ async function extractViaYtDlp(youtubeKey) {
     }
     
     // Validate URL is accessible (quick HEAD request)
+    // Note: This validation doesn't use the proxy, so it might fail even if the URL is valid
+    // YouTube stream URLs often return 403 for HEAD requests but work fine for actual streaming
     try {
       const validateController = new AbortController();
       const validateTimeout = setTimeout(() => validateController.abort(), 5000);
@@ -1458,10 +1460,18 @@ async function extractViaYtDlp(youtubeKey) {
       
       clearTimeout(validateTimeout);
       
-      if (!headResponse.ok && headResponse.status !== 206) {
+      // YouTube often returns 403 for HEAD requests even on valid URLs
+      // Accept 206 (Partial Content) and 403 (Forbidden) as potentially valid
+      // The URL was extracted by yt-dlp through the proxy, so it should be valid
+      if (!headResponse.ok && headResponse.status !== 206 && headResponse.status !== 403) {
         console.log(`  [yt-dlp] ✗ URL not accessible: HTTP ${headResponse.status} (${duration}ms)`);
         successTracker.recordFailure('ytdlp', 'extraction');
         return null;
+      }
+      
+      // Log if we got 403 but continue (YouTube often blocks HEAD requests)
+      if (headResponse.status === 403) {
+        console.log(`  [yt-dlp] ⚠ URL validation returned 403 (may still work for streaming) (${duration}ms)`);
       }
     } catch (validateError) {
       // URL validation failed, but URL might still work for streaming
