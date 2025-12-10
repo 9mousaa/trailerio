@@ -171,12 +171,47 @@ generate_warp_config() {
         endpoint_port="2408"
     fi
     
-    # Validate extracted values
-    if [ -z "$private_key" ] || [ -z "$address" ] || [ -z "$public_key" ] || [ -z "$endpoint_ip" ]; then
-        log_error "Failed to extract all required values from config for instance ${instance_num}"
+    # Validate extracted values and format
+    # WireGuard keys should be base64 encoded, 32 bytes = 44 characters (with padding)
+    # Private keys: 44 chars, Public keys: 44 chars
+    local key_length_ok=true
+    
+    # Remove any newlines or extra whitespace
+    private_key=$(echo "$private_key" | tr -d '\n\r')
+    public_key=$(echo "$public_key" | tr -d '\n\r')
+    preshared_key=$(echo "$preshared_key" | tr -d '\n\r')
+    
+    if [ -z "$private_key" ] || [ ${#private_key} -lt 40 ] || [ ${#private_key} -gt 44 ]; then
+        log_error "Invalid private key length for instance ${instance_num} (got ${#private_key} chars, expected 40-44)"
+        key_length_ok=false
+    fi
+    
+    if [ -z "$public_key" ] || [ ${#public_key} -lt 40 ] || [ ${#public_key} -gt 44 ]; then
+        log_error "Invalid public key length for instance ${instance_num} (got ${#public_key} chars, expected 40-44)"
+        key_length_ok=false
+    fi
+    
+    # Validate base64 format (basic check - should only contain base64 chars)
+    if [ -n "$private_key" ] && ! echo "$private_key" | grep -qE '^[A-Za-z0-9+/=]+$'; then
+        log_error "Private key contains invalid characters for instance ${instance_num}"
+        key_length_ok=false
+    fi
+    
+    if [ -n "$public_key" ] && ! echo "$public_key" | grep -qE '^[A-Za-z0-9+/=]+$'; then
+        log_error "Public key contains invalid characters for instance ${instance_num}"
+        key_length_ok=false
+    fi
+    
+    if [ -z "$address" ] || [ -z "$endpoint_ip" ]; then
+        log_error "Missing address or endpoint IP for instance ${instance_num}"
+        key_length_ok=false
+    fi
+    
+    if [ "$key_length_ok" = false ]; then
+        log_error "Failed to extract valid values from config for instance ${instance_num}"
         log_info "Config file contents:"
-        cat wgcf-profile.conf
-        cd - > /dev/null
+        cat wgcf-profile.conf | head -20
+        cd "$original_dir" 2>/dev/null || true
         rm -rf "$temp_dir"
         return 1
     fi
