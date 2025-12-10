@@ -3230,7 +3230,8 @@ async function resolvePreview(imdbId, type, episodeInfo = null) {
   
   // iTunes episode previews - LOWER PRIORITY (only if no trailer found)
   // Skip iTunes for movies - iTunes doesn't have movie previews, only TV episode previews
-  if (type === 'series') {
+  // For first episode, skip iTunes entirely to ensure show trailer is returned
+  if (type === 'series' && !isFirstEpisode) {
     availableSources.push('itunes'); // iTunes works for TV shows (episode previews)
   }
   
