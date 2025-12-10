@@ -557,24 +557,32 @@ const successTracker = {
       const rateA = this.getSourceSuccessRate(a);
       const rateB = this.getSourceSuccessRate(b);
       
-      // Content-type aware prioritization
+      // FIXED: Proper source priority order (YTDLP > Apple Trailers > Archive)
+      // This ensures we prefer official high-quality sources over Archive fallbacks
       let priorityA = 0, priorityB = 0;
-      if (contentType === 'series') {
-        // TV shows: iTunes is best, then YouTube sources
-        if (a === 'itunes') priorityA = 0.3;
-        if (b === 'itunes') priorityB = 0.3;
-      } else {
-        // Movies: Archive is best for older movies, YouTube sources for newer
-        if (a === 'archive') priorityA = 0.2;
-        if (b === 'archive') priorityB = 0.2;
-      }
+      
+      // Source priority (higher = better):
+      // - ytdlp: 0.5 (highest - official YouTube trailers from TMDB)
+      // - appletrailers: 0.3 (high quality, official)
+      // - itunes: 0.3 (for TV shows)
+      // - archive: 0.1 (fallback for older/obscure content)
+      
+      if (a === 'ytdlp') priorityA = 0.5;
+      else if (a === 'appletrailers') priorityA = 0.3;
+      else if (a === 'itunes') priorityA = 0.3;
+      else if (a === 'archive') priorityA = 0.1;
+      
+      if (b === 'ytdlp') priorityB = 0.5;
+      else if (b === 'appletrailers') priorityB = 0.3;
+      else if (b === 'itunes') priorityB = 0.3;
+      else if (b === 'archive') priorityB = 0.1;
       
       // Quality-based weighting (prefer sources that return higher quality)
       const qualityA = qualityTracker.getAvgQuality(a);
       const qualityB = qualityTracker.getAvgQuality(b);
-      const qualityWeight = 0.1; // 10% weight for quality
+      const qualityWeight = 0.15; // 15% weight for quality (increased from 10%)
       
-      // Combined score: success rate + content priority + quality
+      // Combined score: success rate + source priority + quality
       const scoreA = rateA + priorityA + (qualityA * qualityWeight);
       const scoreB = rateB + priorityB + (qualityB * qualityWeight);
       
@@ -2512,11 +2520,14 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
           }
         }
         
+        // FIXED: Stricter matching requirements to avoid false positives (e.g., Alien → 911.mp4)
         // Use higher threshold for matches (0.75 - prioritize accuracy over coverage to avoid false positives)
-        // For short titles, require even higher threshold OR IMDb ID match
+        // For short titles or popular/recent titles, require even higher threshold OR IMDb ID match
         const isShortTitle = (tmdbMeta.title.split(' ').filter(w => w.length > 2).length <= 2);
+        const isRecentTitle = tmdbMeta.year && (new Date().getFullYear() - tmdbMeta.year) < 10; // Last 10 years
         const requiresImdbMatch = isShortTitle && imdbId;
-        const matchThreshold = requiresImdbMatch ? 0.85 : 0.75; // Higher threshold for short titles
+        // Higher threshold for short titles or recent popular titles (to avoid false positives)
+        const matchThreshold = (requiresImdbMatch || isRecentTitle) ? 1.0 : 0.85; // Stricter: 1.0 for short/recent, 0.85 for others
         
         if (bestMatch) {
           const bestMatchImdbId = Array.isArray(bestMatch['external-identifier']) 
@@ -2526,7 +2537,32 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
                 : null);
           
           const hasImdbMatch = imdbId && bestMatchImdbId && bestMatchImdbId === imdbId;
-          console.log(`  [Internet Archive] Best candidate: "${bestMatch.title}" (score: ${bestScore.toFixed(2)}, threshold: ${matchThreshold}, IMDb match: ${hasImdbMatch ? 'yes' : 'no'})`);
+          
+          // FIXED: Require "trailer"/"teaser"/"tv spot" keyword in title (to avoid matching random videos)
+          const lowerTitle = (bestMatch.title || '').toLowerCase();
+          const hasTrailerKeyword = lowerTitle.includes('trailer') || 
+                                   lowerTitle.includes('teaser') || 
+                                   lowerTitle.includes('tv spot') ||
+                                   lowerTitle.includes('preview');
+          
+          // FIXED: Require all main title tokens (ignoring stop words like "the", "a", "an")
+          const stopWords = new Set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by']);
+          const titleTokens = tmdbMeta.title.toLowerCase()
+            .split(/\s+/)
+            .filter(w => w.length > 2 && !stopWords.has(w));
+          const matchTitleTokens = lowerTitle.split(/\s+/)
+            .filter(w => w.length > 2 && !stopWords.has(w));
+          const allTokensMatch = titleTokens.length > 0 && 
+            titleTokens.every(token => matchTitleTokens.some(mt => mt.includes(token) || token.includes(mt)));
+          
+          console.log(`  [Internet Archive] Best candidate: "${bestMatch.title}" (score: ${bestScore.toFixed(2)}, threshold: ${matchThreshold}, IMDb match: ${hasImdbMatch ? 'yes' : 'no'}, has trailer keyword: ${hasTrailerKeyword}, all tokens match: ${allTokensMatch})`);
+          
+          // FIXED: Additional validation - reject if missing critical requirements
+          if (!hasImdbMatch && (!hasTrailerKeyword || !allTokensMatch)) {
+            console.log(`  [Internet Archive] ✗ Rejected: missing trailer keyword or title tokens don't match`);
+            successTracker.recordFailure('archive', strategy.id);
+            continue; // Try next strategy
+          }
         }
         
         if (bestMatch && bestScore >= matchThreshold) {
@@ -2600,8 +2636,44 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
             console.log(`  [Internet Archive] Found ${videoFiles.length} potential video files out of ${files.length} total files`);
             
             if (videoFiles.length > 0) {
+              // FIXED: Filter by duration bounds (20-300 seconds for trailers)
+              // Archive.org metadata may have duration in seconds or as a string
+              const filteredByDuration = videoFiles.filter(f => {
+                if (!f.length) return true; // If no duration info, allow it (better than rejecting)
+                
+                let durationSeconds = null;
+                if (typeof f.length === 'number') {
+                  durationSeconds = f.length;
+                } else if (typeof f.length === 'string') {
+                  // Try to parse duration string (e.g., "00:02:30" or "150")
+                  const parts = f.length.split(':');
+                  if (parts.length === 3) {
+                    // HH:MM:SS format
+                    durationSeconds = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseInt(parts[2]);
+                  } else {
+                    durationSeconds = parseInt(f.length);
+                  }
+                }
+                
+                // Trailers should be 20-300 seconds (reject full movies or very short clips)
+                if (durationSeconds !== null) {
+                  if (durationSeconds < 20 || durationSeconds > 300) {
+                    return false; // Too short (clip) or too long (full movie)
+                  }
+                }
+                
+                return true;
+              });
+              
+              // If duration filtering removed all files, use original list (better than nothing)
+              const filesToUse = filteredByDuration.length > 0 ? filteredByDuration : videoFiles;
+              
+              if (filteredByDuration.length < videoFiles.length) {
+                console.log(`  [Internet Archive] Filtered ${videoFiles.length - filteredByDuration.length} files by duration (trailers should be 20-300 seconds)`);
+              }
+              
               // Sort by: 1) format preference (mp4 > webm > others), 2) size (larger = better quality)
-              videoFiles.sort((a, b) => {
+              filesToUse.sort((a, b) => {
                 const formatA = (a.format || '').toLowerCase();
                 const formatB = (b.format || '').toLowerCase();
                 
@@ -2615,7 +2687,7 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
                 return (b.size || 0) - (a.size || 0);
               });
               
-              const bestFile = videoFiles[0];
+              const bestFile = filesToUse[0];
               // Archive.org direct video file URL for streaming
               // The metadata API may provide a direct URL, or we construct it
               let videoUrl;
@@ -2836,6 +2908,8 @@ async function multiPassSearch(tmdbMeta) {
 }
 
 // Quick URL validation - checks if URL is still accessible
+// FIXED: Less aggressive validation - only invalidate on clear "gone" errors (404, 410)
+// Don't invalidate on 403/429/5xx which might be temporary (rate limits, geo-blocking, etc.)
 async function validateUrl(url, timeout = 3000) {
   try {
     const controller = new AbortController();
@@ -2845,17 +2919,35 @@ async function validateUrl(url, timeout = 3000) {
       method: 'HEAD',
       signal: controller.signal,
       headers: {
-        'Range': 'bytes=0-1' // Just check first byte to minimize bandwidth
+        'Range': 'bytes=0-1', // Just check first byte to minimize bandwidth
+        'User-Agent': 'Mozilla/5.0 (compatible; TrailerIO/1.0)'
       }
     });
     
     clearTimeout(timeoutId);
     
     // Accept 200 (OK) or 206 (Partial Content) as valid
-    return response.ok || response.status === 206;
+    if (response.ok || response.status === 206) {
+      return true;
+    }
+    
+    // Only invalidate on clear "gone" errors (404, 410)
+    // For 403/429/5xx, keep cache - might be temporary (rate limits, geo-blocking, CDN issues)
+    if (response.status === 404 || response.status === 410) {
+      return false; // File is gone - invalidate
+    }
+    
+    // For other errors (403, 429, 5xx), keep cache - might work from client's network
+    return true;
   } catch (error) {
-    // URL is not accessible
-    return false;
+    // Network errors, timeouts, etc. - don't invalidate, might work from client
+    // Only invalidate on clear DNS/connection errors that indicate URL is truly broken
+    if (error.name === 'AbortError') {
+      // Timeout - keep cache, might work from client
+      return true;
+    }
+    // Other network errors - keep cache (might be temporary)
+    return true;
   }
 }
 
@@ -2879,12 +2971,19 @@ async function getCachedWithValidation(imdbId) {
     return cached;
   }
   
-  // For YouTube URLs, always validate (they expire quickly)
-  // For other sources, only validate if cache is getting old
+  // FIXED: Don't validate very fresh entries (< 12 hours) - just trust them
+  // This prevents cache thrashing from temporary CDN issues (403/429 from googlevideo.com)
   const hoursSinceCheck = (Date.now() - cached.timestamp) / (1000 * 60 * 60);
   const sourceType = cached.source_type || 'youtube';
   const ttlHours = CACHE_TTL[sourceType] || CACHE_TTL.youtube;
-  const shouldValidate = sourceType === 'youtube' || hoursSinceCheck > (ttlHours * 0.8); // Validate if 80% through TTL
+  
+  // Skip validation for very fresh entries (< 12 hours) - trust them
+  if (hoursSinceCheck < 12) {
+    return cached;
+  }
+  
+  // For older entries, validate if 80% through TTL
+  const shouldValidate = hoursSinceCheck > (ttlHours * 0.8);
   
   if (shouldValidate) {
     logger.cache('validate', `Validating cached URL for ${imdbId} (${sourceType}, ${hoursSinceCheck.toFixed(1)}h old)`);
@@ -3036,27 +3135,19 @@ async function resolvePreview(imdbId, type) {
   
   
   // HIGH-VALUE DIRECT TRAILER SOURCES (work independently, don't need TMDB URLs)
-  // These use IMDb ID or title/year to find trailers directly via yt-dlp
-  // Priority: IMDb (we have IMDb ID!) > Apple Trailers
-  // IVA, RottenTomatoes, Metacritic, Allocine, Moviepilot - DISABLED (broken/not supported)
+  // Priority order: YTDLP (from TMDB) > Apple Trailers > Internet Archive
+  // 
+  // DISABLED SOURCES (not working or not appropriate):
+  // - IMDB_TRAILER: yt-dlp does not support /title/ttXXXXXX URLs (always fails with "Unsupported URL")
+  // - IVA: redirects to fabricdata.com which yt-dlp doesn't support
+  // - RottenTomatoes, Metacritic, Allocine, Moviepilot: don't host videos, just embed YouTube (which we already handle)
   
-  if (imdbId && imdbId.startsWith('tt')) {
-    availableSources.push('imdb_trailer'); // IMDb trailers - we have IMDb ID! (highest priority)
-    // IVA disabled - redirects to fabricdata.com which yt-dlp doesn't support
-    // availableSources.push('iva_trailer');
+  // Apple Trailers - high quality, good for cinema releases (yt-dlp supports appletrailers)
+  if (tmdbMeta.title && type === 'movie') {
+    availableSources.push('appletrailers');
   }
   
-  // These work with title/year (good fallbacks for when IMDb doesn't have trailers)
-  if (tmdbMeta.title) {
-    // Apple Trailers - high quality, good for cinema releases (yt-dlp supports appletrailers)
-    if (type === 'movie') {
-      availableSources.push('appletrailers');
-    }
-    // RottenTomatoes, Metacritic, Allocine, Moviepilot - DISABLED
-    // These sites don't have reliable yt-dlp extractors or embed YouTube anyway
-    // We already have YouTube extraction, so these are redundant
-  }
-  
+  // Internet Archive - fallback for older/obscure content (after YTDLP and Apple)
   availableSources.push('archive');
   
   // Sort sources by success rate, quality, and content type (highest first)
@@ -3075,9 +3166,15 @@ async function resolvePreview(imdbId, type) {
   const fallbackSources = sortedSources.slice(PARALLEL_SOURCES);
   
   // Helper function to attempt a source with timeout and response time tracking
-  const attemptSource = async (source) => {
+  // FIXED: Added abortSignal parameter for cancellation support
+  const attemptSource = async (source, abortSignal = null) => {
     const startTime = Date.now();
     logger.source(source, `Attempting extraction...`);
+    
+    // Check if already cancelled
+    if (abortSignal && abortSignal.aborted) {
+      return null;
+    }
     
     // Get dynamic timeout for this source (optimized for speed)
     // Faster sources get shorter timeouts, slower sources get longer but capped
@@ -3085,7 +3182,6 @@ async function resolvePreview(imdbId, type) {
     if (source === 'archive') defaultTimeout = 8000; // Archive: 8s (needs time for metadata fetch)
     if (source === 'ytdlp') defaultTimeout = 18000; // yt-dlp: 18s (proxy adds latency, extraction takes 10-15s)
     if (source === 'itunes') defaultTimeout = 5000; // iTunes: usually fast, 5s max
-    if (source === 'imdb_trailer') defaultTimeout = 12000; // IMDb: 12s (yt-dlp extraction via proxy)
     if (source === 'appletrailers' || source === 'vimeo' || source === 'dailymotion') defaultTimeout = 10000; // Other yt-dlp sources: 10s
     // IVA, RottenTomatoes, Metacritic, Allocine, Moviepilot - DISABLED (broken/not supported)
     
@@ -3279,6 +3375,14 @@ async function resolvePreview(imdbId, type) {
             return null;
           }
         } else if (source === 'imdb_trailer') {
+          // IMDb trailers - DISABLED: yt-dlp does not support /title/ttXXXXXX URLs
+          // This always fails with "Unsupported URL", wasting 10-13 seconds per request
+          // IMDb should be used for metadata only, not as a video source
+          console.log(`  [IMDb] Skipping - yt-dlp does not support IMDb title pages`);
+          successTracker.recordSourceFailure('imdb');
+          return null;
+        } else if (false && source === 'imdb_trailer_OLD') {
+          // OLD CODE - KEPT FOR REFERENCE ONLY (DISABLED)
           // IMDb trailers - resolve URL and extract
           const imdbUrl = await resolveImdbTrailerUrl(tmdbMeta, imdbId);
           if (!imdbUrl) {
@@ -3572,44 +3676,137 @@ async function resolvePreview(imdbId, type) {
     }
   };
   
-  // Try top sources in parallel with TRUE EARLY RETURN (return immediately when first succeeds)
+  // FIXED: Quality-aware parallel source attempts with cancellation support
+  // Strategy: Wait up to 2-3 seconds for all sources, then pick best by quality + priority
+  // If a high-priority source (YTDLP) succeeds quickly, return immediately
+  // Otherwise, wait briefly to compare quality before returning
   if (topSources.length > 0) {
     logger.info(`Trying ${topSources.length} sources in parallel: ${topSources.join(', ')}`);
     
-    // Create promises that resolve with success status (or null on failure)
-    const sourcePromises = topSources.map(async (source) => {
-      try {
-        const result = await attemptSource(source);
-        // Return result if found, null otherwise
+    // Create AbortController for each source attempt (for cancellation)
+    const abortControllers = new Map();
+    const sourcePromises = topSources.map((source) => {
+      const controller = new AbortController();
+      abortControllers.set(source, controller);
+      
+      return attemptSource(source, controller.signal).then(result => {
         return result && result.found ? { source, result } : null;
-      } catch (error) {
+      }).catch(error => {
+        if (error.name === 'AbortError') {
+          return null; // Cancelled - not a real error
+        }
         return null;
-      }
+      });
     });
     
-    // Use Promise.race to return immediately when first source succeeds
-    // This is much faster than Promise.allSettled which waits for all
+    // FIXED: Quality-aware selection - wait briefly (2s) for all sources, then pick best
+    // This allows YTDLP (higher quality) to beat Archive (faster but lower quality)
+    const QUALITY_WAIT_TIME = 2000; // Wait 2 seconds to compare quality
+    
     const raceResult = await Promise.race([
       // Race all source promises
-      ...sourcePromises.map(p => p.then(result => ({ type: 'success', result }))),
-      // Also race a timeout that resolves after all sources would have timed out
-      new Promise(resolve => setTimeout(() => resolve({ type: 'timeout' }), 6000))
+      ...sourcePromises.map(p => p.then(result => ({ type: 'success', result, timestamp: Date.now() }))),
+      // Also race a timeout
+      new Promise(resolve => setTimeout(() => resolve({ type: 'timeout' }), QUALITY_WAIT_TIME))
     ]);
     
-    // If we got a successful result, return it immediately
+    // If we got a successful result quickly (within 2s), check if it's high priority
     if (raceResult.type === 'success' && raceResult.result) {
-      logger.success(`Found via parallel attempt: ${raceResult.result.source}`);
-      return raceResult.result.result;
+      const winner = raceResult.result;
+      const winnerSource = winner.source;
+      
+      // High-priority sources (YTDLP, Apple) - return immediately
+      if (winnerSource === 'ytdlp' || winnerSource === 'appletrailers') {
+        // Cancel other sources
+        for (const [source, controller] of abortControllers.entries()) {
+          if (source !== winnerSource) {
+            controller.abort();
+          }
+        }
+        logger.success(`Found via parallel attempt: ${winnerSource} (high priority, returning immediately)`);
+        return winner.result;
+      }
+      
+      // Lower priority source (Archive) - wait briefly to see if better source succeeds
+      logger.info(`Found ${winnerSource}, waiting ${QUALITY_WAIT_TIME}ms for higher priority sources...`);
+      
+      // Wait for remaining sources (with timeout)
+      const remainingWait = Math.max(0, QUALITY_WAIT_TIME - (Date.now() - raceResult.timestamp));
+      if (remainingWait > 0) {
+        await new Promise(resolve => setTimeout(resolve, remainingWait));
+      }
+      
+      // Check all results and pick best by quality + priority
+      const allResults = await Promise.allSettled(sourcePromises);
+      const successfulResults = [];
+      
+      for (const settled of allResults) {
+        if (settled.status === 'fulfilled' && settled.value && settled.value.result) {
+          successfulResults.push(settled.value);
+        }
+      }
+      
+      // Cancel any remaining sources
+      for (const [source, controller] of abortControllers.entries()) {
+        controller.abort();
+      }
+      
+      if (successfulResults.length > 0) {
+        // Sort by priority + quality (YTDLP > Apple > Archive)
+        successfulResults.sort((a, b) => {
+          const priorityOrder = { 'ytdlp': 3, 'appletrailers': 2, 'archive': 1, 'itunes': 2 };
+          const priorityA = priorityOrder[a.source] || 0;
+          const priorityB = priorityOrder[b.source] || 0;
+          if (priorityA !== priorityB) return priorityB - priorityA;
+          
+          // If same priority, prefer higher quality
+          const qualityA = qualityTracker.getAvgQuality(a.source);
+          const qualityB = qualityTracker.getAvgQuality(b.source);
+          return qualityB - qualityA;
+        });
+        
+        const best = successfulResults[0];
+        logger.success(`Found via parallel attempt: ${best.source} (best of ${successfulResults.length} results)`);
+        return best.result;
+      }
+      
+      // Fallback to original winner
+      logger.success(`Found via parallel attempt: ${winnerSource}`);
+      return winner.result;
     }
     
     // If timeout, wait for remaining sources to complete (but don't wait too long)
-    logger.info(`First source didn't succeed, checking remaining sources...`);
+    logger.info(`No quick success, waiting for remaining sources...`);
     const allResults = await Promise.allSettled(sourcePromises);
+    
+    // Cancel any still-running sources
+    for (const [source, controller] of abortControllers.entries()) {
+      controller.abort();
+    }
+    
+    // Find best result by priority + quality
+    const successfulResults = [];
     for (const settled of allResults) {
       if (settled.status === 'fulfilled' && settled.value && settled.value.result) {
-        logger.success(`Found via parallel attempt: ${settled.value.source}`);
-        return settled.value.result;
+        successfulResults.push(settled.value);
       }
+    }
+    
+    if (successfulResults.length > 0) {
+      // Sort by priority + quality
+      successfulResults.sort((a, b) => {
+        const priorityOrder = { 'ytdlp': 3, 'appletrailers': 2, 'archive': 1, 'itunes': 2 };
+        const priorityA = priorityOrder[a.source] || 0;
+        const priorityB = priorityOrder[b.source] || 0;
+        if (priorityA !== priorityB) return priorityB - priorityA;
+        const qualityA = qualityTracker.getAvgQuality(a.source);
+        const qualityB = qualityTracker.getAvgQuality(b.source);
+        return qualityB - qualityA;
+      });
+      
+      const best = successfulResults[0];
+      logger.success(`Found via parallel attempt: ${best.source}`);
+      return best.result;
     }
     
     logger.info(`Parallel attempts failed, trying ${fallbackSources.length} fallback sources sequentially`);
