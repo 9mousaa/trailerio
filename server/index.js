@@ -3193,9 +3193,14 @@ async function resolvePreview(imdbId, type) {
             return null;
           }
         } else if (source === 'imdb_trailer') {
-          // IMDb trailers - use IMDb ID directly (high-value source!)
-          // yt-dlp supports: https://www.imdb.com/title/{imdbId}/videogallery
-          const imdbUrl = `https://www.imdb.com/title/${imdbId}/videogallery`;
+          // IMDb trailers - resolve URL and extract
+          const imdbUrl = await resolveImdbTrailerUrl(tmdbMeta, imdbId);
+          if (!imdbUrl) {
+            console.log(`  Skipping IMDb: could not resolve URL`);
+            successTracker.recordSourceFailure('imdb');
+            return null;
+          }
+          console.log(`  [IMDb] Resolved URL: ${imdbUrl}`);
           const imdbResult = await extractViaYtDlpGeneric(imdbUrl, 'IMDb');
           if (imdbResult && imdbResult.url) {
             const duration = Date.now() - startTime;
