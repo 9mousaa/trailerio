@@ -129,11 +129,25 @@ else:
     print("export PRESHARED_KEY=''")
 
 # Address can appear multiple times (IPv4 and IPv6), collect all
-address_matches = re.findall(r'^Address\s*=\s*([^\s]+)', content, re.MULTILINE)
+# Use a more robust regex that handles various whitespace and formats
+address_matches = re.findall(r'^Address\s*=\s*([^\s#\n\r]+)', content, re.MULTILINE)
+# Filter out empty matches and validate format (should contain /)
+address_matches = [addr.strip() for addr in address_matches if addr.strip() and '/' in addr.strip()]
 if address_matches:
     # Join all addresses with comma (WireGuard format)
-    addresses = ','.join([addr.strip() for addr in address_matches])
-    print(f"export ADDRESSES='{addresses}'")
+    addresses = ','.join(address_matches)
+    # Validate: each address should have format IP/CIDR
+    valid_addresses = []
+    for addr in address_matches:
+        if '/' in addr and len(addr.split('/')) == 2:
+            ip_part, cidr_part = addr.split('/')
+            if ip_part and cidr_part:
+                valid_addresses.append(addr)
+    if valid_addresses:
+        addresses = ','.join(valid_addresses)
+        print(f"export ADDRESSES='{addresses}'")
+    else:
+        errors.append("No valid addresses found (format: IP/CIDR)")
 else:
     errors.append("Address not found")
 
