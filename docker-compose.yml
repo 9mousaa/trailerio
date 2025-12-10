@@ -66,11 +66,11 @@ services:
       - plaio_default
     # Health check to ensure backend is always responding
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3001/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s  # Give 10s for initial startup
+      start_period: 15s  # Give 15s for initial startup (database init, etc.)
     # Don't depend on gluetun - backend works fine without it
     # If gluetun is running, yt-dlp will use it via GLUETUN_HTTP_PROXY env var
 
@@ -84,6 +84,13 @@ services:
     depends_on:
       backend:
         condition: service_healthy  # Wait for backend to be healthy before starting
+    # Health check for web service
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
     labels:
       # Traefik configuration
       - "traefik.enable=true"
