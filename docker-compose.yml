@@ -43,8 +43,8 @@ services:
       - NODE_ENV=production
       - PORT=3001
       - TMDB_API_KEY=${TMDB_API_KEY:-}
-      # Use gluetun HTTP proxy for yt-dlp (set in .env by setup script)
-      - GLUETUN_HTTP_PROXY=${GLUETUN_HTTP_PROXY:-}
+      # Use gluetun HTTP proxy for yt-dlp (defaults to gluetun:8000 if not set)
+      - GLUETUN_HTTP_PROXY=${GLUETUN_HTTP_PROXY:-http://gluetun:8000}
     env_file:
       - .env
     # Ensure .env file exists (create from .env.example if missing)

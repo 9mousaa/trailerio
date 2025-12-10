@@ -1299,24 +1299,24 @@ async function extractViaYtDlp(youtubeKey) {
   
   try {
     // Check if gluetun proxy is available
-    const gluetunProxy = process.env.GLUETUN_HTTP_PROXY || null;
+    // Default to gluetun:8000 if not explicitly set (gluetun is on same Docker network)
+    let gluetunProxy = process.env.GLUETUN_HTTP_PROXY || 'http://gluetun:8000';
     
-    // Verify proxy is accessible if set
-    if (gluetunProxy) {
-      try {
-        const proxyTest = await fetch(`${gluetunProxy.replace(/\/$/, '')}/v1/openvpn/status`, {
-          signal: AbortSignal.timeout(2000),
-          method: 'GET'
-        }).catch(() => null);
-        if (!proxyTest || !proxyTest.ok) {
-          console.log(`  [yt-dlp] ⚠ Warning: gluetun proxy at ${gluetunProxy} may not be accessible`);
-        }
-      } catch (proxyError) {
-        console.log(`  [yt-dlp] ⚠ Warning: Could not verify gluetun proxy: ${proxyError.message}`);
+    // Verify proxy is accessible
+    let proxyAvailable = false;
+    try {
+      const proxyTest = await fetch(`${gluetunProxy.replace(/\/$/, '')}/v1/openvpn/status`, {
+        signal: AbortSignal.timeout(2000),
+        method: 'GET'
+      }).catch(() => null);
+      if (proxyTest && proxyTest.ok) {
+        proxyAvailable = true;
       }
+    } catch (proxyError) {
+      // Proxy not available, will use direct connection
     }
     
-    const useProxy = gluetunProxy ? `--proxy ${gluetunProxy}` : '';
+    const useProxy = proxyAvailable ? `--proxy ${gluetunProxy}` : '';
     
     // Anti-blocking strategies:
     // 1. Use proper user agent (mimic browser)
@@ -1324,14 +1324,14 @@ async function extractViaYtDlp(youtubeKey) {
     // 3. Use format selection that's less likely to be blocked
     // 4. Extract info only (no download) - gets streamable URLs
     // 5. Prefer combined formats (video+audio) for streaming
-    // 6. Use cookies if available (optional - can be added later)
+    // 6. Use automated token generation plugin (yt-dlp-get-pot) to avoid bot detection
     
     // Format selection strategy for streamable URLs:
     // 1. Prefer combined formats (video+audio) for direct streaming - best for AVPlayer
     // 2. Fallback to best video+audio combination if no combined available
     // 3. Limit to 1080p max for reasonable bandwidth
     // 4. Use --get-url to get direct streamable URL (not download)
-    // Anti-blocking: user-agent, sleep intervals, proper format selection
+    // Anti-blocking: user-agent, sleep intervals, proper format selection, automated tokens
     const ytDlpCommand = `yt-dlp ${useProxy} \
       --no-download \
       --no-warnings \
@@ -1341,10 +1341,11 @@ async function extractViaYtDlp(youtubeKey) {
       --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
       --sleep-interval 2 \
       --socket-timeout 10 \
+      --extractor-args "youtube:player_client=android" \
       --get-url \
       "https://www.youtube.com/watch?v=${youtubeKey}"`;
     
-    console.log(`  [yt-dlp] Running extraction (proxy: ${gluetunProxy ? 'enabled' : 'disabled'})...`);
+    console.log(`  [yt-dlp] Running extraction (proxy: ${proxyAvailable ? 'enabled' : 'disabled'})...`);
     
     // Execute yt-dlp with timeout
     const execPromise = execAsync(ytDlpCommand, {
