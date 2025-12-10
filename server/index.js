@@ -1673,10 +1673,43 @@ async function resolveMetacriticSlug(tmdbMeta, imdbId) {
 
 async function resolveAppleTrailersUrl(tmdbMeta, imdbId) {
   // Apple Trailers: yt-dlp supports appletrailers extractor
-  // Use yt-dlp's search: appletrailers:search:"title"
-  // This is more reliable than trying to construct URLs manually
-  const searchQuery = `appletrailers:search:"${tmdbMeta.title}"`;
-  return searchQuery; // Return search query for yt-dlp to handle
+  // But search queries don't work reliably - need to find the actual movie page
+  // Try using Apple's quickfind API to get the actual trailer page URL
+  try {
+    const searchUrl = `https://trailers.apple.com/trailers/home/scripts/quickfind.php?q=${encodeURIComponent(tmdbMeta.title)}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    
+    const response = await fetch(searchUrl, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+    clearTimeout(timeout);
+    
+    if (response.ok) {
+      const data = await response.json();
+      // Look for matching movie in results
+      if (Array.isArray(data) && data.length > 0) {
+        for (const item of data) {
+          const titleMatch = normalizeTitle(item.title || '') === normalizeTitle(tmdbMeta.title);
+          if (titleMatch && item.location) {
+            return `https://trailers.apple.com${item.location}`;
+          }
+        }
+        // If no exact match, return first result
+        if (data[0] && data[0].location) {
+          return `https://trailers.apple.com${data[0].location}`;
+        }
+      }
+    }
+  } catch (error) {
+    // Fallback: return search page (yt-dlp might handle it)
+  }
+  
+  // Fallback: return search page (yt-dlp may be able to extract from it)
+  return `https://trailers.apple.com/trailers/search/?q=${encodeURIComponent(tmdbMeta.title)}`;
 }
 
 async function resolveAllocineUrl(tmdbMeta, imdbId) {
@@ -1692,14 +1725,15 @@ async function resolveMoviepilotUrl(tmdbMeta, imdbId) {
 }
 
 async function resolveImdbTrailerUrl(tmdbMeta, imdbId) {
-  // IMDb: yt-dlp supports imdb extractor
-  // Use the title page directly - yt-dlp can extract videos from it
+  // IMDb: yt-dlp supports imdb extractor but only from specific pages
+  // The title page doesn't work - need to use videogallery or video page
   if (!imdbId || !imdbId.startsWith('tt')) {
     return null;
   }
   
-  // IMDb title page - yt-dlp can extract videos/trailers from this
-  return `https://www.imdb.com/title/${imdbId}`;
+  // IMDb videogallery page - yt-dlp can extract from this
+  // Format: https://www.imdb.com/title/{imdbId}/videogallery
+  return `https://www.imdb.com/title/${imdbId}/videogallery`;
 }
 
 async function resolveIvaUrl(tmdbMeta, imdbId) {
