@@ -1419,7 +1419,6 @@ async function extractViaInvidious(youtubeKey) {
 // ============ YT-DLP EXTRACTOR (with Cloudflare Warp) ============
 
 async function extractViaYtDlp(youtubeKey) {
-  console.log(`  [yt-dlp] Extracting streamable URL for ${youtubeKey}...`);
   
   const startTime = Date.now();
   const controller = new AbortController();
@@ -1444,14 +1443,11 @@ async function extractViaYtDlp(youtubeKey) {
       // HTTP proxy should be available if gluetun is running with HTTPPROXY=on
       if (gluetunStatus !== null) {
         proxyAvailable = true;
-        console.log(`  [yt-dlp] ✓ Gluetun detected, using HTTP proxy at ${gluetunProxy}`);
       } else {
-        console.log(`  [yt-dlp] ⚠ Gluetun not reachable, using direct connection`);
       }
     } catch (proxyError) {
       // Gluetun not available or not configured, will use direct connection
       proxyAvailable = false;
-      console.log(`  [yt-dlp] ⚠ Gluetun check failed: ${proxyError.message}, using direct connection`);
     }
     
     // Use HTTP proxy (port 8888, configured via Cloudflare Warp)
@@ -1487,7 +1483,6 @@ async function extractViaYtDlp(youtubeKey) {
       --get-url \
       "https://www.youtube.com/watch?v=${youtubeKey}"`;
     
-    console.log(`  [yt-dlp] Running extraction (proxy: ${proxyAvailable ? 'enabled' : 'disabled'})...`);
     
     // Execute yt-dlp with timeout (longer for proxy connections)
     const execPromise = execAsync(ytDlpCommand, {
@@ -1517,7 +1512,6 @@ async function extractViaYtDlp(youtubeKey) {
       }
       
       if (proxyAvailable && (errorMsg.includes('401') || errorMsg.includes('Unauthorized') || errorMsg.includes('Tunnel connection failed') || errorMsg.includes('Connection refused'))) {
-        console.log(`  [yt-dlp] ⚠ SOCKS5 proxy failed, trying direct connection (no proxy)...`);
         // Retry without proxy
         const noProxyCommand = ytDlpCommand.replace(`--proxy ${gluetunProxy}`, '');
         try {
@@ -1529,11 +1523,9 @@ async function extractViaYtDlp(youtubeKey) {
             setTimeout(() => reject(new Error('yt-dlp timeout')), 20000) // 20 seconds
           );
           ({ stdout, stderr } = await Promise.race([noProxyExecPromise, noProxyTimeoutPromise]));
-          console.log(`  [yt-dlp] ✓ Direct connection worked!`);
         } catch (noProxyError) {
           // Direct connection also failed, log and continue with original error
           const noProxyErrorMsg = (noProxyError.stderr || noProxyError.message || '').toString();
-          console.log(`  [yt-dlp] ✗ Direct connection also failed: ${noProxyErrorMsg.substring(0, 200)}`);
           // Fall through to original error handling
         }
       }
@@ -1541,7 +1533,6 @@ async function extractViaYtDlp(youtubeKey) {
       // If we still don't have stdout (SOCKS5 didn't work or wasn't tried), handle the error
       if (!stdout) {
         if (raceError.message === 'yt-dlp timeout') {
-          console.log(`  [yt-dlp] ✗ TIMEOUT after ${duration}ms`);
         } else {
           // Show more detailed error information
           const errorMsg = raceError.message || raceError.toString();
@@ -2097,7 +2088,6 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
             });
             clearTimeout(metaTimeout);
             if (!metaResponse.ok) {
-              console.log(`  [Internet Archive] Metadata fetch failed: HTTP ${metaResponse.status} for "${bestMatch.title}"`);
               successTracker.recordFailure('archive', strategy.id);
               continue;
             }
@@ -2105,7 +2095,6 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
             // Check response size to prevent memory issues
             const contentLength = metaResponse.headers.get('content-length');
             if (contentLength && parseInt(contentLength) > MAX_JSON_RESPONSE_SIZE) {
-              console.log(`  [Internet Archive] Metadata too large (${Math.round(parseInt(contentLength) / 1024 / 1024)}MB), skipping`);
               successTracker.recordFailure('archive', strategy.id);
               continue;
             }
@@ -2195,7 +2184,6 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
           }
         } else if (bestMatch) {
           // Match found but score too low (bestScore < 0.75) - rejected to avoid false positives
-          console.log(`  [Internet Archive] ✗ Rejected match: "${bestMatch.title}" (score: ${bestScore.toFixed(2)} < 0.75 threshold)`);
           successTracker.recordFailure('archive', strategy.id);
         } else {
           // No match found at all
@@ -2203,7 +2191,6 @@ async function extractViaInternetArchive(tmdbMeta, imdbId) {
         }
       } catch (e) {
         clearTimeout(timeout);
-        console.log(`  [Internet Archive] Search error for strategy "${strategy.description}": ${e.message || 'timeout'}`);
         successTracker.recordFailure('archive', strategy.id);
         continue;
       }
