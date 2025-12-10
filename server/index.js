@@ -1946,7 +1946,7 @@ async function extractViaYtDlp(youtubeKey) {
 
 // Proxy rotation for multiple Cloudflare Warp instances
 const proxyInstances = [
-  { name: 'gluetun-1', proxy: 'http://gluetun-1:8888', status: 'http://gluetun-1:8000/v1/openvpn/status' },
+  // gluetun-1 removed - using only gluetun-2 and gluetun-3
   { name: 'gluetun-2', proxy: 'http://gluetun-2:8888', status: 'http://gluetun-2:8000/v1/openvpn/status' },
   { name: 'gluetun-3', proxy: 'http://gluetun-3:8888', status: 'http://gluetun-3:8000/v1/openvpn/status' }
 ];
