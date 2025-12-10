@@ -79,16 +79,33 @@ ENDPOINT_HOST=$(echo "${ENDPOINT}" | cut -d':' -f1)
 ENDPOINT_PORT=$(echo "${ENDPOINT}" | cut -d':' -f2)
 
 # Resolve hostname to IP address (gluetun requires IP, not hostname)
-echo "🔍 Resolving ${ENDPOINT_HOST} to IP address..."
-ENDPOINT_IP=$(getent hosts "${ENDPOINT_HOST}" | awk '{print $1}' | head -1)
+# Prefer IPv4 addresses as gluetun works better with them
+echo "🔍 Resolving ${ENDPOINT_HOST} to IP address (preferring IPv4)..."
+ENDPOINT_IP=""
 
-if [ -z "${ENDPOINT_IP}" ]; then
-    # Fallback: try using dig or nslookup
-    if command -v dig &> /dev/null; then
-        ENDPOINT_IP=$(dig +short "${ENDPOINT_HOST}" | head -1)
-    elif command -v nslookup &> /dev/null; then
-        ENDPOINT_IP=$(nslookup "${ENDPOINT_HOST}" | grep -A1 "Name:" | tail -1 | awk '{print $2}')
+# Try getent first (prefers IPv4)
+if command -v getent &> /dev/null; then
+    # Get IPv4 addresses first
+    ENDPOINT_IP=$(getent hosts "${ENDPOINT_HOST}" | awk '{print $1}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+    # If no IPv4, try IPv6
+    if [ -z "${ENDPOINT_IP}" ]; then
+        ENDPOINT_IP=$(getent hosts "${ENDPOINT_HOST}" | awk '{print $1}' | head -1)
     fi
+fi
+
+# Fallback: try using dig (prefer IPv4)
+if [ -z "${ENDPOINT_IP}" ] && command -v dig &> /dev/null; then
+    # Try IPv4 first
+    ENDPOINT_IP=$(dig +short -4 "${ENDPOINT_HOST}" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+    # If no IPv4, try any
+    if [ -z "${ENDPOINT_IP}" ]; then
+        ENDPOINT_IP=$(dig +short "${ENDPOINT_HOST}" 2>/dev/null | head -1)
+    fi
+fi
+
+# Last resort: nslookup
+if [ -z "${ENDPOINT_IP}" ] && command -v nslookup &> /dev/null; then
+    ENDPOINT_IP=$(nslookup "${ENDPOINT_HOST}" 2>/dev/null | grep -A1 "Name:" | grep "Address" | awk '{print $2}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
 fi
 
 if [ -z "${ENDPOINT_IP}" ]; then
@@ -97,7 +114,7 @@ if [ -z "${ENDPOINT_IP}" ]; then
     exit 1
 fi
 
-echo "   ✓ Resolved to: ${ENDPOINT_IP}"
+echo "   ✓ Resolved to: ${ENDPOINT_IP} (${ENDPOINT_HOST})"
 
 # Backup existing .env
 if [ -f "${ENV_FILE}" ]; then
