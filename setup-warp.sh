@@ -64,11 +64,12 @@ fi
 # Parse WireGuard config
 echo "📋 Parsing WireGuard configuration..."
 
-PRIVATE_KEY=$(grep "PrivateKey" "${PROFILE_FILE}" | cut -d'=' -f2 | tr -d ' ')
-PUBLIC_KEY=$(grep "PublicKey" "${PROFILE_FILE}" | cut -d'=' -f2 | tr -d ' ')
-PRESHARED_KEY=$(grep "PresharedKey" "${PROFILE_FILE}" | cut -d'=' -f2 | tr -d ' ')
-ADDRESSES=$(grep "Address" "${PROFILE_FILE}" | cut -d'=' -f2 | tr -d ' ')
-ENDPOINT=$(grep "Endpoint" "${PROFILE_FILE}" | cut -d'=' -f2 | tr -d ' ')
+# Extract keys and values, removing all whitespace (spaces, tabs, newlines)
+PRIVATE_KEY=$(grep "PrivateKey" "${PROFILE_FILE}" | cut -d'=' -f2 | tr -d '[:space:]')
+PUBLIC_KEY=$(grep "PublicKey" "${PROFILE_FILE}" | cut -d'=' -f2 | tr -d '[:space:]')
+PRESHARED_KEY=$(grep "PresharedKey" "${PROFILE_FILE}" | cut -d'=' -f2 | tr -d '[:space:]' || echo "")
+ADDRESSES=$(grep "Address" "${PROFILE_FILE}" | cut -d'=' -f2 | tr -d '[:space:]')
+ENDPOINT=$(grep "Endpoint" "${PROFILE_FILE}" | cut -d'=' -f2 | tr -d '[:space:]')
 
 if [ -z "${ENDPOINT}" ]; then
     echo "❌ Failed to parse endpoint from profile"
