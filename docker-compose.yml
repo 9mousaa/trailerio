@@ -1,8 +1,7 @@
 
 services:
-  # Gluetun service for Cloudflare Warp (CRITICAL - REQUIRED)
-  # Backend will NOT start without gluetun being healthy
-  # Set WireGuard keys in .env file (see CLOUDFLARE_WARP_SETUP.md)
+  # Gluetun service for Cloudflare Warp (optional - set WireGuard keys in .env to enable)
+  # If keys are not set, gluetun will fail to start but backend will work without it
   gluetun:
     image: qmcgaw/gluetun:latest
     container_name: gluetun
@@ -25,84 +24,63 @@ services:
       # Based on gluetun source code, variable is HTTPPROXY (no underscore)
       - HTTP_CONTROL_SERVER_LOG=on
       - HTTPPROXY=on
-      - HTTPPROXY_LISTENING_ADDRESS=0.0.0.0:8888  # Updated from HTTPPROXY_PORT (newer format)
+      - HTTPPROXY_PORT=8888
       - HTTPPROXY_LOG=on
       # Enable SOCKS5 proxy (for yt-dlp)
       - SOCKS5=on
       - SOCKS5_LISTENING_ADDRESS=0.0.0.0
       - SOCKS5_PORT=1080
-    restart: unless-stopped  # Always restart unless explicitly stopped (CRITICAL - backend requires this)
+    restart: unless-stopped  # Restart if it crashes (but backend works without it)
     # Expose proxy ports (containers on same network can access without exposing, but it helps)
     ports:
-      - "8888:8888/tcp"  # HTTP proxy (REQUIRED for yt-dlp)
+      - "8888:8888/tcp"  # HTTP proxy
       - "1080:1080/tcp"  # SOCKS5 proxy
     networks:
       - trailerio-internal
-    # Health check - CRITICAL: Must be healthy for backend to start
-    # For WireGuard, check if HTTP proxy is listening (more reliable than status endpoint)
+    # Health check
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 8888 || (wget -q --spider http://localhost:8000/v1/openvpn/status || wget -q --spider http://localhost:8000/v1/status || curl -f http://localhost:8000/v1/openvpn/status || curl -f http://localhost:8000/v1/status) || exit 1"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/v1/openvpn/status"]
       interval: 30s
       timeout: 10s
-      retries: 5  # More retries for critical service
-      start_period: 60s  # Give gluetun 60s to establish VPN connection
+      retries: 3
 
   backend:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    restart: unless-stopped  # Always restart on failure (ensures service never stays down)
+    restart: unless-stopped
     environment:
       - NODE_ENV=production
       - PORT=3001
-      - TMDB_API_KEY=${TMDB_API_KEY:-bfe73358661a995b992ae9a812aa0d2f}
-      # Use gluetun HTTP proxy for yt-dlp (REQUIRED - yt-dlp will not run without it)
-      - GLUETUN_HTTP_PROXY=${GLUETUN_HTTP_PROXY:-http://gluetun:8888}
+      - TMDB_API_KEY=${TMDB_API_KEY:-}
+      # Use gluetun HTTP proxy for yt-dlp (defaults to gluetun:8000 if not set)
+      - GLUETUN_HTTP_PROXY=${GLUETUN_HTTP_PROXY:-http://gluetun:8000}
     env_file:
       - .env
     # Ensure .env file exists (create from .env.example if missing)
     # This prevents the container from failing if .env is missing
     volumes:
       - ./data:/app/data
-    # Expose port for health checks and monitoring (optional - Traefik proxies through network)
-    ports:
-      - "3001:3001"  # Expose for health checks
     networks:
       - trailerio-internal
       - plaio_default
-    # CRITICAL: Backend requires gluetun to be healthy before starting
-    depends_on:
-      gluetun:
-        condition: service_healthy  # Wait for gluetun to be healthy
-    # Health check to ensure backend is always responding
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s  # Give 15s for initial startup (database init, etc.)
-    # Gluetun is REQUIRED - yt-dlp will never run without the proxy
+    # Don't depend on gluetun - backend works fine without it
+    # If gluetun is running, yt-dlp will use it via GLUETUN_HTTP_PROXY env var
 
   web:
     build:
       context: .
       dockerfile: Dockerfile
-    restart: unless-stopped  # Always restart on failure (ensures service never stays down)
+    restart: unless-stopped
+    container_name: trailerio-web
     environment:
       - NODE_ENV=production
     depends_on:
-      backend:
-        condition: service_healthy  # Wait for backend to be healthy before starting
-    # Health check for web service
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 5s
+      - backend
     labels:
       # Traefik configuration
       - "traefik.enable=true"
+      - "traefik.docker.network=plaio_default"
       - "traefik.http.routers.trailerio.rule=Host(`trailerio.plaio.cc`)"
       - "traefik.http.routers.trailerio.entrypoints=websecure"
       # TLS configuration - requires 'letsencrypt' certresolver to be configured in Traefik
