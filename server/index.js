@@ -388,7 +388,7 @@ const qualityTracker = {
 // Success rate tracking for smart sorting
 const successTracker = {
   // Source-level tracking (overall success rate for each source)
-  sources: successTrackerData.sources || new Map(), // 'itunes' | 'piped' | 'invidious' | 'archive' -> { success: number, total: number }
+  sources: successTrackerData.sources || new Map(), // 'itunes' | 'piped' | 'invidious' | 'archive' | 'ytdlp' | 'imdb' | 'iva' | 'appletrailers' | 'rt' | 'mc' -> { success: number, total: number }
   // Instance/strategy-level tracking (within each source)
   piped: successTrackerData.piped || new Map(), // instance URL -> { success: number, total: number }
   invidious: successTrackerData.invidious || new Map(), // instance URL -> { success: number, total: number }
@@ -2637,6 +2637,14 @@ async function resolvePreview(imdbId, type) {
   if (type === 'series') {
     availableSources.push('itunes'); // iTunes works for TV shows
   }
+  
+  // HIGH-VALUE TRAILER SOURCES (direct extractors)
+  // These work even when TMDB doesn't provide video URLs
+  availableSources.push('imdb_trailer'); // IMDb trailers (we have IMDb ID!)
+  availableSources.push('iva'); // InternetVideoArchive
+  availableSources.push('appletrailers'); // Apple Trailers (direct)
+  availableSources.push('rottentomatoes'); // RottenTomatoes
+  availableSources.push('metacritic'); // Metacritic
   
   // Add video sources (YouTube and other sites via yt-dlp)
   if (tmdbMeta.youtubeTrailerKey) {
