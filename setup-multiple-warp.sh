@@ -144,8 +144,31 @@ generate_warp_config() {
     local public_key=$(grep "PublicKey" wgcf-profile.conf | cut -d'=' -f2 | tr -d ' ')
     local preshared_key=$(grep "PresharedKey" wgcf-profile.conf | cut -d'=' -f2 | tr -d ' ')
     local endpoint=$(grep "Endpoint" wgcf-profile.conf | cut -d'=' -f2 | tr -d ' ')
-    local endpoint_ip=$(echo "$endpoint" | cut -d':' -f1)
+    local endpoint_host=$(echo "$endpoint" | cut -d':' -f1)
     local endpoint_port=$(echo "$endpoint" | cut -d':' -f2)
+    
+    # Resolve hostname to IP (gluetun requires IP, not hostname)
+    # Default Cloudflare endpoint is engage.cloudflareclient.com
+    local endpoint_ip=""
+    if [ -n "$endpoint_host" ]; then
+        # Try to resolve to IP
+        if command -v getent &> /dev/null; then
+            endpoint_ip=$(getent hosts "$endpoint_host" 2>/dev/null | awk '{print $1}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+        elif command -v dig &> /dev/null; then
+            endpoint_ip=$(dig +short -4 "$endpoint_host" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+        fi
+        
+        # If resolution failed, use common Cloudflare IPs as fallback
+        if [ -z "$endpoint_ip" ]; then
+            log_warning "Could not resolve ${endpoint_host}, using default Cloudflare IP"
+            endpoint_ip="162.159.192.1"  # Common Cloudflare Warp endpoint IP
+        fi
+    fi
+    
+    # Default port if not found
+    if [ -z "$endpoint_port" ]; then
+        endpoint_port="2408"
+    fi
     
     # Validate extracted values
     if [ -z "$private_key" ] || [ -z "$address" ] || [ -z "$public_key" ] || [ -z "$endpoint_ip" ]; then
