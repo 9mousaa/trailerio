@@ -10,9 +10,19 @@ echo ""
 # Navigate to project directory
 cd /opt/trailerio || { echo "❌ Error: /opt/trailerio not found"; exit 1; }
 
-# Pull latest changes
+# Pull latest changes (stash .env if it has local changes)
 echo "📥 Pulling latest changes..."
-git pull origin main || { echo "⚠️  Warning: git pull failed, continuing anyway..."; }
+if git diff --quiet .env 2>/dev/null; then
+  # No local changes to .env, safe to pull
+  git pull origin main || { echo "⚠️  Warning: git pull failed, continuing anyway..."; }
+else
+  # .env has local changes, stash them first
+  echo "💾 Stashing local .env changes..."
+  git stash push -m "Stash .env before deploy $(date +%Y%m%d-%H%M%S)" .env
+  git pull origin main || { echo "⚠️  Warning: git pull failed, continuing anyway..."; }
+  echo "📦 Restoring local .env changes..."
+  git stash pop 2>/dev/null || echo "⚠️  Note: Could not restore .env stash (may have been empty)"
+fi
 
 # Build and deploy
 echo "🔨 Building and deploying..."
