@@ -287,10 +287,16 @@ function cleanupSuccessTracker() {
   }
 }
 
-// Memory monitoring endpoint (for debugging)
+// Health check endpoint (for Docker health checks and monitoring)
+// Must return 200 status for Docker to consider service healthy
 app.get('/health', (req, res) => {
   const memUsage = process.memoryUsage();
-  res.json({
+  res.status(200).json({ 
+    status: 'healthy', 
+    service: 'trailerio-backend', 
+    version: '2.0.0',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
     memory: {
       rss: `${Math.round(memUsage.rss / 1024 / 1024)}MB`,
       heapTotal: `${Math.round(memUsage.heapTotal / 1024 / 1024)}MB`,
@@ -2892,12 +2898,23 @@ async function resolvePreview(imdbId, type) {
   return { found: false };
 }
 
-// Root endpoint
+// Root endpoint - simple health check
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'trailerio-backend', version: '2.0.0' });
+  res.json({ 
+    status: 'ok', 
+    service: 'trailerio-backend', 
+    version: '2.0.0',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
 });
 
+// Manifest endpoint - must be accessible for Stremio addon
+// This endpoint is critical and must never fail
 app.get('/manifest.json', (req, res) => {
+  // Set proper headers for manifest
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
   res.json({
     id: "com.trailer.preview",
     name: "Trailer Preview",

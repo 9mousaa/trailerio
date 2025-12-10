@@ -30,7 +30,7 @@ services:
       - SOCKS5=on
       - SOCKS5_LISTENING_ADDRESS=0.0.0.0
       - SOCKS5_PORT=1080
-    restart: unless-stopped  # Restart if it crashes (but backend works without it)
+    restart: always  # Always restart on failure (backend works without it, but better to have it running)
     # Expose proxy ports (containers on same network can access without exposing, but it helps)
     ports:
       - "8888:8888/tcp"  # HTTP proxy
@@ -48,12 +48,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    restart: unless-stopped
+    restart: always  # Always restart on failure (ensures service never stays down)
     environment:
       - NODE_ENV=production
       - PORT=3001
       - TMDB_API_KEY=${TMDB_API_KEY:-}
-      - MDBLIST_API_KEY=${MDBLIST_API_KEY:-}
       # Use gluetun HTTP proxy for yt-dlp (defaults to gluetun:8000 if not set)
       - GLUETUN_HTTP_PROXY=${GLUETUN_HTTP_PROXY:-http://gluetun:8000}
     env_file:
@@ -65,13 +64,13 @@ services:
     networks:
       - trailerio-internal
       - plaio_default
-    # Health check to ensure backend is ready before routing traffic
+    # Health check to ensure backend is always responding
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
-      interval: 10s
-      timeout: 5s
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
       retries: 3
-      start_period: 10s  # Give backend 10s to start before first check
+      start_period: 10s  # Give 10s for initial startup
     # Don't depend on gluetun - backend works fine without it
     # If gluetun is running, yt-dlp will use it via GLUETUN_HTTP_PROXY env var
 
@@ -79,7 +78,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    restart: unless-stopped
+    restart: always  # Always restart on failure (ensures service never stays down)
     environment:
       - NODE_ENV=production
     depends_on:
@@ -97,9 +96,6 @@ services:
       - "traefik.http.routers.trailerio.tls=true"
       - "traefik.http.routers.trailerio.tls.options=default"
       - "traefik.http.services.trailerio.loadbalancer.server.port=80"
-      # Health check for Traefik - ensures web service is ready
-      - "traefik.http.services.trailerio.loadbalancer.healthcheck.path=/health"
-      - "traefik.http.services.trailerio.loadbalancer.healthcheck.interval=10s"
       # HTTP to HTTPS redirect
       - "traefik.http.routers.trailerio-http.rule=Host(`trailerio.plaio.cc`)"
       - "traefik.http.routers.trailerio-http.entrypoints=web"
