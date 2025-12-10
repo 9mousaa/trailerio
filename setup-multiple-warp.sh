@@ -222,6 +222,12 @@ generate_warp_config() {
     
     # Output the values to stdout (will be captured by caller)
     # Use printf to avoid issues with special characters
+    # Ensure keys are exactly the right length (44 chars for base64 32-byte keys)
+    # Remove any trailing newlines or extra characters
+    private_key=$(echo -n "$private_key" | tr -d '\n\r\t ')
+    public_key=$(echo -n "$public_key" | tr -d '\n\r\t ')
+    preshared_key=$(echo -n "$preshared_key" | tr -d '\n\r\t ')
+    
     printf "PRIVATE_KEY=%s\n" "$private_key"
     printf "ADDRESS=%s\n" "$address"
     printf "PUBLIC_KEY=%s\n" "$public_key"
