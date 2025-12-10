@@ -3,8 +3,9 @@
 # Robust script to set up multiple Cloudflare Warp instances
 # This script generates WireGuard keys for multiple Warp accounts and configures .env
 
-set -e  # Exit on error
+# Error handling - don't exit on error in functions, handle manually
 set -u  # Exit on undefined variable
+set -o pipefail  # Catch errors in pipes
 
 # Colors for output
 RED='\033[0;31m'
@@ -79,32 +80,54 @@ check_wgcf() {
 generate_warp_config() {
     local instance_num=$1
     local temp_dir="/tmp/wgcf-instance-${instance_num}"
+    local original_dir=$(pwd)
     
     log_info "Generating Warp config for instance ${instance_num}..."
     
     # Create temp directory
-    mkdir -p "$temp_dir"
-    cd "$temp_dir"
+    mkdir -p "$temp_dir" || return 1
+    cd "$temp_dir" || return 1
     
     # Clean up any existing config
     rm -f wgcf-account.toml wgcf-profile.conf
     
     # Register new account (with timeout to avoid hanging)
     log_info "Registering new Cloudflare Warp account..."
-    if ! timeout 30 wgcf register --accept-tos -n "trailerio-instance-${instance_num}" 2>&1 | tee register.log; then
-        log_error "Failed to register Warp account for instance ${instance_num}"
-        cd - > /dev/null
-        rm -rf "$temp_dir"
-        return 1
+    # Use timeout if available, otherwise run directly (with set -e, script will exit on error)
+    if command -v timeout &> /dev/null; then
+        if ! timeout 60 wgcf register --accept-tos -n "trailerio-instance-${instance_num}" 2>&1 | tee register.log; then
+            log_error "Failed to register Warp account for instance ${instance_num}"
+            cd - > /dev/null
+            rm -rf "$temp_dir"
+            return 1
+        fi
+    else
+        # No timeout command - run directly (risky but better than failing)
+        log_warning "timeout command not available, running without timeout (may hang)"
+        if ! wgcf register --accept-tos -n "trailerio-instance-${instance_num}" 2>&1 | tee register.log; then
+            log_error "Failed to register Warp account for instance ${instance_num}"
+            cd - > /dev/null
+            rm -rf "$temp_dir"
+            return 1
+        fi
     fi
     
     # Generate WireGuard profile
     log_info "Generating WireGuard profile..."
-    if ! timeout 30 wgcf generate 2>&1 | tee generate.log; then
-        log_error "Failed to generate WireGuard profile for instance ${instance_num}"
-        cd - > /dev/null
-        rm -rf "$temp_dir"
-        return 1
+    if command -v timeout &> /dev/null; then
+        if ! timeout 60 wgcf generate 2>&1 | tee generate.log; then
+            log_error "Failed to generate WireGuard profile for instance ${instance_num}"
+            cd - > /dev/null
+            rm -rf "$temp_dir"
+            return 1
+        fi
+    else
+        if ! wgcf generate 2>&1 | tee generate.log; then
+            log_error "Failed to generate WireGuard profile for instance ${instance_num}"
+            cd - > /dev/null
+            rm -rf "$temp_dir"
+            return 1
+        fi
     fi
     
     # Parse the config file
@@ -134,8 +157,8 @@ generate_warp_config() {
         return 1
     fi
     
-    # Return to original directory
-    cd - > /dev/null
+    # Return to original directory (safe even if cd failed)
+    cd "$original_dir" 2>/dev/null || true
     
     # Output the values (will be captured by caller)
     echo "PRIVATE_KEY=${private_key}"
@@ -216,33 +239,49 @@ main() {
         
         # Generate config with retry logic
         local retries=3
-        local config_output=""
-        while [ $retries -gt 0 ]; do
-            if config_output=$(generate_warp_config $i 2>&1); then
-                # Parse the output
-                eval "$config_output"
+        local config_success=false
+        
+        while [ $retries -gt 0 ] && [ "$config_success" = false ]; do
+            set +e  # Temporarily disable exit on error for this function call
+            local config_output=""
+            config_output=$(generate_warp_config $i 2>&1)
+            local generate_exit=$?
+            set -e  # Re-enable exit on error
+            
+            if [ $generate_exit -eq 0 ] && [ -n "$config_output" ]; then
+                # Parse the output safely
+                set +e  # Disable exit on error for eval
+                eval "$config_output" 2>/dev/null
+                local eval_exit=$?
+                set -e
                 
-                # Update .env file
-                update_env_file "$i" "$PRIVATE_KEY" "$ADDRESS" "$PUBLIC_KEY" "$PRESHARED_KEY" "$ENDPOINT_IP" "$ENDPOINT_PORT"
-                
-                log_success "Instance ${i} configured successfully"
-                success_count=$((success_count + 1))
-                break
-            else
-                retries=$((retries - 1))
-                if [ $retries -gt 0 ]; then
-                    log_warning "Failed to generate config for instance ${i}, retrying... (${retries} attempts left)"
-                    sleep 2
+                if [ $eval_exit -eq 0 ] && [ -n "${PRIVATE_KEY:-}" ] && [ -n "${ADDRESS:-}" ] && [ -n "${PUBLIC_KEY:-}" ] && [ -n "${ENDPOINT_IP:-}" ]; then
+                    # Update .env file
+                    update_env_file "$i" "$PRIVATE_KEY" "$ADDRESS" "$PUBLIC_KEY" "${PRESHARED_KEY:-}" "$ENDPOINT_IP" "${ENDPOINT_PORT:-2408}"
+                    
+                    log_success "Instance ${i} configured successfully"
+                    success_count=$((success_count + 1))
+                    config_success=true
+                    break
                 else
-                    log_error "Failed to generate config for instance ${i} after 3 attempts"
-                    log_info "You can manually configure this instance later"
+                    log_warning "Config generated but parsing failed for instance ${i}"
                 fi
+            fi
+            
+            retries=$((retries - 1))
+            if [ $retries -gt 0 ]; then
+                log_warning "Failed to generate config for instance ${i}, retrying... (${retries} attempts left)"
+                sleep 5  # Longer delay between retries
+            else
+                log_error "Failed to generate config for instance ${i} after 3 attempts"
+                log_info "You can manually configure this instance later"
             fi
         done
         
         # Small delay between instances to avoid rate limiting
         if [ $i -lt $NUM_INSTANCES ]; then
-            sleep 3
+            log_info "Waiting 5 seconds before next instance (to avoid rate limiting)..."
+            sleep 5
         fi
     done
     
