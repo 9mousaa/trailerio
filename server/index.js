@@ -1380,21 +1380,49 @@ async function extractViaYtDlp(youtubeKey) {
     } catch (raceError) {
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
-      if (raceError.message === 'yt-dlp timeout') {
-        console.log(`  [yt-dlp] ✗ TIMEOUT after ${duration}ms`);
-      } else {
-        // Show more detailed error information
-        const errorMsg = raceError.message || raceError.toString();
-        // execAsync errors have stdout/stderr in the error object
-        const errorStderr = raceError.stderr || (raceError.cmd ? '' : '');
-        const errorStdout = raceError.stdout || '';
-        const stderrMsg = errorStderr ? `\n    stderr: ${errorStderr.substring(0, 500)}` : '';
-        const stdoutMsg = errorStdout ? `\n    stdout: ${errorStdout.substring(0, 500)}` : '';
-        const cmdMsg = raceError.cmd ? `\n    command: ${raceError.cmd.substring(0, 200)}` : '';
-        console.log(`  [yt-dlp] ✗ Error: ${errorMsg.substring(0, 200)}${cmdMsg}${stderrMsg}${stdoutMsg} (${duration}ms)`);
+      
+      // Check if it's a 401/authentication error with HTTP proxy, try SOCKS5 as fallback
+      const errorMsg = (raceError.stderr || raceError.message || '').toString();
+      if (proxyAvailable && (errorMsg.includes('401') || errorMsg.includes('Unauthorized') || errorMsg.includes('Tunnel connection failed'))) {
+        console.log(`  [yt-dlp] ⚠ HTTP proxy failed with auth error, trying SOCKS5...`);
+        // Retry with SOCKS5 proxy
+        const socks5Proxy = 'socks5://gluetun:1080';
+        const socks5Command = ytDlpCommand.replace(`--proxy ${gluetunProxy}`, `--proxy ${socks5Proxy}`);
+        try {
+          const socks5ExecPromise = execAsync(socks5Command, {
+            timeout: 12000,
+            maxBuffer: 10 * 1024 * 1024
+          });
+          const socks5TimeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('yt-dlp timeout')), 12000)
+          );
+          ({ stdout, stderr } = await Promise.race([socks5ExecPromise, socks5TimeoutPromise]));
+          console.log(`  [yt-dlp] ✓ SOCKS5 proxy worked!`);
+        } catch (socks5Error) {
+          // SOCKS5 also failed, continue with original error
+          console.log(`  [yt-dlp] ✗ SOCKS5 proxy also failed`);
+          // Fall through to original error handling
+        }
       }
-      successTracker.recordFailure('ytdlp', 'extraction');
-      return null;
+      
+      // If we still don't have stdout (SOCKS5 didn't work or wasn't tried), handle the error
+      if (!stdout) {
+        if (raceError.message === 'yt-dlp timeout') {
+          console.log(`  [yt-dlp] ✗ TIMEOUT after ${duration}ms`);
+        } else {
+          // Show more detailed error information
+          const errorMsg = raceError.message || raceError.toString();
+          // execAsync errors have stdout/stderr in the error object
+          const errorStderr = raceError.stderr || (raceError.cmd ? '' : '');
+          const errorStdout = raceError.stdout || '';
+          const stderrMsg = errorStderr ? `\n    stderr: ${errorStderr.substring(0, 500)}` : '';
+          const stdoutMsg = errorStdout ? `\n    stdout: ${errorStdout.substring(0, 500)}` : '';
+          const cmdMsg = raceError.cmd ? `\n    command: ${raceError.cmd.substring(0, 200)}` : '';
+          console.log(`  [yt-dlp] ✗ Error: ${errorMsg.substring(0, 200)}${cmdMsg}${stderrMsg}${stdoutMsg} (${duration}ms)`);
+        }
+        successTracker.recordFailure('ytdlp', 'extraction');
+        return null;
+      }
     }
     
     clearTimeout(timeout);
