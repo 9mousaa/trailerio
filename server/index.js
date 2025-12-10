@@ -826,20 +826,46 @@ async function getTMDBMetadata(imdbId, type) {
   const year = releaseDate ? parseInt(releaseDate.substring(0, 4)) : null;
   const runtime = detail.runtime || null;
   
+  // Supported video sites (yt-dlp can extract from these)
+  const SUPPORTED_SITES = ['YouTube', 'Vimeo', 'Dailymotion', 'Apple', 'Facebook'];
+  
   let youtubeTrailerKey = null;
+  let trailerUrl = null; // For non-YouTube sites
+  let trailerSite = null;
   const videos = detail.videos?.results || [];
   
-  // Priority: Official Trailer > Official Teaser > Any Trailer > Official Clip > Any YouTube video
+  // Priority: Official Trailer > Official Teaser > Any Trailer > Official Clip > Any video
   // Filter out behind-the-scenes, featurettes, etc.
   const excludeTypes = ['Behind the Scenes', 'Featurette', 'Bloopers', 'Opening Credits'];
   const excludeNames = ['behind', 'featurette', 'bloopers', 'opening', 'credits', 'making of'];
   
+  // Filter videos from supported sites
   const filteredVideos = videos.filter(v => {
-    if (v.site !== 'YouTube') return false;
+    if (!SUPPORTED_SITES.includes(v.site)) return false;
     const name = (v.name || '').toLowerCase();
     return !excludeTypes.includes(v.type) && 
            !excludeNames.some(exclude => name.includes(exclude));
   });
+  
+  // Helper to build video URL based on site
+  const buildVideoUrl = (video) => {
+    const site = video.site;
+    const key = video.key;
+    
+    if (site === 'YouTube') {
+      return { url: `https://www.youtube.com/watch?v=${key}`, site: 'YouTube' };
+    } else if (site === 'Vimeo') {
+      return { url: `https://vimeo.com/${key}`, site: 'Vimeo' };
+    } else if (site === 'Dailymotion') {
+      return { url: `https://www.dailymotion.com/video/${key}`, site: 'Dailymotion' };
+    } else if (site === 'Apple') {
+      // Apple Trailers - key is usually a full URL or path
+      return { url: key.startsWith('http') ? key : `https://trailers.apple.com/${key}`, site: 'Apple' };
+    } else if (site === 'Facebook') {
+      return { url: `https://www.facebook.com/watch/?v=${key}`, site: 'Facebook' };
+    }
+    return null;
+  };
   
   // Priority 1: Official Trailer
   let trailer = filteredVideos.find(v => 
@@ -848,9 +874,17 @@ async function getTMDBMetadata(imdbId, type) {
   );
   let youtubeTrailerTitle = null;
   if (trailer) {
-    youtubeTrailerKey = trailer.key;
-    youtubeTrailerTitle = trailer.name || null;
-    console.log(`Found official trailer: ${youtubeTrailerTitle || 'Trailer'}`);
+    const videoInfo = buildVideoUrl(trailer);
+    if (videoInfo) {
+      if (trailer.site === 'YouTube') {
+        youtubeTrailerKey = trailer.key;
+      } else {
+        trailerUrl = videoInfo.url;
+        trailerSite = videoInfo.site;
+      }
+      youtubeTrailerTitle = trailer.name || null;
+      console.log(`Found official trailer: ${youtubeTrailerTitle || 'Trailer'} (${videoInfo.site})`);
+    }
   } else {
     // Priority 2: Official Teaser
     trailer = filteredVideos.find(v => 
@@ -858,16 +892,32 @@ async function getTMDBMetadata(imdbId, type) {
       v.official === true
     );
     if (trailer) {
-      youtubeTrailerKey = trailer.key;
-      youtubeTrailerTitle = trailer.name || null;
-      console.log(`Found official teaser: ${youtubeTrailerTitle || 'Teaser'}`);
+      const videoInfo = buildVideoUrl(trailer);
+      if (videoInfo) {
+        if (trailer.site === 'YouTube') {
+          youtubeTrailerKey = trailer.key;
+        } else {
+          trailerUrl = videoInfo.url;
+          trailerSite = videoInfo.site;
+        }
+        youtubeTrailerTitle = trailer.name || null;
+        console.log(`Found official teaser: ${youtubeTrailerTitle || 'Teaser'} (${videoInfo.site})`);
+      }
     } else {
       // Priority 3: Any Trailer (not official)
       trailer = filteredVideos.find(v => v.type === 'Trailer');
       if (trailer) {
-        youtubeTrailerKey = trailer.key;
-        youtubeTrailerTitle = trailer.name || null;
-        console.log(`Found trailer: ${youtubeTrailerTitle || 'Trailer'}`);
+        const videoInfo = buildVideoUrl(trailer);
+        if (videoInfo) {
+          if (trailer.site === 'YouTube') {
+            youtubeTrailerKey = trailer.key;
+          } else {
+            trailerUrl = videoInfo.url;
+            trailerSite = videoInfo.site;
+          }
+          youtubeTrailerTitle = trailer.name || null;
+          console.log(`Found trailer: ${youtubeTrailerTitle || 'Trailer'} (${videoInfo.site})`);
+        }
       } else {
         // Priority 4: Official Clip
         trailer = filteredVideos.find(v => 
@@ -875,16 +925,32 @@ async function getTMDBMetadata(imdbId, type) {
           v.official === true
         );
         if (trailer) {
-          youtubeTrailerKey = trailer.key;
-          youtubeTrailerTitle = trailer.name || null;
-          console.log(`Found official clip: ${youtubeTrailerTitle || 'Clip'}`);
+          const videoInfo = buildVideoUrl(trailer);
+          if (videoInfo) {
+            if (trailer.site === 'YouTube') {
+              youtubeTrailerKey = trailer.key;
+            } else {
+              trailerUrl = videoInfo.url;
+              trailerSite = videoInfo.site;
+            }
+            youtubeTrailerTitle = trailer.name || null;
+            console.log(`Found official clip: ${youtubeTrailerTitle || 'Clip'} (${videoInfo.site})`);
+          }
         } else {
-          // Last resort: Any YouTube video (but prefer official)
+          // Last resort: Any video (but prefer official)
           trailer = filteredVideos.find(v => v.official === true) || filteredVideos[0];
           if (trailer) {
-            youtubeTrailerKey = trailer.key;
-            youtubeTrailerTitle = trailer.name || null;
-            console.log(`Found YouTube video: ${youtubeTrailerTitle || 'Video'} (${trailer.type})`);
+            const videoInfo = buildVideoUrl(trailer);
+            if (videoInfo) {
+              if (trailer.site === 'YouTube') {
+                youtubeTrailerKey = trailer.key;
+              } else {
+                trailerUrl = videoInfo.url;
+                trailerSite = videoInfo.site;
+              }
+              youtubeTrailerTitle = trailer.name || null;
+              console.log(`Found video: ${youtubeTrailerTitle || 'Video'} (${videoInfo.site}, ${trailer.type})`);
+            }
           }
         }
       }
@@ -905,7 +971,7 @@ async function getTMDBMetadata(imdbId, type) {
     }
   }
   
-  console.log(`TMDB: "${mainTitle}" (${year}), YouTube: ${youtubeTrailerKey || 'none'}, altTitles: ${altTitlesArray.length}`);
+  console.log(`TMDB: "${mainTitle}" (${year}), YouTube: ${youtubeTrailerKey || 'none'}, Other: ${trailerSite || 'none'}, altTitles: ${altTitlesArray.length}`);
   
   return {
     tmdbId,
@@ -916,7 +982,9 @@ async function getTMDBMetadata(imdbId, type) {
     runtime,
     altTitles: altTitlesArray,
     youtubeTrailerKey,
-    youtubeTrailerTitle
+    youtubeTrailerTitle,
+    trailerUrl, // For non-YouTube sites (Vimeo, Dailymotion, etc.)
+    trailerSite // Site name (Vimeo, Dailymotion, etc.)
   };
 }
 
@@ -1517,10 +1585,11 @@ async function extractViaInvidious(youtubeKey) {
   return null;
 }
 
-// ============ YT-DLP EXTRACTOR (with Cloudflare Warp) ============
+// ============ YT-DLP EXTRACTOR (Generic - supports multiple sites) ============
 
-async function extractViaYtDlp(youtubeKey) {
-  console.log(`  [yt-dlp] Extracting streamable URL for ${youtubeKey}...`);
+// Generic extractor that works with any URL supported by yt-dlp
+async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
+  console.log(`  [yt-dlp] Extracting streamable URL from ${siteName}: ${videoUrl}...`);
   
   const startTime = Date.now();
   const controller = new AbortController();
@@ -1528,21 +1597,15 @@ async function extractViaYtDlp(youtubeKey) {
   
   try {
     // Check if gluetun is available
-    // Port 8000 is the control server, not the HTTP proxy
-    // HTTP proxy is on port 8888, SOCKS5 on port 1080
-    // Try HTTP proxy first (more reliable), fallback to SOCKS5, then direct
     let proxyAvailable = false;
-    let gluetunProxy = 'http://gluetun:8888'; // Use HTTP proxy on port 8888
+    let gluetunProxy = 'http://gluetun:8888';
     
     try {
-      // Check gluetun's control API to see if it's running and configured
       const gluetunStatus = await fetch('http://gluetun:8000/v1/openvpn/status', {
         signal: AbortSignal.timeout(2000),
         method: 'GET'
       }).catch(() => null);
       
-      // If we get any response (even error), gluetun is running
-      // HTTP proxy should be available if gluetun is running with HTTPPROXY=on
       if (gluetunStatus !== null) {
         proxyAvailable = true;
         console.log(`  [yt-dlp] ✓ Gluetun detected, using HTTP proxy at ${gluetunProxy}`);
@@ -1550,31 +1613,19 @@ async function extractViaYtDlp(youtubeKey) {
         console.log(`  [yt-dlp] ⚠ Gluetun not reachable, using direct connection`);
       }
     } catch (proxyError) {
-      // Gluetun not available or not configured, will use direct connection
       proxyAvailable = false;
       console.log(`  [yt-dlp] ⚠ Gluetun check failed: ${proxyError.message}, using direct connection`);
     }
     
-    // Use HTTP proxy (port 8888, configured via Cloudflare Warp)
+    // Use HTTP proxy if available
     let useProxy = '';
     if (proxyAvailable) {
       useProxy = `--proxy ${gluetunProxy}`;
     }
     
-    // Anti-blocking strategies:
-    // 1. Use proper user agent (mimic browser)
-    // 2. Add sleep interval between requests
-    // 3. Use format selection that's less likely to be blocked
-    // 4. Extract info only (no download) - gets streamable URLs
-    // 5. Prefer combined formats (video+audio) for streaming
-    // 6. Use automated token generation plugin (yt-dlp-get-pot) to avoid bot detection
-    
     // Format selection strategy for streamable URLs:
-    // 1. Prefer combined formats (video+audio) for direct streaming - best for AVPlayer
-    // 2. Fallback to best video+audio combination if no combined available
-    // 3. Limit to 1080p max for reasonable bandwidth
-    // 4. Use --get-url to get direct streamable URL (not download)
-    // Anti-blocking: user-agent, sleep intervals, proper format selection, automated tokens
+    // Prefer combined formats (video+audio) for direct streaming
+    // Limit to 1080p max for reasonable bandwidth
     const ytDlpCommand = `yt-dlp ${useProxy} \
       --no-download \
       --no-warnings \
@@ -1586,7 +1637,7 @@ async function extractViaYtDlp(youtubeKey) {
       --socket-timeout 10 \
       --extractor-args "youtube:player_client=android,web" \
       --get-url \
-      "https://www.youtube.com/watch?v=${youtubeKey}"`;
+      "${videoUrl}"`;
     
     console.log(`  [yt-dlp] Running extraction (proxy: ${proxyAvailable ? 'enabled' : 'disabled'})...`);
     
@@ -2586,10 +2637,19 @@ async function resolvePreview(imdbId, type) {
   if (type === 'series') {
     availableSources.push('itunes'); // iTunes works for TV shows
   }
+  
+  // Add video sources (YouTube and other sites via yt-dlp)
   if (tmdbMeta.youtubeTrailerKey) {
-    // Add ytdlp first (most reliable with Cloudflare Warp), then Piped/Invidious
+    // YouTube sources: ytdlp first (most reliable), then Piped/Invidious
     availableSources.push('ytdlp', 'piped', 'invidious');
   }
+  
+  // Add other video sites (Vimeo, Dailymotion, etc.) via yt-dlp
+  if (tmdbMeta.trailerUrl && tmdbMeta.trailerSite) {
+    // Use generic yt-dlp extractor for non-YouTube sites
+    availableSources.push('ytdlp_other');
+  }
+  
   availableSources.push('archive');
   
   // Sort sources by success rate, quality, and content type (highest first)
@@ -2713,6 +2773,47 @@ async function resolvePreview(imdbId, type) {
               previewUrl: ytdlpResult.url,
               youtubeKey: tmdbMeta.youtubeTrailerKey,
               country: 'yt',
+              quality: quality
+            };
+          } else {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            successTracker.recordSourceFailure('ytdlp');
+            return null;
+          }
+        } else if (source === 'ytdlp_other') {
+          // Handle non-YouTube video sites (Vimeo, Dailymotion, etc.) via generic yt-dlp extractor
+          if (!tmdbMeta.trailerUrl || !tmdbMeta.trailerSite) {
+            console.log(`  Skipping yt-dlp (other): no trailer URL available`);
+            successTracker.recordSourceFailure('ytdlp');
+            return null;
+          }
+          console.log(`${tmdbMeta.trailerSite} URL: ${tmdbMeta.trailerUrl}`);
+          const ytdlpResult = await extractViaYtDlpGeneric(tmdbMeta.trailerUrl, tmdbMeta.trailerSite);
+          if (ytdlpResult && ytdlpResult.url) {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            
+            const quality = ytdlpResult.quality || 'best';
+            qualityTracker.recordQuality('ytdlp', quality);
+            
+            // Determine source type for cache
+            const sourceType = tmdbMeta.trailerSite.toLowerCase();
+            setCache(imdbId, {
+              track_id: null,
+              preview_url: ytdlpResult.url,
+              country: sourceType,
+              youtube_key: null,
+              source: sourceType
+            });
+            console.log(`✓ Got URL from yt-dlp (${tmdbMeta.trailerSite})`);
+            successTracker.recordSourceSuccess('ytdlp');
+            return {
+              found: true,
+              source: sourceType,
+              previewUrl: ytdlpResult.url,
+              youtubeKey: null,
+              country: sourceType,
               quality: quality
             };
           } else {
