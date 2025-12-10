@@ -1830,9 +1830,9 @@ async function extractViaYtDlp(youtubeKey) {
     
     console.log(`  [yt-dlp] Running extraction (proxy: ${proxyAvailable ? 'enabled' : 'disabled'})...`);
     
-    // Execute yt-dlp with timeout
+    // Execute yt-dlp with timeout (longer for proxy connections)
     const execPromise = execAsync(ytDlpCommand, {
-      timeout: 12000,
+      timeout: 20000, // 20 seconds - longer for proxy
       maxBuffer: 10 * 1024 * 1024 // 10MB buffer
     });
     
@@ -1863,7 +1863,7 @@ async function extractViaYtDlp(youtubeKey) {
         const noProxyCommand = ytDlpCommand.replace(`--proxy ${gluetunProxy}`, '');
         try {
           const noProxyExecPromise = execAsync(noProxyCommand, {
-            timeout: 12000,
+            timeout: 20000, // 20 seconds
             maxBuffer: 10 * 1024 * 1024
           });
           const noProxyTimeoutPromise = new Promise((_, reject) => 
