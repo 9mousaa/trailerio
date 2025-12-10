@@ -1302,18 +1302,22 @@ async function extractViaYtDlp(youtubeKey) {
     // Default to gluetun:8000 if not explicitly set (gluetun is on same Docker network)
     let gluetunProxy = process.env.GLUETUN_HTTP_PROXY || 'http://gluetun:8000';
     
-    // Verify proxy is accessible
+    // Verify proxy is accessible by checking if gluetun container is reachable
     let proxyAvailable = false;
     try {
-      const proxyTest = await fetch(`${gluetunProxy.replace(/\/$/, '')}/v1/openvpn/status`, {
+      // Try to connect to gluetun's HTTP proxy port (simple TCP check via HTTP CONNECT test)
+      const proxyTest = await fetch(`http://gluetun:8000`, {
         signal: AbortSignal.timeout(2000),
-        method: 'GET'
+        method: 'GET',
+        headers: { 'User-Agent': 'gluetun-health-check' }
       }).catch(() => null);
-      if (proxyTest && proxyTest.ok) {
+      // If we get any response (even error), proxy is running
+      if (proxyTest !== null) {
         proxyAvailable = true;
       }
     } catch (proxyError) {
       // Proxy not available, will use direct connection
+      proxyAvailable = false;
     }
     
     const useProxy = proxyAvailable ? `--proxy ${gluetunProxy}` : '';
@@ -1341,7 +1345,7 @@ async function extractViaYtDlp(youtubeKey) {
       --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
       --sleep-interval 2 \
       --socket-timeout 10 \
-      --extractor-args "youtube:player_client=android" \
+      --extractor-args "youtube:player_client=android,web" \
       --get-url \
       "https://www.youtube.com/watch?v=${youtubeKey}"`;
     

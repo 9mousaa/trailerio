@@ -10,9 +10,8 @@ RUN apk add --no-cache python3 make g++ py3-pip curl
 # Use --break-system-packages for Alpine Linux (Python is externally managed)
 RUN pip3 install --no-cache-dir --break-system-packages yt-dlp
 
-# Install yt-dlp plugin for automated token generation (anti-bot detection)
-# This plugin automatically generates tokens to avoid YouTube bot detection
-RUN pip3 install --no-cache-dir --break-system-packages yt-dlp-get-pot || echo "Warning: yt-dlp-get-pot plugin not available, continuing without it"
+# Note: yt-dlp has built-in anti-bot strategies via --extractor-args
+# Using player_client=android,web helps avoid detection
 
 # Verify yt-dlp installation
 RUN yt-dlp --version
