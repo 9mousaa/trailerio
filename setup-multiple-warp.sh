@@ -143,7 +143,10 @@ generate_warp_config() {
     # Use awk for more reliable extraction, and remove ALL whitespace including newlines
     local private_key=$(grep "^PrivateKey" wgcf-profile.conf | head -n1 | awk -F'=' '{print $2}' | sed 's/[[:space:]]*#.*$//' | tr -d ' \n\r\t')
     local address=$(grep "^Address" wgcf-profile.conf | head -n1 | awk -F'=' '{print $2}' | sed 's/[[:space:]]*#.*$//' | tr -d ' \n\r\t' | cut -d',' -f1)
-    local public_key=$(grep "^PublicKey" wgcf-profile.conf | head -n1 | awk -F'=' '{print $2}' | sed 's/[[:space:]]*#.*$//' | tr -d ' \n\r\t')
+    # NOTE: For gluetun custom WireGuard provider, we need the SERVER's public key, not the client's
+    # Cloudflare Warp server's public key is a well-known constant
+    # The client's public key from wgcf is NOT used by gluetun
+    local server_public_key="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
     local preshared_key=$(grep "^PresharedKey" wgcf-profile.conf | head -n1 | awk -F'=' '{print $2}' | sed 's/[[:space:]]*#.*$//' | tr -d ' \n\r\t' || echo "")
     local endpoint=$(grep "^Endpoint" wgcf-profile.conf | head -n1 | awk -F'=' '{print $2}' | sed 's/[[:space:]]*#.*$//' | tr -d ' \n\r\t')
     local endpoint_host=$(echo "$endpoint" | cut -d':' -f1)
@@ -179,7 +182,7 @@ generate_warp_config() {
     
     # Remove any newlines or extra whitespace
     private_key=$(echo "$private_key" | tr -d '\n\r')
-    public_key=$(echo "$public_key" | tr -d '\n\r')
+    server_public_key=$(echo "$server_public_key" | tr -d '\n\r')
     preshared_key=$(echo "$preshared_key" | tr -d '\n\r')
     
     if [ -z "$private_key" ] || [ ${#private_key} -lt 40 ] || [ ${#private_key} -gt 44 ]; then
@@ -187,8 +190,9 @@ generate_warp_config() {
         key_length_ok=false
     fi
     
-    if [ -z "$public_key" ] || [ ${#public_key} -lt 40 ] || [ ${#public_key} -gt 44 ]; then
-        log_error "Invalid public key length for instance ${instance_num} (got ${#public_key} chars, expected 40-44)"
+    # Server public key should be exactly 44 characters
+    if [ -z "$server_public_key" ] || [ ${#server_public_key} -ne 44 ]; then
+        log_error "Invalid server public key length for instance ${instance_num} (got ${#server_public_key} chars, expected 44)"
         key_length_ok=false
     fi
     
@@ -198,8 +202,8 @@ generate_warp_config() {
         key_length_ok=false
     fi
     
-    if [ -n "$public_key" ] && ! echo "$public_key" | grep -qE '^[A-Za-z0-9+/=]+$'; then
-        log_error "Public key contains invalid characters for instance ${instance_num}"
+    if [ -n "$server_public_key" ] && ! echo "$server_public_key" | grep -qE '^[A-Za-z0-9+/=]+$'; then
+        log_error "Server public key contains invalid characters for instance ${instance_num}"
         key_length_ok=false
     fi
     
@@ -225,12 +229,12 @@ generate_warp_config() {
     # Ensure keys are exactly the right length (44 chars for base64 32-byte keys)
     # Remove any trailing newlines or extra characters
     private_key=$(echo -n "$private_key" | tr -d '\n\r\t ')
-    public_key=$(echo -n "$public_key" | tr -d '\n\r\t ')
+    server_public_key=$(echo -n "$server_public_key" | tr -d '\n\r\t ')
     preshared_key=$(echo -n "$preshared_key" | tr -d '\n\r\t ')
     
     printf "PRIVATE_KEY=%s\n" "$private_key"
     printf "ADDRESS=%s\n" "$address"
-    printf "PUBLIC_KEY=%s\n" "$public_key"
+    printf "PUBLIC_KEY=%s\n" "$server_public_key"
     printf "PRESHARED_KEY=%s\n" "$preshared_key"
     printf "ENDPOINT_IP=%s\n" "$endpoint_ip"
     printf "ENDPOINT_PORT=%s\n" "$endpoint_port"
