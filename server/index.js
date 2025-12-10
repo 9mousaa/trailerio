@@ -1855,6 +1855,85 @@ async function resolveMoviepilotUrl(tmdbMeta, imdbId) {
   return `https://www.moviepilot.de/movies/${slug}`;
 }
 
+async function resolveImdbTrailerUrl(tmdbMeta, imdbId) {
+  // IMDb structure: https://www.imdb.com/title/{imdbId}/videogallery
+  // We have the IMDb ID, so we can construct the URL directly
+  // But we should verify it exists and has trailers
+  if (!imdbId || !imdbId.startsWith('tt')) {
+    return null;
+  }
+  
+  // IMDb videogallery page - yt-dlp can extract from this
+  return `https://www.imdb.com/title/${imdbId}/videogallery`;
+}
+
+async function resolveIvaUrl(tmdbMeta, imdbId) {
+  // Internet Video Archive structure: https://www.internetvideoarchive.com/video/{imdbId}
+  // If we have IMDb ID, use it directly (most reliable)
+  if (imdbId && imdbId.startsWith('tt')) {
+    return `https://www.internetvideoarchive.com/video/${imdbId}`;
+  }
+  
+  // Fallback: search by title
+  try {
+    const searchUrl = `https://www.internetvideoarchive.com/search?q=${encodeURIComponent(tmdbMeta.title)}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    
+    const response = await fetch(searchUrl, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+    clearTimeout(timeout);
+    
+    if (response.ok) {
+      const html = await response.text();
+      // Look for video links in search results
+      // IVA video URLs: /video/{imdbId} or /video/{title-slug}
+      const videoLinkRegex = /href="(\/video\/[^"]+)"/g;
+      const matches = [...html.matchAll(videoLinkRegex)];
+      
+      if (matches.length > 0) {
+        // Return first match
+        return `https://www.internetvideoarchive.com${matches[0][1]}`;
+      }
+    }
+  } catch (error) {
+    // Fallback: return search URL
+  }
+  
+  // Fallback: return search URL (yt-dlp may be able to extract from it)
+  return `https://www.internetvideoarchive.com/search?q=${encodeURIComponent(tmdbMeta.title)}`;
+}
+
+async function resolveVimeoUrl(tmdbMeta, imdbId) {
+  // Vimeo: TMDB provides the video ID/key, construct URL directly
+  // Vimeo URLs: https://vimeo.com/{videoId}
+  // If we have it from TMDB, use it; otherwise search
+  if (tmdbMeta.trailerUrl && tmdbMeta.trailerSite === 'Vimeo') {
+    return tmdbMeta.trailerUrl;
+  }
+  
+  // Fallback: search Vimeo (yt-dlp supports vimeo:search)
+  // For now, return null - we'll rely on TMDB providing the URL
+  return null;
+}
+
+async function resolveDailymotionUrl(tmdbMeta, imdbId) {
+  // Dailymotion: TMDB provides the video ID/key, construct URL directly
+  // Dailymotion URLs: https://www.dailymotion.com/video/{videoId}
+  // If we have it from TMDB, use it; otherwise search
+  if (tmdbMeta.trailerUrl && tmdbMeta.trailerSite === 'Dailymotion') {
+    return tmdbMeta.trailerUrl;
+  }
+  
+  // Fallback: search Dailymotion (yt-dlp supports dailymotion:search)
+  // For now, return null - we'll rely on TMDB providing the URL
+  return null;
+}
+
 // ============ YT-DLP EXTRACTOR (Generic - supports multiple sites) ============
 
 // YouTube-specific extractor (wrapper around generic)
@@ -2868,11 +2947,6 @@ async function resolvePreview(imdbId, type) {
     availableSources.push('ytdlp', 'piped', 'invidious');
   }
   
-  // Add other video sites (Vimeo, Dailymotion, etc.) via yt-dlp
-  if (tmdbMeta.trailerUrl && tmdbMeta.trailerSite) {
-    // Use generic yt-dlp extractor for non-YouTube sites
-    availableSources.push('ytdlp_other');
-  }
   
   // HIGH-VALUE DIRECT TRAILER SOURCES (work independently, don't need TMDB URLs)
   // These use IMDb ID or title/year to find trailers directly via yt-dlp
@@ -2927,8 +3001,7 @@ async function resolvePreview(imdbId, type) {
     if (source === 'archive') defaultTimeout = 5000; // Archive: cap at 5s (tries top 3 strategies only)
     if (source === 'ytdlp') defaultTimeout = 5000; // yt-dlp: cap at 5s (proxy can be slow)
     if (source === 'itunes') defaultTimeout = 4000; // iTunes: usually fast, 4s max
-    if (source === 'piped' || source === 'invidious') defaultTimeout = 3000; // These fail fast, 3s max
-    if (source === 'imdb_trailer' || source === 'appletrailers' || source === 'allocine') defaultTimeout = 4000; // Direct sources: 4s max
+    if (source === 'imdb_trailer' || source === 'appletrailers' || source === 'allocine' || source === 'vimeo' || source === 'dailymotion') defaultTimeout = 4000; // Direct sources: 4s max
     
     const sourceTimeout = sourceResponseTimes.getTimeout(source, defaultTimeout);
     
@@ -2958,45 +3031,6 @@ async function resolvePreview(imdbId, type) {
             const duration = Date.now() - startTime;
             sourceResponseTimes.recordTime('itunes', duration);
             successTracker.recordSourceFailure('itunes');
-            return null;
-          }
-        } else if (source === 'piped') {
-          if (!tmdbMeta.youtubeTrailerKey) {
-            console.log(`  Skipping Piped: no YouTube key available`);
-            successTracker.recordSourceFailure('piped');
-            return null;
-          }
-          console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
-          const pipedResult = await extractViaPiped(tmdbMeta.youtubeTrailerKey);
-          if (pipedResult) {
-            const duration = Date.now() - startTime;
-            sourceResponseTimes.recordTime('piped', duration);
-            
-            const pipedUrl = typeof pipedResult === 'string' ? pipedResult : pipedResult.url;
-            const quality = typeof pipedResult === 'object' ? (pipedResult.quality || 'unknown') : 'unknown';
-            qualityTracker.recordQuality('piped', quality);
-            
-            setCache(imdbId, {
-              track_id: null,
-              preview_url: pipedUrl,
-              country: 'yt',
-              youtube_key: tmdbMeta.youtubeTrailerKey,
-              source: 'youtube'
-            });
-            console.log(`✓ Got URL from Piped`);
-            successTracker.recordSourceSuccess('piped');
-            return {
-              found: true,
-              source: 'youtube',
-              previewUrl: pipedUrl,
-              youtubeKey: tmdbMeta.youtubeTrailerKey,
-              country: 'yt',
-              quality: quality
-            };
-          } else {
-            const duration = Date.now() - startTime;
-            sourceResponseTimes.recordTime('piped', duration);
-            successTracker.recordSourceFailure('piped');
             return null;
           }
         } else if (source === 'ytdlp') {
@@ -3037,8 +3071,88 @@ async function resolvePreview(imdbId, type) {
             successTracker.recordSourceFailure('ytdlp');
             return null;
           }
+        } else if (source === 'vimeo') {
+          // Vimeo - resolve URL and extract
+          const vimeoUrl = await resolveVimeoUrl(tmdbMeta, imdbId);
+          if (!vimeoUrl) {
+            console.log(`  Skipping Vimeo: no URL available`);
+            successTracker.recordSourceFailure('vimeo');
+            return null;
+          }
+          console.log(`  [Vimeo] Resolved URL: ${vimeoUrl}`);
+          const vimeoResult = await extractViaYtDlpGeneric(vimeoUrl, 'Vimeo');
+          if (vimeoResult && vimeoResult.url) {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            
+            const quality = vimeoResult.quality || 'best';
+            qualityTracker.recordQuality('vimeo', quality);
+            
+            setCache(imdbId, {
+              track_id: null,
+              preview_url: vimeoResult.url,
+              country: 'vimeo',
+              youtube_key: null,
+              source: 'vimeo'
+            });
+            console.log(`✓ Got URL from Vimeo`);
+            successTracker.recordSourceSuccess('vimeo');
+            return {
+              found: true,
+              source: 'vimeo',
+              previewUrl: vimeoResult.url,
+              youtubeKey: null,
+              country: 'vimeo',
+              quality: quality
+            };
+          } else {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            successTracker.recordSourceFailure('vimeo');
+            return null;
+          }
+        } else if (source === 'dailymotion') {
+          // Dailymotion - resolve URL and extract
+          const dailymotionUrl = await resolveDailymotionUrl(tmdbMeta, imdbId);
+          if (!dailymotionUrl) {
+            console.log(`  Skipping Dailymotion: no URL available`);
+            successTracker.recordSourceFailure('dailymotion');
+            return null;
+          }
+          console.log(`  [Dailymotion] Resolved URL: ${dailymotionUrl}`);
+          const dailymotionResult = await extractViaYtDlpGeneric(dailymotionUrl, 'Dailymotion');
+          if (dailymotionResult && dailymotionResult.url) {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            
+            const quality = dailymotionResult.quality || 'best';
+            qualityTracker.recordQuality('dailymotion', quality);
+            
+            setCache(imdbId, {
+              track_id: null,
+              preview_url: dailymotionResult.url,
+              country: 'dailymotion',
+              youtube_key: null,
+              source: 'dailymotion'
+            });
+            console.log(`✓ Got URL from Dailymotion`);
+            successTracker.recordSourceSuccess('dailymotion');
+            return {
+              found: true,
+              source: 'dailymotion',
+              previewUrl: dailymotionResult.url,
+              youtubeKey: null,
+              country: 'dailymotion',
+              quality: quality
+            };
+          } else {
+            const duration = Date.now() - startTime;
+            sourceResponseTimes.recordTime('ytdlp', duration);
+            successTracker.recordSourceFailure('dailymotion');
+            return null;
+          }
         } else if (source === 'ytdlp_other') {
-          // Handle non-YouTube video sites (Vimeo, Dailymotion, etc.) via generic yt-dlp extractor
+          // Handle other video sites (Facebook, Twitter, Instagram, etc.) via generic yt-dlp extractor
           if (!tmdbMeta.trailerUrl || !tmdbMeta.trailerSite) {
             console.log(`  Skipping yt-dlp (other): no trailer URL available`);
             successTracker.recordSourceFailure('ytdlp');
@@ -3149,10 +3263,9 @@ async function resolvePreview(imdbId, type) {
             return null;
           }
         } else if (source === 'iva_trailer') {
-          // Internet Video Archive (IVA) - historically used by many apps for trailers
-          // yt-dlp supports: https://www.internetvideoarchive.com/
-          // Try with IMDb ID first (most reliable)
-          const ivaUrl = imdbId ? `https://www.internetvideoarchive.com/video/${imdbId}` : `https://www.internetvideoarchive.com/search?q=${encodeURIComponent(tmdbMeta.title)}`;
+          // Internet Video Archive (IVA) - resolve URL and extract
+          const ivaUrl = await resolveIvaUrl(tmdbMeta, imdbId);
+          console.log(`  [IVA] Resolved URL: ${ivaUrl}`);
           const ivaResult = await extractViaYtDlpGeneric(ivaUrl, 'InternetVideoArchive');
           if (ivaResult && ivaResult.url) {
             const duration = Date.now() - startTime;
@@ -3322,45 +3435,6 @@ async function resolvePreview(imdbId, type) {
             const duration = Date.now() - startTime;
             sourceResponseTimes.recordTime('ytdlp', duration);
             successTracker.recordSourceFailure('allocine');
-            return null;
-          }
-        } else if (source === 'invidious') {
-          if (!tmdbMeta.youtubeTrailerKey) {
-            console.log(`  Skipping Invidious: no YouTube key available`);
-            successTracker.recordSourceFailure('invidious');
-            return null;
-          }
-          console.log(`YouTube key: ${tmdbMeta.youtubeTrailerKey}`);
-          const invidiousResult = await extractViaInvidious(tmdbMeta.youtubeTrailerKey);
-          if (invidiousResult) {
-            const duration = Date.now() - startTime;
-            sourceResponseTimes.recordTime('invidious', duration);
-            
-            const invidiousUrl = typeof invidiousResult === 'string' ? invidiousResult : invidiousResult.url;
-            const quality = typeof invidiousResult === 'object' ? (invidiousResult.quality || 'unknown') : 'unknown';
-            qualityTracker.recordQuality('invidious', quality);
-            
-            setCache(imdbId, {
-              track_id: null,
-              preview_url: invidiousUrl,
-              country: 'yt',
-              youtube_key: tmdbMeta.youtubeTrailerKey,
-              source: 'youtube'
-            });
-            console.log(`✓ Got URL from Invidious`);
-            successTracker.recordSourceSuccess('invidious');
-            return {
-              found: true,
-              source: 'youtube',
-              previewUrl: invidiousUrl,
-              youtubeKey: tmdbMeta.youtubeTrailerKey,
-              country: 'yt',
-              quality: quality
-            };
-          } else {
-            const duration = Date.now() - startTime;
-            sourceResponseTimes.recordTime('invidious', duration);
-            successTracker.recordSourceFailure('invidious');
             return null;
           }
         } else if (source === 'archive') {
