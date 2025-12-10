@@ -317,7 +317,7 @@ const circuitBreakers = {
   piped: new Map(), // instance URL -> { failures: number, lastFailure: timestamp, open: boolean }
   invidious: new Map(), // instance URL -> { failures: number, lastFailure: timestamp, open: boolean }
   CIRCUIT_OPEN_THRESHOLD: 5, // Open circuit after 5 consecutive failures
-  CIRCUIT_RESET_TIME: 10 * 60 * 1000, // Reset after 10 minutes
+  CIRCUIT_RESET_TIME: 2 * 60 * 1000, // Reset after 2 minutes (faster recovery)
 };
 
 // Source response time tracking (for dynamic timeouts)
@@ -1838,7 +1838,7 @@ async function extractViaYtDlp(youtubeKey) {
     
     // Race against timeout
     const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('yt-dlp timeout')), 12000)
+      setTimeout(() => reject(new Error('yt-dlp timeout')), 20000) // 20 seconds
     );
     
     let stdout, stderr;
@@ -1867,7 +1867,7 @@ async function extractViaYtDlp(youtubeKey) {
             maxBuffer: 10 * 1024 * 1024
           });
           const noProxyTimeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('yt-dlp timeout')), 12000)
+            setTimeout(() => reject(new Error('yt-dlp timeout')), 20000) // 20 seconds
           );
           ({ stdout, stderr } = await Promise.race([noProxyExecPromise, noProxyTimeoutPromise]));
           console.log(`  [yt-dlp] ✓ Direct connection worked!`);
@@ -2660,10 +2660,11 @@ async function validateUrl(url, timeout = 2000) {
     
     clearTimeout(timeoutId);
     
-    // Accept 200 (OK), 206 (Partial Content), or 403 (YouTube often blocks HEAD but URL works)
+    // Accept 200 (OK), 206 (Partial Content), or 403 (YouTube/googlevideo often blocks HEAD but URL works)
     // 403 is common for YouTube URLs - they block HEAD requests but streaming works fine
+    // googlevideo.com URLs (from yt-dlp) also return 403 on HEAD but work for streaming
     const isValid = response.ok || response.status === 206 || 
-                   (response.status === 403 && url.includes('youtube.com'));
+                   (response.status === 403 && (url.includes('youtube.com') || url.includes('googlevideo.com')));
     
     return isValid;
   } catch (error) {
@@ -2913,7 +2914,8 @@ async function resolvePreview(imdbId, type) {
     logger.source(source, `Attempting extraction...`);
     
     // Get dynamic timeout for this source
-    const defaultTimeout = 10000; // 10 seconds default
+    // yt-dlp needs longer timeout (20s) due to proxy, others can be faster
+    const defaultTimeout = source === 'ytdlp' ? 20000 : 10000;
     const sourceTimeout = sourceResponseTimes.getTimeout(source, defaultTimeout);
     
     try {
