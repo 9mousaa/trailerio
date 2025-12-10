@@ -397,33 +397,45 @@ const successTracker = {
   ytdlp: successTrackerData.ytdlp || new Map(), // extraction identifier -> { success: number, total: number }
   
   // Database operations - with timeout protection
+  // Batch DB writes to reduce CPU overhead (async, non-blocking)
+  _dbWriteQueue: [],
+  _dbWriteTimer: null,
   _saveToDB(type, identifier, success, total) {
+    // Queue write instead of blocking
+    this._dbWriteQueue.push({ type, identifier, success, total });
+    
+    // Batch writes every 100ms to reduce CPU overhead
+    if (!this._dbWriteTimer) {
+      this._dbWriteTimer = setImmediate(() => {
+        this._flushDBWrites();
+        this._dbWriteTimer = null;
+      });
+    }
+  },
+  _flushDBWrites() {
+    if (this._dbWriteQueue.length === 0) return;
+    
+    const writes = this._dbWriteQueue.splice(0); // Clear queue
+    const stmt = db.prepare(`
+      INSERT INTO success_tracker (type, identifier, success, total)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(type, identifier) DO UPDATE SET success = ?, total = ?
+    `);
+    
+    // Batch execute all writes in a transaction (much faster)
+    const transaction = db.transaction((writes) => {
+      for (const { type, identifier, success, total } of writes) {
+        stmt.run(type, identifier, success, total, success, total);
+      }
+    });
+    
     try {
-      const startTime = Date.now();
-      const stmt = db.prepare(`
-        INSERT INTO success_tracker (type, identifier, success, total)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(type, identifier) DO UPDATE SET success = ?, total = ?
-      `);
-      stmt.run(type, identifier, success, total, success, total);
-      const duration = Date.now() - startTime;
-      // Warn if DB write is slow (might indicate contention)
-      if (duration > 50) {
-        console.warn(`[SuccessTracker] Slow DB write: ${duration}ms for ${type}/${identifier}`);
-      }
-      // Make DB writes non-blocking by using setImmediate for slow writes
-      if (duration > 100) {
-        // For very slow writes, log but don't block
-        setImmediate(() => {
-          console.warn(`[SuccessTracker] Very slow DB write completed: ${duration}ms for ${type}/${identifier}`);
-        });
-      }
+      transaction(writes);
     } catch (error) {
-      // Don't spam logs for database locked errors (common with concurrent writes)
+      // Don't spam logs for database locked errors
       if (!error.message.includes('database is locked') && !error.message.includes('SQLITE_BUSY')) {
         console.error(`[SuccessTracker] Database error: ${error.message}`);
       }
-      // Continue - in-memory tracking still works
     }
   },
   
@@ -746,20 +758,60 @@ function normalizeTitle(s) {
     .trim();
 }
 
+// Cache fuzzy match results to reduce CPU usage
+const fuzzyMatchCache = new Map();
+const MAX_FUZZY_CACHE = 1000;
+
 function fuzzyMatch(str1, str2) {
+  // Fast path: exact match
+  if (str1 === str2) return 1.0;
+  
+  // Check cache (reduces CPU-intensive Levenshtein calculations)
+  const cacheKey = `${str1}|${str2}`;
+  if (fuzzyMatchCache.has(cacheKey)) {
+    return fuzzyMatchCache.get(cacheKey);
+  }
+  
   const norm1 = normalizeTitle(str1);
   const norm2 = normalizeTitle(str2);
   
-  if (norm1 === norm2) return 1.0;
-  if (norm1.includes(norm2) || norm2.includes(norm1)) return 0.85;
+  if (norm1 === norm2) {
+    fuzzyMatchCache.set(cacheKey, 1.0);
+    return 1.0;
+  }
+  
+  // Fast substring check (much faster than Levenshtein)
+  if (norm1.includes(norm2) || norm2.includes(norm1)) {
+    fuzzyMatchCache.set(cacheKey, 0.85);
+    return 0.85;
+  }
+  
+  // Skip Levenshtein for very long strings (too CPU-intensive)
+  if (norm1.length > 50 || norm2.length > 50) {
+    fuzzyMatchCache.set(cacheKey, 0.5);
+    return 0.5; // Conservative score for long strings
+  }
   
   const longer = norm1.length > norm2.length ? norm1 : norm2;
   const shorter = norm1.length > norm2.length ? norm2 : norm1;
   
-  if (longer.length === 0) return 1.0;
+  if (longer.length === 0) {
+    fuzzyMatchCache.set(cacheKey, 1.0);
+    return 1.0;
+  }
   
   const editDistance = levenshteinDistance(longer, shorter);
-  return (longer.length - editDistance) / longer.length;
+  const score = (longer.length - editDistance) / longer.length;
+  
+  // Cache result (limit cache size to prevent memory bloat)
+  if (fuzzyMatchCache.size >= MAX_FUZZY_CACHE) {
+    // Remove oldest entries (simple FIFO)
+    const firstKey = fuzzyMatchCache.keys().next().value;
+    fuzzyMatchCache.delete(firstKey);
+  }
+  fuzzyMatchCache.set(cacheKey, score);
+  
+  return score;
 }
 
 function levenshteinDistance(s1, s2) {
