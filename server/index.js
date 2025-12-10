@@ -1298,13 +1298,12 @@ async function extractViaYtDlp(youtubeKey) {
   const timeout = setTimeout(() => controller.abort(), 12000); // 12s timeout
   
   try {
-    // Check if gluetun proxy is available
-    // Default to gluetun:8000 if not explicitly set (gluetun is on same Docker network)
-    let gluetunProxy = process.env.GLUETUN_HTTP_PROXY || 'http://gluetun:8000';
-    
-    // Try to verify proxy is accessible by checking gluetun's control API
-    // This is more reliable than trying to proxy a request
+    // Check if gluetun is available
+    // Port 8000 is the control server, not the HTTP proxy
+    // Use SOCKS5 proxy (port 1080) which is more reliable and doesn't have auth issues
     let proxyAvailable = false;
+    let gluetunProxy = 'socks5://gluetun:1080'; // Use SOCKS5 by default
+    
     try {
       // Check gluetun's control API to see if it's running and configured
       const gluetunStatus = await fetch('http://gluetun:8000/v1/openvpn/status', {
@@ -1313,10 +1312,10 @@ async function extractViaYtDlp(youtubeKey) {
       }).catch(() => null);
       
       // If we get any response (even error), gluetun is running
-      // The proxy should be available if gluetun is running with HTTP_PROXY=on
+      // SOCKS5 proxy should be available if gluetun is running with SOCKS5_SERVER=on
       if (gluetunStatus !== null) {
         proxyAvailable = true;
-        console.log(`  [yt-dlp] ✓ Gluetun proxy detected at ${gluetunProxy}`);
+        console.log(`  [yt-dlp] ✓ Gluetun detected, using SOCKS5 proxy at ${gluetunProxy}`);
       } else {
         console.log(`  [yt-dlp] ⚠ Gluetun not reachable, using direct connection`);
       }
@@ -1326,11 +1325,9 @@ async function extractViaYtDlp(youtubeKey) {
       console.log(`  [yt-dlp] ⚠ Gluetun check failed: ${proxyError.message}, using direct connection`);
     }
     
-    // Try HTTP proxy first, fallback to SOCKS5 if HTTP fails
-    // Gluetun supports both HTTP (port 8000) and SOCKS5 (port 1080)
+    // Use SOCKS5 proxy (more reliable than HTTP proxy, no auth issues)
     let useProxy = '';
     if (proxyAvailable) {
-      // Try HTTP proxy first
       useProxy = `--proxy ${gluetunProxy}`;
     }
     
@@ -1381,26 +1378,26 @@ async function extractViaYtDlp(youtubeKey) {
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
       
-      // Check if it's a 401/authentication error with HTTP proxy, try SOCKS5 as fallback
+      // If SOCKS5 proxy failed, try direct connection as fallback
       const errorMsg = (raceError.stderr || raceError.message || '').toString();
-      if (proxyAvailable && (errorMsg.includes('401') || errorMsg.includes('Unauthorized') || errorMsg.includes('Tunnel connection failed'))) {
-        console.log(`  [yt-dlp] ⚠ HTTP proxy failed with auth error, trying SOCKS5...`);
-        // Retry with SOCKS5 proxy
-        const socks5Proxy = 'socks5://gluetun:1080';
-        const socks5Command = ytDlpCommand.replace(`--proxy ${gluetunProxy}`, `--proxy ${socks5Proxy}`);
+      if (proxyAvailable && (errorMsg.includes('401') || errorMsg.includes('Unauthorized') || errorMsg.includes('Tunnel connection failed') || errorMsg.includes('Connection refused'))) {
+        console.log(`  [yt-dlp] ⚠ SOCKS5 proxy failed, trying direct connection (no proxy)...`);
+        // Retry without proxy
+        const noProxyCommand = ytDlpCommand.replace(`--proxy ${gluetunProxy}`, '');
         try {
-          const socks5ExecPromise = execAsync(socks5Command, {
+          const noProxyExecPromise = execAsync(noProxyCommand, {
             timeout: 12000,
             maxBuffer: 10 * 1024 * 1024
           });
-          const socks5TimeoutPromise = new Promise((_, reject) => 
+          const noProxyTimeoutPromise = new Promise((_, reject) => 
             setTimeout(() => reject(new Error('yt-dlp timeout')), 12000)
           );
-          ({ stdout, stderr } = await Promise.race([socks5ExecPromise, socks5TimeoutPromise]));
-          console.log(`  [yt-dlp] ✓ SOCKS5 proxy worked!`);
-        } catch (socks5Error) {
-          // SOCKS5 also failed, continue with original error
-          console.log(`  [yt-dlp] ✗ SOCKS5 proxy also failed`);
+          ({ stdout, stderr } = await Promise.race([noProxyExecPromise, noProxyTimeoutPromise]));
+          console.log(`  [yt-dlp] ✓ Direct connection worked!`);
+        } catch (noProxyError) {
+          // Direct connection also failed, log and continue with original error
+          const noProxyErrorMsg = (noProxyError.stderr || noProxyError.message || '').toString();
+          console.log(`  [yt-dlp] ✗ Direct connection also failed: ${noProxyErrorMsg.substring(0, 200)}`);
           // Fall through to original error handling
         }
       }
