@@ -4046,11 +4046,12 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   
     if (result.found && result.previewUrl) {
       const isYouTube = result.source === 'youtube';
+      // For series, if we got a YouTube trailer, call it "Show Trailer" instead of "Episode Preview"
       const streamName = isYouTube 
-        ? 'Official Trailer' 
+        ? (type === 'series' ? 'Show Trailer' : 'Official Trailer')
         : (type === 'movie' ? 'Movie Preview' : 'Episode Preview');
       const streamTitle = isYouTube 
-        ? 'Official Trailer' 
+        ? (type === 'series' ? 'Show Trailer' : 'Official Trailer')
         : `Trailer / Preview (${result.country?.toUpperCase() || 'US'})`;
       
       let finalUrl = result.previewUrl;
