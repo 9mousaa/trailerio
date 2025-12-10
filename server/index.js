@@ -1664,7 +1664,7 @@ async function extractViaYtDlpGeneric(videoUrl, siteName = 'unknown') {
       
       // Age-restricted videos can't be extracted without cookies - skip proxy retry for these
       if (errorMsg.includes('Sign in to confirm your age') || errorMsg.includes('age-restricted')) {
-        logger.warn('yt-dlp', `Age-restricted video (requires cookies): ${youtubeKey}`);
+        logger.warn('yt-dlp', `Age-restricted video (requires cookies): ${videoUrl}`);
         return null; // Can't extract age-restricted videos without cookies
       }
       
