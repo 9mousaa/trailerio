@@ -3213,16 +3213,21 @@ async function resolvePreview(imdbId, type) {
   }
   
   // Build list of available sources based on what we have
-  // Skip iTunes for movies - iTunes doesn't have movie previews, only TV episode previews
+  // For series: Prioritize show trailers (YouTube) over episode previews (iTunes)
+  // This allows testing with show trailers in the first episode
   const availableSources = [];
-  if (type === 'series') {
-    availableSources.push('itunes'); // iTunes works for TV shows
-  }
   
-  // Add video sources (YouTube via yt-dlp with Cloudflare Warp proxy)
+  // Add video sources (YouTube via yt-dlp with Cloudflare Warp proxy) - HIGHEST PRIORITY
+  // For series, this gives us the show's trailer instead of episode previews
   if (tmdbMeta.youtubeTrailerKey) {
     // YouTube: yt-dlp only (Piped/Invidious removed - unreliable)
     availableSources.push('ytdlp');
+  }
+  
+  // iTunes episode previews - LOWER PRIORITY (only if no trailer found)
+  // Skip iTunes for movies - iTunes doesn't have movie previews, only TV episode previews
+  if (type === 'series') {
+    availableSources.push('itunes'); // iTunes works for TV shows (episode previews)
   }
   
   
