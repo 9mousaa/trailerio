@@ -227,24 +227,44 @@ generate_warp_config() {
     # Output the values to stdout (will be captured by caller)
     # Use printf to avoid issues with special characters
     # Ensure keys are exactly the right length (44 chars for base64 32-byte keys)
-    # Remove any trailing newlines or extra characters
-    private_key=$(echo -n "$private_key" | tr -d '\n\r\t ')
-    server_public_key=$(echo -n "$server_public_key" | tr -d '\n\r\t ')
-    preshared_key=$(echo -n "$preshared_key" | tr -d '\n\r\t ')
+    # Remove any trailing newlines or extra characters (but preserve = padding)
+    private_key=$(echo -n "$private_key" | tr -d '\n\r\t ' | sed 's/[[:space:]]*$//')
+    server_public_key=$(echo -n "$server_public_key" | tr -d '\n\r\t ' | sed 's/[[:space:]]*$//')
+    preshared_key=$(echo -n "$preshared_key" | tr -d '\n\r\t ' | sed 's/[[:space:]]*$//')
     
     # CRITICAL: Ensure private key is exactly 44 characters (base64 padding)
-    # WireGuard keys are 32 bytes = 44 base64 chars (with = padding)
-    # If key is 43 chars, it's missing the = padding
-    if [ ${#private_key} -eq 43 ]; then
-        private_key="${private_key}="
-        log_info "Added = padding to private key for instance ${instance_num}"
-    fi
-    
-    # Validate final key length
-    if [ ${#private_key} -ne 44 ]; then
-        log_error "Private key for instance ${instance_num} is ${#private_key} chars (expected 44)"
+    # WireGuard private keys are 32 bytes = 43 base64 chars (without padding) = 44 with = padding
+    # Base64 encoding: 32 bytes = 256 bits = 42.67 base64 chars, rounded to 43, padded to 44
+    # Handle all cases: 40-43 chars need padding to 44
+    local key_len=${#private_key}
+    if [ $key_len -lt 40 ] || [ $key_len -gt 44 ]; then
+        log_error "Private key for instance ${instance_num} has invalid length: ${key_len} chars (expected 40-44)"
         return 1
     fi
+    
+    # Pad to exactly 44 characters with = (base64 padding)
+    while [ ${#private_key} -lt 44 ]; do
+        private_key="${private_key}="
+    done
+    
+    # Remove any extra padding (shouldn't happen, but safety check)
+    if [ ${#private_key} -gt 44 ]; then
+        private_key="${private_key:0:44}"
+    fi
+    
+    # Validate final key length is exactly 44
+    if [ ${#private_key} -ne 44 ]; then
+        log_error "Private key for instance ${instance_num} is ${#private_key} chars after padding (expected 44)"
+        return 1
+    fi
+    
+    # Validate base64 format (should end with = and contain only base64 chars)
+    if ! echo "$private_key" | grep -qE '^[A-Za-z0-9+/]+=+$'; then
+        log_error "Private key for instance ${instance_num} has invalid base64 format"
+        return 1
+    fi
+    
+    log_info "Private key for instance ${instance_num} validated: ${key_len} -> 44 chars"
     
     printf "PRIVATE_KEY=%s\n" "$private_key"
     printf "ADDRESS=%s\n" "$address"
@@ -294,36 +314,113 @@ update_env_file() {
     rm -f "${ENV_FILE}.bak"
     
     # Append new values (ensure no trailing newlines in values)
-    # Clean all values one more time before writing
-    private_key=$(echo -n "$private_key" | tr -d '\n\r\t ')
-    public_key=$(echo -n "$public_key" | tr -d '\n\r\t ')
-    preshared_key=$(echo -n "$preshared_key" | tr -d '\n\r\t ')
+    # Clean all values one more time before writing (preserve = padding)
+    private_key=$(echo -n "$private_key" | tr -d '\n\r\t ' | sed 's/[[:space:]]*$//')
+    public_key=$(echo -n "$public_key" | tr -d '\n\r\t ' | sed 's/[[:space:]]*$//')
+    preshared_key=$(echo -n "$preshared_key" | tr -d '\n\r\t ' | sed 's/[[:space:]]*$//')
     address=$(echo -n "$address" | tr -d '\n\r\t ')
     endpoint_ip=$(echo -n "$endpoint_ip" | tr -d '\n\r\t ')
     endpoint_port=$(echo -n "$endpoint_port" | tr -d '\n\r\t ')
     
     # CRITICAL: Ensure private key is exactly 44 characters (base64 padding)
-    # WireGuard keys are 32 bytes = 44 base64 chars (with = padding)
-    # If key is 43 chars, it's missing the = padding
-    if [ ${#private_key} -eq 43 ]; then
-        private_key="${private_key}="
-        log_info "Added = padding to private key for instance ${instance_num}"
+    # WireGuard private keys are 32 bytes = 43 base64 chars (without padding) = 44 with = padding
+    local original_key_len=${#private_key}
+    if [ $original_key_len -lt 40 ] || [ $original_key_len -gt 44 ]; then
+        log_error "Private key for instance ${instance_num} has invalid length: ${original_key_len} chars (expected 40-44) - SKIPPING"
+        return 1
     fi
     
-    # Validate final key length
+    # Pad to exactly 44 characters with = (base64 padding)
+    while [ ${#private_key} -lt 44 ]; do
+        private_key="${private_key}="
+    done
+    
+    # Remove any extra padding (shouldn't happen, but safety check)
+    if [ ${#private_key} -gt 44 ]; then
+        private_key="${private_key:0:44}"
+    fi
+    
+    # Validate final key length is exactly 44
     if [ ${#private_key} -ne 44 ]; then
-        log_error "Private key for instance ${instance_num} is ${#private_key} chars (expected 44) - SKIPPING"
+        log_error "Private key for instance ${instance_num} is ${#private_key} chars after padding (expected 44) - SKIPPING"
+        return 1
+    fi
+    
+    # Validate base64 format
+    if ! echo "$private_key" | grep -qE '^[A-Za-z0-9+/]+=+$'; then
+        log_error "Private key for instance ${instance_num} has invalid base64 format - SKIPPING"
+        return 1
+    fi
+    
+    if [ $original_key_len -ne 44 ]; then
+        log_info "Padded private key for instance ${instance_num}: ${original_key_len} -> 44 chars"
+    fi
+    
+    # Final validation before writing
+    if [ ${#private_key} -ne 44 ]; then
+        log_error "FINAL CHECK FAILED: Private key for instance ${instance_num} is ${#private_key} chars (expected 44) - NOT WRITING"
         return 1
     fi
     
     echo "" >> "$ENV_FILE"
     echo "# Cloudflare Warp Instance ${instance_num}" >> "$ENV_FILE"
-    printf "WIREGUARD_PRIVATE_KEY_%s=%s\n" "${instance_num}" "${private_key}" >> "$ENV_FILE"
-    printf "WIREGUARD_ADDRESSES_%s=%s\n" "${instance_num}" "${address}" >> "$ENV_FILE"
-    printf "WIREGUARD_PUBLIC_KEY_%s=%s\n" "${instance_num}" "${public_key}" >> "$ENV_FILE"
-    printf "WIREGUARD_PRESHARED_KEY_%s=%s\n" "${instance_num}" "${preshared_key}" >> "$ENV_FILE"
-    printf "WIREGUARD_ENDPOINT_IP_%s=%s\n" "${instance_num}" "${endpoint_ip}" >> "$ENV_FILE"
-    printf "WIREGUARD_ENDPOINT_PORT_%s=%s\n" "${instance_num}" "${endpoint_port}" >> "$ENV_FILE"
+    # Use printf with %s to ensure exact key is written (no variable expansion)
+    printf '%s=%s\n' "WIREGUARD_PRIVATE_KEY_${instance_num}" "${private_key}" >> "$ENV_FILE"
+    printf '%s=%s\n' "WIREGUARD_ADDRESSES_${instance_num}" "${address}" >> "$ENV_FILE"
+    printf '%s=%s\n' "WIREGUARD_PUBLIC_KEY_${instance_num}" "${public_key}" >> "$ENV_FILE"
+    printf '%s=%s\n' "WIREGUARD_PRESHARED_KEY_${instance_num}" "${preshared_key}" >> "$ENV_FILE"
+    printf '%s=%s\n' "WIREGUARD_ENDPOINT_IP_${instance_num}" "${endpoint_ip}" >> "$ENV_FILE"
+    printf '%s=%s\n' "WIREGUARD_ENDPOINT_PORT_${instance_num}" "${endpoint_port}" >> "$ENV_FILE"
+    
+    # Verify what was written (read back and check)
+    local written_key=$(grep "^WIREGUARD_PRIVATE_KEY_${instance_num}=" "$ENV_FILE" | cut -d'=' -f2- | tr -d '\n\r')
+    if [ ${#written_key} -ne 44 ]; then
+        log_error "VERIFICATION FAILED: Written key for instance ${instance_num} is ${#written_key} chars (expected 44)"
+        return 1
+    fi
+    
+    log_success "Instance ${instance_num} key written and verified: 44 chars"
+}
+
+# Verify all keys in .env file are correct length
+verify_env_keys() {
+    log_info "Verifying all WireGuard keys in .env file..."
+    local all_valid=true
+    local key_count=0
+    local invalid_count=0
+    
+    while IFS='=' read -r key value; do
+        # Skip comments and empty lines
+        [[ "$key" =~ ^#.*$ ]] && continue
+        [[ -z "$key" ]] && continue
+        
+        # Check if this is a private key variable
+        if [[ "$key" =~ ^WIREGUARD_PRIVATE_KEY ]]; then
+            key_count=$((key_count + 1))
+            # Remove any whitespace from value
+            value=$(echo -n "$value" | tr -d '\n\r\t ')
+            local key_len=${#value}
+            
+            if [ $key_len -ne 44 ]; then
+                log_error "  ✗ ${key}: ${key_len} chars (expected 44)"
+                invalid_count=$((invalid_count + 1))
+                all_valid=false
+            else
+                log_success "  ✓ ${key}: ${key_len} chars (correct)"
+            fi
+        fi
+    done < "$ENV_FILE"
+    
+    if [ $invalid_count -gt 0 ]; then
+        log_error "Found ${invalid_count}/${key_count} invalid private keys in .env file"
+        return 1
+    elif [ $key_count -eq 0 ]; then
+        log_warning "No WIREGUARD_PRIVATE_KEY variables found in .env file"
+        return 1
+    else
+        log_success "All ${key_count} private keys are valid (44 chars each)"
+        return 0
+    fi
 }
 
 # Main execution
@@ -367,22 +464,52 @@ main() {
                 
                 while IFS= read -r line; do
                     if [[ "$line" =~ ^PRIVATE_KEY=(.+)$ ]]; then
+                        # Extract and clean the key (preserve = padding)
                         parsed_private_key="${BASH_REMATCH[1]}"
+                        parsed_private_key=$(echo -n "$parsed_private_key" | tr -d '\n\r\t ' | sed 's/[[:space:]]*$//')
                     elif [[ "$line" =~ ^ADDRESS=(.+)$ ]]; then
                         parsed_address="${BASH_REMATCH[1]}"
+                        parsed_address=$(echo -n "$parsed_address" | tr -d '\n\r\t ')
                     elif [[ "$line" =~ ^PUBLIC_KEY=(.+)$ ]]; then
                         parsed_public_key="${BASH_REMATCH[1]}"
+                        parsed_public_key=$(echo -n "$parsed_public_key" | tr -d '\n\r\t ' | sed 's/[[:space:]]*$//')
                     elif [[ "$line" =~ ^PRESHARED_KEY=(.+)$ ]]; then
                         parsed_preshared_key="${BASH_REMATCH[1]}"
+                        parsed_preshared_key=$(echo -n "$parsed_preshared_key" | tr -d '\n\r\t ' | sed 's/[[:space:]]*$//')
                     elif [[ "$line" =~ ^ENDPOINT_IP=(.+)$ ]]; then
                         parsed_endpoint_ip="${BASH_REMATCH[1]}"
+                        parsed_endpoint_ip=$(echo -n "$parsed_endpoint_ip" | tr -d '\n\r\t ')
                     elif [[ "$line" =~ ^ENDPOINT_PORT=(.+)$ ]]; then
                         parsed_endpoint_port="${BASH_REMATCH[1]}"
+                        parsed_endpoint_port=$(echo -n "$parsed_endpoint_port" | tr -d '\n\r\t ')
                     fi
                 done <<< "$config_output"
                 
+                # CRITICAL: Ensure private key is exactly 44 characters after parsing
+                if [ -n "$parsed_private_key" ]; then
+                    local key_len=${#parsed_private_key}
+                    if [ $key_len -lt 40 ] || [ $key_len -gt 44 ]; then
+                        log_error "Parsed private key has invalid length: ${key_len} chars (expected 40-44)"
+                        parsed_private_key=""
+                    else
+                        # Pad to exactly 44 characters
+                        while [ ${#parsed_private_key} -lt 44 ]; do
+                            parsed_private_key="${parsed_private_key}="
+                        done
+                        # Safety: truncate if somehow longer
+                        if [ ${#parsed_private_key} -gt 44 ]; then
+                            parsed_private_key="${parsed_private_key:0:44}"
+                        fi
+                        # Final validation
+                        if [ ${#parsed_private_key} -ne 44 ]; then
+                            log_error "Private key padding failed: ${#parsed_private_key} chars (expected 44)"
+                            parsed_private_key=""
+                        fi
+                    fi
+                fi
+                
                 # Validate parsed values
-                if [ -n "$parsed_private_key" ] && [ -n "$parsed_address" ] && [ -n "$parsed_public_key" ] && [ -n "$parsed_endpoint_ip" ]; then
+                if [ -n "$parsed_private_key" ] && [ ${#parsed_private_key} -eq 44 ] && [ -n "$parsed_address" ] && [ -n "$parsed_public_key" ] && [ -n "$parsed_endpoint_ip" ]; then
                     # Update .env file
                     update_env_file "$i" "$parsed_private_key" "$parsed_address" "$parsed_public_key" "${parsed_preshared_key:-}" "$parsed_endpoint_ip" "${parsed_endpoint_port:-2408}"
                     
@@ -420,6 +547,13 @@ main() {
     if [ $success_count -lt $NUM_INSTANCES ]; then
         log_warning "Some instances failed to configure. Check the logs above."
         log_info "You can run this script again to retry failed instances."
+    fi
+    
+    echo ""
+    # CRITICAL: Verify all keys are correct length before finishing
+    if ! verify_env_keys; then
+        log_error "KEY VERIFICATION FAILED - Some keys are invalid. Please review and fix."
+        return 1
     fi
     
     echo ""
