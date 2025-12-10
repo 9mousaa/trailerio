@@ -364,22 +364,41 @@ update_env_file() {
     
     echo "" >> "$ENV_FILE"
     echo "# Cloudflare Warp Instance ${instance_num}" >> "$ENV_FILE"
-    # Use printf with %s to ensure exact key is written (no variable expansion)
-    printf '%s=%s\n' "WIREGUARD_PRIVATE_KEY_${instance_num}" "${private_key}" >> "$ENV_FILE"
-    printf '%s=%s\n' "WIREGUARD_ADDRESSES_${instance_num}" "${address}" >> "$ENV_FILE"
-    printf '%s=%s\n' "WIREGUARD_PUBLIC_KEY_${instance_num}" "${public_key}" >> "$ENV_FILE"
-    printf '%s=%s\n' "WIREGUARD_PRESHARED_KEY_${instance_num}" "${preshared_key}" >> "$ENV_FILE"
-    printf '%s=%s\n' "WIREGUARD_ENDPOINT_IP_${instance_num}" "${endpoint_ip}" >> "$ENV_FILE"
-    printf '%s=%s\n' "WIREGUARD_ENDPOINT_PORT_${instance_num}" "${endpoint_port}" >> "$ENV_FILE"
+    
+    # CRITICAL: Write the private key with explicit formatting to preserve = padding
+    # Write variable name, then =, then value, then newline separately
+    printf 'WIREGUARD_PRIVATE_KEY_%s=' "${instance_num}" >> "$ENV_FILE"
+    printf '%s' "${private_key}" >> "$ENV_FILE"
+    printf '\n' >> "$ENV_FILE"
+    
+    # Write other variables normally
+    printf 'WIREGUARD_ADDRESSES_%s=%s\n' "${instance_num}" "${address}" >> "$ENV_FILE"
+    printf 'WIREGUARD_PUBLIC_KEY_%s=%s\n' "${instance_num}" "${public_key}" >> "$ENV_FILE"
+    printf 'WIREGUARD_PRESHARED_KEY_%s=%s\n' "${instance_num}" "${preshared_key}" >> "$ENV_FILE"
+    printf 'WIREGUARD_ENDPOINT_IP_%s=%s\n' "${instance_num}" "${endpoint_ip}" >> "$ENV_FILE"
+    printf 'WIREGUARD_ENDPOINT_PORT_%s=%s\n' "${instance_num}" "${endpoint_port}" >> "$ENV_FILE"
     
     # Verify what was written (read back and check)
-    local written_key=$(grep "^WIREGUARD_PRIVATE_KEY_${instance_num}=" "$ENV_FILE" | cut -d'=' -f2- | tr -d '\n\r')
-    if [ ${#written_key} -ne 44 ]; then
-        log_error "VERIFICATION FAILED: Written key for instance ${instance_num} is ${#written_key} chars (expected 44)"
+    # Use tail -1 to get the most recent line (in case there are duplicates from previous runs)
+    local written_key=$(grep "^WIREGUARD_PRIVATE_KEY_${instance_num}=" "$ENV_FILE" | tail -1 | cut -d'=' -f2- | tr -d '\n\r')
+    local written_len=${#written_key}
+    
+    if [ $written_len -ne 44 ]; then
+        log_error "VERIFICATION FAILED: Written key for instance ${instance_num} is ${written_len} chars (expected 44)"
+        log_error "  Original key length before write: ${#private_key} chars"
+        log_error "  Written key preview: '${written_key:0:20}...${written_key: -5}'"
+        log_error "  Last char: '${written_key: -1}' (expected '=')"
         return 1
     fi
     
-    log_success "Instance ${instance_num} key written and verified: 44 chars"
+    # Double-check: verify the last character is =
+    if [ "${written_key: -1}" != "=" ]; then
+        log_error "VERIFICATION FAILED: Written key for instance ${instance_num} does not end with ="
+        log_error "  Last character: '${written_key: -1}' (ASCII: $(printf '%d' "'${written_key: -1}"))"
+        return 1
+    fi
+    
+    log_success "Instance ${instance_num} key written and verified: 44 chars (ends with =)"
 }
 
 # Verify all keys in .env file are correct length
@@ -389,25 +408,33 @@ verify_env_keys() {
     local key_count=0
     local invalid_count=0
     
-    while IFS='=' read -r key value; do
+    # Use grep to find all WIREGUARD_PRIVATE_KEY lines, then parse with cut
+    # This is more reliable than IFS='=' read when values contain = signs
+    while IFS= read -r line; do
         # Skip comments and empty lines
-        [[ "$key" =~ ^#.*$ ]] && continue
-        [[ -z "$key" ]] && continue
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$line" ]] && continue
+        [[ ! "$line" =~ ^WIREGUARD_PRIVATE_KEY ]] && continue
         
-        # Check if this is a private key variable
-        if [[ "$key" =~ ^WIREGUARD_PRIVATE_KEY ]]; then
-            key_count=$((key_count + 1))
-            # Remove any whitespace from value
-            value=$(echo -n "$value" | tr -d '\n\r\t ')
-            local key_len=${#value}
-            
-            if [ $key_len -ne 44 ]; then
-                log_error "  ✗ ${key}: ${key_len} chars (expected 44)"
-                invalid_count=$((invalid_count + 1))
-                all_valid=false
-            else
-                log_success "  ✓ ${key}: ${key_len} chars (correct)"
-            fi
+        # Extract key name and value using cut (handles = in values correctly)
+        local key=$(echo "$line" | cut -d'=' -f1 | tr -d '\n\r\t ')
+        local value=$(echo "$line" | cut -d'=' -f2- | tr -d '\n\r\t ')
+        
+        # Skip if key or value is empty
+        [[ -z "$key" ]] && continue
+        [[ -z "$value" ]] && continue
+        
+        key_count=$((key_count + 1))
+        local key_len=${#value}
+        
+        if [ $key_len -ne 44 ]; then
+            log_error "  ✗ ${key}: ${key_len} chars (expected 44)"
+            # Debug: show first and last few chars
+            log_info "    Debug: value starts with '${value:0:10}...' ends with '...${value: -5}'"
+            invalid_count=$((invalid_count + 1))
+            all_valid=false
+        else
+            log_success "  ✓ ${key}: ${key_len} chars (correct)"
         fi
     done < "$ENV_FILE"
     
