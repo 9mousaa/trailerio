@@ -141,6 +141,9 @@ db.exec(`
     youtube_key TEXT,
     source_type TEXT,
     source TEXT,
+    quality TEXT,
+    duration TEXT,
+    duration_seconds INTEGER,
     timestamp INTEGER
   );
   
@@ -155,6 +158,28 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_cache_timestamp ON cache(timestamp);
   CREATE INDEX IF NOT EXISTS idx_success_tracker_type ON success_tracker(type);
 `);
+
+// Migrate existing cache table to add new columns (if they don't exist)
+try {
+  const tableInfo = db.prepare("PRAGMA table_info(cache)").all();
+  const columnNames = tableInfo.map(col => col.name);
+  
+  if (!columnNames.includes('quality')) {
+    db.exec('ALTER TABLE cache ADD COLUMN quality TEXT');
+    console.log('Added quality column to cache table');
+  }
+  if (!columnNames.includes('duration')) {
+    db.exec('ALTER TABLE cache ADD COLUMN duration TEXT');
+    console.log('Added duration column to cache table');
+  }
+  if (!columnNames.includes('duration_seconds')) {
+    db.exec('ALTER TABLE cache ADD COLUMN duration_seconds INTEGER');
+    console.log('Added duration_seconds column to cache table');
+  }
+} catch (migrationError) {
+  // Migration failed, but continue - new installs will have the columns
+  console.log(`Cache table migration: ${migrationError.message}`);
+}
 
 // Load cache from database (limit to most recent entries to prevent memory issues)
 const cache = new Map();
@@ -172,6 +197,9 @@ for (const row of cacheRows) {
     youtube_key: row.youtube_key,
     source_type: row.source_type,
     source: row.source,
+    quality: row.quality || null,
+    duration: row.duration || null,
+    durationSeconds: row.duration_seconds || null,
     timestamp: row.timestamp
   });
 }
@@ -907,6 +935,21 @@ async function getTMDBMetadata(imdbId, type) {
   
   console.log(`TMDB: "${mainTitle}" (${year}), YouTube: ${youtubeTrailerKey || 'none'}, altTitles: ${altTitlesArray.length}`);
   
+  // Extract trailer metadata if available
+  let trailerMetadata = null;
+  if (trailer) {
+    trailerMetadata = {
+      type: trailer.type || 'Trailer', // Trailer, Teaser, Clip, etc.
+      official: trailer.official || false,
+      publishedAt: trailer.published_at || null, // ISO date string
+      site: trailer.site || 'YouTube',
+      size: trailer.size || null, // Video resolution (720, 1080, etc.)
+      iso_639_1: trailer.iso_639_1 || null, // Language code
+      iso_3166_1: trailer.iso_3166_1 || null, // Country code
+      name: trailer.name || null // Full trailer name
+    };
+  }
+  
   return {
     tmdbId,
     mediaType,
@@ -916,7 +959,8 @@ async function getTMDBMetadata(imdbId, type) {
     runtime,
     altTitles: altTitlesArray,
     youtubeTrailerKey,
-    youtubeTrailerTitle
+    youtubeTrailerTitle,
+    trailerMetadata // New: Rich trailer metadata
   };
 }
 
@@ -1243,7 +1287,23 @@ async function extractViaPiped(youtubeKey) {
       if (data.dash) {
         logger.source('piped', `${instance}: got DASH manifest (adaptive quality)`, true);
         successTracker.recordSuccess('piped', instance);
-        return { url: data.dash, isDash: true };
+        
+        // Extract duration if available
+        let duration = null;
+        let durationSeconds = null;
+        if (data.lengthSeconds) {
+          durationSeconds = Math.round(data.lengthSeconds);
+          const minutes = Math.floor(durationSeconds / 60);
+          const seconds = durationSeconds % 60;
+          duration = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+        }
+        
+        return { 
+          url: data.dash, 
+          isDash: true,
+          duration: duration,
+          durationSeconds: durationSeconds
+        };
       }
       
       // PRIORITY 2: Video streams (fallback if no DASH)
@@ -1270,13 +1330,47 @@ async function extractViaPiped(youtubeKey) {
           if (bestCombined) {
             console.log(`  ✓ [Piped] ${instance}: selected ${bestCombined.quality || 'unknown'} (combined, highest quality)`);
             successTracker.recordSuccess('piped', instance);
-            return { url: bestCombined.url, quality: bestCombined.quality, isDash: false };
+            
+            // Extract duration if available
+            let duration = null;
+            let durationSeconds = null;
+            if (data.lengthSeconds) {
+              durationSeconds = Math.round(data.lengthSeconds);
+              const minutes = Math.floor(durationSeconds / 60);
+              const seconds = durationSeconds % 60;
+              duration = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+            }
+            
+            return { 
+              url: bestCombined.url, 
+              quality: bestCombined.quality, 
+              isDash: false,
+              duration: duration,
+              durationSeconds: durationSeconds
+            };
           }
           // Fallback to video-only if no combined streams available
           const bestVideoOnly = sorted[0];
           console.log(`  ✓ [Piped] ${instance}: selected ${bestVideoOnly.quality || 'unknown'} (video-only, no combined available)`);
           successTracker.recordSuccess('piped', instance);
-          return { url: bestVideoOnly.url, quality: bestVideoOnly.quality, isDash: false };
+          
+          // Extract duration if available
+          let duration = null;
+          let durationSeconds = null;
+          if (data.lengthSeconds) {
+            durationSeconds = Math.round(data.lengthSeconds);
+            const minutes = Math.floor(durationSeconds / 60);
+            const seconds = durationSeconds % 60;
+            duration = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+          }
+          
+          return { 
+            url: bestVideoOnly.url, 
+            quality: bestVideoOnly.quality, 
+            isDash: false,
+            duration: duration,
+            durationSeconds: durationSeconds
+          };
         }
       }
       
@@ -1447,7 +1541,24 @@ async function extractViaInvidious(youtubeKey) {
           const best = sorted[0];
           console.log(`  ✓ [Invidious] ${instance}: got ${best.quality || 'unknown'} from adaptiveFormats`);
           successTracker.recordSuccess('invidious', instance);
-          return { url: best.url, quality: best.quality, isDash: false };
+          
+          // Extract duration if available
+          let duration = null;
+          let durationSeconds = null;
+          if (data.lengthSeconds) {
+            durationSeconds = Math.round(data.lengthSeconds);
+            const minutes = Math.floor(durationSeconds / 60);
+            const seconds = durationSeconds % 60;
+            duration = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+          }
+          
+          return { 
+            url: best.url, 
+            quality: best.quality, 
+            isDash: false,
+            duration: duration,
+            durationSeconds: durationSeconds
+          };
         }
       }
       
@@ -1461,7 +1572,24 @@ async function extractViaInvidious(youtubeKey) {
           const best = sorted[0];
           console.log(`  ✓ [Invidious] ${instance}: got ${best.qualityLabel || 'unknown'} from formatStreams`);
           successTracker.recordSuccess('invidious', instance);
-          return { url: best.url, quality: best.qualityLabel || 'unknown', isDash: false };
+          
+          // Extract duration if available
+          let duration = null;
+          let durationSeconds = null;
+          if (data.lengthSeconds) {
+            durationSeconds = Math.round(data.lengthSeconds);
+            const minutes = Math.floor(durationSeconds / 60);
+            const seconds = durationSeconds % 60;
+            duration = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+          }
+          
+          return { 
+            url: best.url, 
+            quality: best.qualityLabel || 'unknown', 
+            isDash: false,
+            duration: duration,
+            durationSeconds: durationSeconds
+          };
         }
       }
       
@@ -1575,6 +1703,19 @@ async function extractViaYtDlp(youtubeKey) {
     // 3. Limit to 1080p max for reasonable bandwidth
     // 4. Use --get-url to get direct streamable URL (not download)
     // Anti-blocking: user-agent, sleep intervals, proper format selection, automated tokens
+    // First get metadata (duration, etc.) then get URL
+    const ytDlpInfoCommand = `yt-dlp ${useProxy} \
+      --no-download \
+      --no-warnings \
+      --quiet \
+      --no-playlist \
+      --dump-json \
+      --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+      --sleep-interval 2 \
+      --socket-timeout 10 \
+      --extractor-args "youtube:player_client=android,web" \
+      "https://www.youtube.com/watch?v=${youtubeKey}"`;
+    
     const ytDlpCommand = `yt-dlp ${useProxy} \
       --no-download \
       --no-warnings \
@@ -1590,7 +1731,38 @@ async function extractViaYtDlp(youtubeKey) {
     
     console.log(`  [yt-dlp] Running extraction (proxy: ${proxyAvailable ? 'enabled' : 'disabled'})...`);
     
-    // Execute yt-dlp with timeout
+    // First get video metadata (duration, etc.)
+    let videoDuration = null;
+    let videoDurationSeconds = null;
+    try {
+      const infoExecPromise = execAsync(ytDlpInfoCommand, {
+        timeout: 8000,
+        maxBuffer: 10 * 1024 * 1024
+      });
+      const infoTimeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('yt-dlp info timeout')), 8000)
+      );
+      
+      try {
+        const { stdout: infoStdout } = await Promise.race([infoExecPromise, infoTimeoutPromise]);
+        if (infoStdout) {
+          const videoInfo = JSON.parse(infoStdout);
+          if (videoInfo.duration) {
+            videoDurationSeconds = Math.round(videoInfo.duration);
+            const minutes = Math.floor(videoDurationSeconds / 60);
+            const seconds = videoDurationSeconds % 60;
+            videoDuration = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+          }
+        }
+      } catch (infoError) {
+        // Info extraction failed, continue without duration
+        console.log(`  [yt-dlp] Could not extract duration: ${infoError.message}`);
+      }
+    } catch (infoError) {
+      // Ignore info extraction errors, continue with URL extraction
+    }
+    
+    // Execute yt-dlp with timeout to get URL
     const execPromise = execAsync(ytDlpCommand, {
       timeout: 12000,
       maxBuffer: 10 * 1024 * 1024 // 10MB buffer
@@ -1711,11 +1883,13 @@ async function extractViaYtDlp(youtubeKey) {
     console.log(`  [yt-dlp] ✓ Got streamable URL (${duration}ms, proxy: ${gluetunProxy ? 'yes' : 'no'})`);
     successTracker.recordSuccess('ytdlp', 'extraction');
     
-    // Return URL with quality info (yt-dlp format selection ensures good quality)
+    // Return URL with quality info and metadata (yt-dlp format selection ensures good quality)
     return {
       url: url,
       quality: 'best', // yt-dlp selects best available up to 1080p
-      isDash: url.includes('.mpd') || url.includes('manifest')
+      isDash: url.includes('.mpd') || url.includes('manifest'),
+      duration: videoDuration, // Format: "2:34"
+      durationSeconds: videoDurationSeconds // Total seconds
     };
     
   } catch (error) {
@@ -2391,11 +2565,23 @@ async function multiPassSearch(tmdbMeta) {
     
     if (bestOverall) {
       console.log(`✓ Best match from ${bestOverall.country.toUpperCase()}, score: ${bestOverall.score.toFixed(2)}`);
+      
+      // Extract duration from iTunes (trackTimeMillis is in milliseconds)
+      let duration = null;
+      if (bestOverall.item.trackTimeMillis) {
+        const seconds = Math.round(bestOverall.item.trackTimeMillis / 1000);
+        const minutes = Math.floor(seconds / 60);
+        const remainingSeconds = seconds % 60;
+        duration = `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+      }
+      
       return {
         found: true,
         previewUrl: bestOverall.item.previewUrl,
         trackId: bestOverall.item.trackId || bestOverall.item.collectionId,
-        country: bestOverall.country
+        country: bestOverall.country,
+        duration: duration, // Format: "2:34"
+        durationSeconds: bestOverall.item.trackTimeMillis ? Math.round(bestOverall.item.trackTimeMillis / 1000) : null
       };
     }
     
@@ -2511,8 +2697,8 @@ function setCache(imdbId, data) {
   try {
     const startTime = Date.now();
     const stmt = db.prepare(`
-      INSERT INTO cache (imdb_id, preview_url, track_id, country, youtube_key, source_type, source, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO cache (imdb_id, preview_url, track_id, country, youtube_key, source_type, source, quality, duration, duration_seconds, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(imdb_id) DO UPDATE SET
         preview_url = excluded.preview_url,
         track_id = excluded.track_id,
@@ -2520,6 +2706,9 @@ function setCache(imdbId, data) {
         youtube_key = excluded.youtube_key,
         source_type = excluded.source_type,
         source = excluded.source,
+        quality = excluded.quality,
+        duration = excluded.duration,
+        duration_seconds = excluded.duration_seconds,
         timestamp = excluded.timestamp
     `);
     stmt.run(
@@ -2530,6 +2719,9 @@ function setCache(imdbId, data) {
       cacheData.youtube_key || null,
       sourceType,
       cacheData.source || null,
+      cacheData.quality || null,
+      cacheData.duration || null,
+      cacheData.durationSeconds || null,
       timestamp
     );
     const duration = Date.now() - startTime;
@@ -2555,12 +2747,20 @@ async function resolvePreview(imdbId, type) {
     if (cached.preview_url) {
       const sourceType = cached.source_type || 'unknown';
       console.log(`Cache hit: returning cached ${sourceType} preview (validated)`);
+      
+      // Get TMDB metadata for cached entries to include trailer metadata
+      const tmdbMeta = await getTMDBMetadata(imdbId, type);
+      
       return {
         found: true,
         source: cached.source || (sourceType === 'itunes' ? 'itunes' : sourceType === 'archive' ? 'archive' : 'youtube'),
         previewUrl: cached.preview_url,
         trackId: cached.track_id,
-        country: cached.country
+        country: cached.country,
+        quality: cached.quality || null,
+        duration: cached.duration || null,
+        durationSeconds: cached.durationSeconds || null,
+        tmdbMeta: tmdbMeta // Include TMDB metadata for enrichment
       };
     }
     // If cache exists but has no preview_url, don't use negative cache - always search again
@@ -2630,11 +2830,19 @@ async function resolvePreview(imdbId, type) {
               preview_url: itunesResult.previewUrl,
               country: itunesResult.country || 'us',
               youtube_key: tmdbMeta.youtubeTrailerKey || null,
-              source: 'itunes'
+              source: 'itunes',
+              quality: '480p',
+              duration: itunesResult.duration || null,
+              durationSeconds: itunesResult.durationSeconds || null
             });
             console.log(`✓ Found iTunes preview: ${itunesResult.previewUrl}`);
             successTracker.recordSourceSuccess('itunes');
-            return { ...itunesResult, source: 'itunes', quality: '480p' };
+            return { 
+              ...itunesResult, 
+              source: 'itunes', 
+              quality: '480p',
+              tmdbMeta: tmdbMeta
+            };
           } else {
             const duration = Date.now() - startTime;
             sourceResponseTimes.recordTime('itunes', duration);
@@ -2662,7 +2870,10 @@ async function resolvePreview(imdbId, type) {
               preview_url: pipedUrl,
               country: 'yt',
               youtube_key: tmdbMeta.youtubeTrailerKey,
-              source: 'youtube'
+              source: 'youtube',
+              quality: quality,
+              duration: typeof pipedResult === 'object' ? pipedResult.duration : null,
+              durationSeconds: typeof pipedResult === 'object' ? pipedResult.durationSeconds : null
             });
             console.log(`✓ Got URL from Piped`);
             successTracker.recordSourceSuccess('piped');
@@ -2672,7 +2883,10 @@ async function resolvePreview(imdbId, type) {
               previewUrl: pipedUrl,
               youtubeKey: tmdbMeta.youtubeTrailerKey,
               country: 'yt',
-              quality: quality
+              quality: quality,
+              duration: typeof pipedResult === 'object' ? pipedResult.duration : null,
+              durationSeconds: typeof pipedResult === 'object' ? pipedResult.durationSeconds : null,
+              tmdbMeta: tmdbMeta
             };
           } else {
             const duration = Date.now() - startTime;
@@ -2700,7 +2914,10 @@ async function resolvePreview(imdbId, type) {
               preview_url: ytdlpResult.url,
               country: 'yt',
               youtube_key: tmdbMeta.youtubeTrailerKey,
-              source: 'youtube'
+              source: 'youtube',
+              quality: quality,
+              duration: ytdlpResult.duration || null,
+              durationSeconds: ytdlpResult.durationSeconds || null
             });
             console.log(`✓ Got URL from yt-dlp`);
             successTracker.recordSourceSuccess('ytdlp');
@@ -2710,7 +2927,10 @@ async function resolvePreview(imdbId, type) {
               previewUrl: ytdlpResult.url,
               youtubeKey: tmdbMeta.youtubeTrailerKey,
               country: 'yt',
-              quality: quality
+              quality: quality,
+              duration: ytdlpResult.duration || null,
+              durationSeconds: ytdlpResult.durationSeconds || null,
+              tmdbMeta: tmdbMeta
             };
           } else {
             const duration = Date.now() - startTime;
@@ -2739,7 +2959,10 @@ async function resolvePreview(imdbId, type) {
               preview_url: invidiousUrl,
               country: 'yt',
               youtube_key: tmdbMeta.youtubeTrailerKey,
-              source: 'youtube'
+              source: 'youtube',
+              quality: quality,
+              duration: typeof invidiousResult === 'object' ? invidiousResult.duration : null,
+              durationSeconds: typeof invidiousResult === 'object' ? invidiousResult.durationSeconds : null
             });
             console.log(`✓ Got URL from Invidious`);
             successTracker.recordSourceSuccess('invidious');
@@ -2749,7 +2972,10 @@ async function resolvePreview(imdbId, type) {
               previewUrl: invidiousUrl,
               youtubeKey: tmdbMeta.youtubeTrailerKey,
               country: 'yt',
-              quality: quality
+              quality: quality,
+              duration: typeof invidiousResult === 'object' ? invidiousResult.duration : null,
+              durationSeconds: typeof invidiousResult === 'object' ? invidiousResult.durationSeconds : null,
+              tmdbMeta: tmdbMeta
             };
           } else {
             const duration = Date.now() - startTime;
@@ -2772,7 +2998,10 @@ async function resolvePreview(imdbId, type) {
               preview_url: archiveUrl,
               country: 'archive',
               youtube_key: tmdbMeta.youtubeTrailerKey || null,
-              source: 'archive'
+              source: 'archive',
+              quality: quality,
+              duration: typeof archiveResult === 'object' ? archiveResult.duration : null,
+              durationSeconds: typeof archiveResult === 'object' ? archiveResult.durationSeconds : null
             });
             console.log(`✓ Got URL from Internet Archive`);
             successTracker.recordSourceSuccess('archive');
@@ -2781,7 +3010,10 @@ async function resolvePreview(imdbId, type) {
               source: 'archive',
               previewUrl: archiveUrl,
               country: 'archive',
-              quality: quality
+              quality: quality,
+              duration: typeof archiveResult === 'object' ? archiveResult.duration : null,
+              durationSeconds: typeof archiveResult === 'object' ? archiveResult.durationSeconds : null,
+              tmdbMeta: tmdbMeta
             };
           } else {
             const duration = Date.now() - startTime;
@@ -2967,13 +3199,61 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       
       if (!res.headersSent) {
         try {
-          const responseData = {
-            streams: [{
-              name: streamName,
-              title: streamTitle,
-              url: finalUrl
-            }]
-          };
+      // Build enriched metadata
+      const metadata = {};
+      
+      // Duration
+      if (result.duration) {
+        metadata.duration = result.duration; // Format: "2:34"
+      }
+      if (result.durationSeconds) {
+        metadata.durationSeconds = result.durationSeconds;
+      }
+      
+      // Quality
+      if (result.quality) {
+        metadata.quality = result.quality; // e.g., "1080p", "720p", "best"
+      }
+      
+      // Trailer type and metadata from TMDB
+      if (result.tmdbMeta && result.tmdbMeta.trailerMetadata) {
+        const trailerMeta = result.tmdbMeta.trailerMetadata;
+        metadata.type = trailerMeta.type || 'Trailer'; // Trailer, Teaser, Clip
+        metadata.official = trailerMeta.official || false;
+        if (trailerMeta.publishedAt) {
+          metadata.publishedAt = trailerMeta.publishedAt; // ISO date string
+        }
+        if (trailerMeta.name) {
+          metadata.trailerName = trailerMeta.name; // Full trailer name
+        }
+        if (trailerMeta.iso_639_1) {
+          metadata.language = trailerMeta.iso_639_1; // Language code (e.g., "en")
+        }
+        if (trailerMeta.iso_3166_1) {
+          metadata.region = trailerMeta.iso_3166_1; // Country code (e.g., "US")
+        }
+      }
+      
+      // Source information
+      metadata.source = result.source; // itunes, youtube, archive
+      if (result.country) {
+        metadata.country = result.country.toUpperCase();
+      }
+      
+      // DASH manifest indicator
+      if (isDashManifest) {
+        metadata.isDash = true;
+        metadata.adaptive = true; // DASH supports adaptive streaming
+      }
+      
+      const responseData = {
+        streams: [{
+          name: streamName,
+          title: streamTitle,
+          url: finalUrl,
+          ...metadata // Spread all metadata into stream object
+        }]
+      };
           console.log(`  [DEBUG] Calling res.json() with data:`, JSON.stringify(responseData).substring(0, 100));
           
           res.json(responseData);
