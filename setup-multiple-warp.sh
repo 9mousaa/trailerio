@@ -275,15 +275,23 @@ update_env_file() {
     sed -i.bak "/^WIREGUARD_ENDPOINT_PORT_${instance_num}=/d" "$ENV_FILE" 2>/dev/null || true
     rm -f "${ENV_FILE}.bak"
     
-    # Append new values
+    # Append new values (ensure no trailing newlines in values)
+    # Clean all values one more time before writing
+    private_key=$(echo -n "$private_key" | tr -d '\n\r\t ')
+    public_key=$(echo -n "$public_key" | tr -d '\n\r\t ')
+    preshared_key=$(echo -n "$preshared_key" | tr -d '\n\r\t ')
+    address=$(echo -n "$address" | tr -d '\n\r\t ')
+    endpoint_ip=$(echo -n "$endpoint_ip" | tr -d '\n\r\t ')
+    endpoint_port=$(echo -n "$endpoint_port" | tr -d '\n\r\t ')
+    
     echo "" >> "$ENV_FILE"
     echo "# Cloudflare Warp Instance ${instance_num}" >> "$ENV_FILE"
-    echo "WIREGUARD_PRIVATE_KEY_${instance_num}=${private_key}" >> "$ENV_FILE"
-    echo "WIREGUARD_ADDRESSES_${instance_num}=${address}" >> "$ENV_FILE"
-    echo "WIREGUARD_PUBLIC_KEY_${instance_num}=${public_key}" >> "$ENV_FILE"
-    echo "WIREGUARD_PRESHARED_KEY_${instance_num}=${preshared_key}" >> "$ENV_FILE"
-    echo "WIREGUARD_ENDPOINT_IP_${instance_num}=${endpoint_ip}" >> "$ENV_FILE"
-    echo "WIREGUARD_ENDPOINT_PORT_${instance_num}=${endpoint_port}" >> "$ENV_FILE"
+    printf "WIREGUARD_PRIVATE_KEY_%s=%s\n" "${instance_num}" "${private_key}" >> "$ENV_FILE"
+    printf "WIREGUARD_ADDRESSES_%s=%s\n" "${instance_num}" "${address}" >> "$ENV_FILE"
+    printf "WIREGUARD_PUBLIC_KEY_%s=%s\n" "${instance_num}" "${public_key}" >> "$ENV_FILE"
+    printf "WIREGUARD_PRESHARED_KEY_%s=%s\n" "${instance_num}" "${preshared_key}" >> "$ENV_FILE"
+    printf "WIREGUARD_ENDPOINT_IP_%s=%s\n" "${instance_num}" "${endpoint_ip}" >> "$ENV_FILE"
+    printf "WIREGUARD_ENDPOINT_PORT_%s=%s\n" "${instance_num}" "${endpoint_port}" >> "$ENV_FILE"
 }
 
 # Main execution
