@@ -2939,11 +2939,13 @@ async function resolvePreview(imdbId, type) {
   
   // HIGH-VALUE DIRECT TRAILER SOURCES (work independently, don't need TMDB URLs)
   // These use IMDb ID or title/year to find trailers directly via yt-dlp
-  // Priority: IMDb (we have IMDb ID!) > Apple Trailers > IVA > RottenTomatoes > Metacritic > Allocine > Moviepilot
+  // Priority: IMDb (we have IMDb ID!) > Apple Trailers
+  // IVA, RottenTomatoes, Metacritic, Allocine, Moviepilot - DISABLED (broken/not supported)
   
   if (imdbId && imdbId.startsWith('tt')) {
     availableSources.push('imdb_trailer'); // IMDb trailers - we have IMDb ID! (highest priority)
-    availableSources.push('iva_trailer'); // Internet Video Archive - historically used by many apps
+    // IVA disabled - redirects to fabricdata.com which yt-dlp doesn't support
+    // availableSources.push('iva_trailer');
   }
   
   // These work with title/year (good fallbacks for when IMDb doesn't have trailers)
@@ -2985,9 +2987,9 @@ async function resolvePreview(imdbId, type) {
     if (source === 'archive') defaultTimeout = 8000; // Archive: 8s (needs time for metadata fetch)
     if (source === 'ytdlp') defaultTimeout = 18000; // yt-dlp: 18s (proxy adds latency, extraction takes 10-15s)
     if (source === 'itunes') defaultTimeout = 5000; // iTunes: usually fast, 5s max
-    if (source === 'imdb_trailer' || source === 'iva_trailer') defaultTimeout = 12000; // IMDb/IVA: 12s (yt-dlp extraction via proxy)
-    if (source === 'appletrailers' || source === 'allocine' || source === 'vimeo' || source === 'dailymotion') defaultTimeout = 10000; // Other yt-dlp sources: 10s
-    if (source === 'rottentomatoes' || source === 'metacritic' || source === 'moviepilot') defaultTimeout = 10000; // Review sites: 10s (yt-dlp extraction)
+    if (source === 'imdb_trailer') defaultTimeout = 12000; // IMDb: 12s (yt-dlp extraction via proxy)
+    if (source === 'appletrailers' || source === 'vimeo' || source === 'dailymotion') defaultTimeout = 10000; // Other yt-dlp sources: 10s
+    // IVA, RottenTomatoes, Metacritic, Allocine, Moviepilot - DISABLED (broken/not supported)
     
     const sourceTimeout = sourceResponseTimes.getTimeout(source, defaultTimeout);
     
@@ -3254,40 +3256,11 @@ async function resolvePreview(imdbId, type) {
             return null;
           }
         } else if (source === 'iva_trailer') {
-          // Internet Video Archive (IVA) - resolve URL and extract
-          const ivaUrl = await resolveIvaUrl(tmdbMeta, imdbId);
-          console.log(`  [IVA] Resolved URL: ${ivaUrl}`);
-          const ivaResult = await extractViaYtDlpGeneric(ivaUrl, 'InternetVideoArchive');
-          if (ivaResult && ivaResult.url) {
-            const duration = Date.now() - startTime;
-            sourceResponseTimes.recordTime('ytdlp', duration);
-            
-            const quality = ivaResult.quality || 'best';
-            qualityTracker.recordQuality('iva', quality);
-            
-            setCache(imdbId, {
-              track_id: null,
-              preview_url: ivaResult.url,
-              country: 'iva',
-              youtube_key: null,
-              source: 'iva'
-            });
-            console.log(`✓ Got URL from Internet Video Archive`);
-            successTracker.recordSourceSuccess('iva');
-            return {
-              found: true,
-              source: 'iva',
-              previewUrl: ivaResult.url,
-              youtubeKey: null,
-              country: 'iva',
-              quality: quality
-            };
-          } else {
-            const duration = Date.now() - startTime;
-            sourceResponseTimes.recordTime('ytdlp', duration);
-            successTracker.recordSourceFailure('iva');
-            return null;
-          }
+          // Internet Video Archive (IVA) - DISABLED
+          // IVA redirects to fabricdata.com which yt-dlp doesn't support (401 errors)
+          console.log(`  Skipping IVA: disabled (redirects to unsupported site)`);
+          successTracker.recordSourceFailure('iva');
+          return null;
         } else if (source === 'rottentomatoes') {
           // RottenTomatoes - DISABLED (not supported by yt-dlp)
           const rtUrl = await resolveRottenTomatoesSlug(tmdbMeta, imdbId);
